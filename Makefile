@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel
 
 
 dotenv: ## Initialize .env file
@@ -68,6 +68,15 @@ environment: uv uvlock venv ## Create environment
 	@echo "💡 Quick start commands:"
 	@echo "   👉  To activate: source .venv/bin/activate"
 	@echo "✨ Happy coding with NanoGPT!"
+
+
+jupyter-kernel: venv ## Register environment as Jupyter kernel
+	@echo "📝 Registering Jupyter kernel..."
+	@$(uv) pip install ipykernel
+	@$(uv) run python -m ipykernel install --user --name=nanogpt --display-name="NanoGPT"
+	@echo "✅ Jupyter kernel 'NanoGPT' registered!"
+	@echo "💡 Select 'NanoGPT' as your kernel in Jupyter notebooks"
+	@echo
 
 
 black-formatting:
