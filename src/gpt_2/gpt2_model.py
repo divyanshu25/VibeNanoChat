@@ -33,6 +33,11 @@ class GPTConfig:
     batch_size: int = 16  # Training batch size
     total_batch_size: int = 524288  # 2^19
 
+    # Intent discovery parameters
+    n_intents: int = 16  # Number of discrete intents to learn (codebook size)
+    use_intent: bool = True  # Whether to use intent embeddings
+    intent_temperature: float = 1.0  # Temperature for intent sampling during training
+
 
 class GPT(nn.Module):
     """
@@ -58,9 +63,9 @@ class GPT(nn.Module):
         # Define the main transformer components
         self.transformer = nn.ModuleDict(
             dict(
-                # Token embeddings: convert token indices to dense vectors
+                # Token embeddings: convert token indices to dense vectors (WHAT to say)
                 wte=nn.Embedding(config.vocab_size, config.n_embed),
-                # Position embeddings: add positional information to tokens
+                # Position embeddings: add positional information to tokens (WHEN to say it)
                 wpe=nn.Embedding(config.block_size, config.n_embed),
                 # Stack of transformer blocks (the core of the model)
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
@@ -69,11 +74,23 @@ class GPT(nn.Module):
             )
         )
 
+        # Intent embeddings: learnable intents that capture WHY to say something
+        # This is a codebook of discrete intents that the model learns to use
+        if config.use_intent:
+            self.intent_codebook = nn.Embedding(config.n_intents, config.n_embed)
+            # Intent predictor: learns to predict which intent to use based on context
+            # This allows unsupervised discovery of intents from the data
+            self.intent_predictor = nn.Sequential(
+                nn.Linear(config.n_embed, config.n_embed // 2),
+                nn.GELU(),
+                nn.Linear(config.n_embed // 2, config.n_intents),
+            )
+
         # Language modeling head: projects hidden states to vocabulary logits
         # Note: We'll tie the weights with the embedding layer
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
 
-        # Weight sharing scheme: tie input and output embeddings
+        # Weight Tying scheme: tie input and output embeddings
         # This is a common technique in language models to reduce parameters
         # and improve performance
         self.transformer.wte.weight = self.lm_head.weight
@@ -156,13 +173,15 @@ class GPT(nn.Module):
         )
         return optimizer
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, intent_idx=None):
         """
         Forward pass through the GPT model.
 
         Args:
             idx (torch.Tensor): Input token indices of shape (batch_size, sequence_length)
             targets (torch.Tensor, optional): Target tokens for loss computation
+            intent_idx (torch.Tensor, optional): Intent indices of shape (batch_size,)
+                If None and use_intent=True, intents are predicted from the input
 
         Returns:
             tuple: (logits, loss) where:
@@ -180,14 +199,47 @@ class GPT(nn.Module):
         # Create position indices for the sequence
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # Shape (T,)
 
-        # Get token embeddings: convert token indices to dense vectors
+        # Get token embeddings: convert token indices to dense vectors (WHAT to say)
         tok_emb = self.transformer.wte(idx)  # Shape: (B, T, n_embed) # type: ignore
 
-        # Get position embeddings: add positional information
+        # Get position embeddings: add positional information (WHEN to say it)
         pos_emb = self.transformer.wpe(pos)  # Shape: (T, n_embed) # type: ignore
 
-        # Combine token and position embeddings
-        x = tok_emb + pos_emb  # Shape: (B, T, n_embed)
+        # Discover and apply intent embeddings (WHY to say it)
+        if self.config.use_intent:
+            if intent_idx is None:
+                # Unsupervised intent discovery: predict intent from initial embeddings
+                # Use the mean of token embeddings as a sequence representation
+                seq_repr = tok_emb.mean(dim=1)  # Shape: (B, n_embed)
+
+                # Predict intent logits
+                intent_logits = self.intent_predictor(seq_repr)  # Shape: (B, n_intents)
+
+                if self.training:
+                    # During training: sample from the distribution (Gumbel-Softmax for differentiability)
+                    intent_probs = F.gumbel_softmax(
+                        intent_logits, tau=self.config.intent_temperature, hard=True
+                    )  # Shape: (B, n_intents)
+                    # Get intent embedding using soft assignment
+                    intent_emb = torch.matmul(
+                        intent_probs, self.intent_codebook.weight
+                    )  # Shape: (B, n_embed)
+                else:
+                    # During inference: use argmax (deterministic)
+                    intent_idx = torch.argmax(intent_logits, dim=-1)  # Shape: (B,)
+                    intent_emb = self.intent_codebook(intent_idx)  # Shape: (B, n_embed)
+            else:
+                # Use provided intent indices
+                intent_emb = self.intent_codebook(intent_idx)  # Shape: (B, n_embed)
+
+            # Broadcast intent across all positions in the sequence
+            intent_emb = intent_emb.unsqueeze(1)  # Shape: (B, 1, n_embed)
+
+            # Combine all three dimensions: WHAT + WHEN + WHY
+            x = tok_emb + pos_emb + intent_emb  # Shape: (B, T, n_embed)
+        else:
+            # Original behavior: only WHAT + WHEN
+            x = tok_emb + pos_emb  # Shape: (B, T, n_embed)
 
         # Pass through all transformer blocks
         for block in self.transformer.h:
@@ -288,9 +340,62 @@ class GPT(nn.Module):
         print(f"All parameters initialized and match in size")
         return model
 
+    def get_intent_distribution(self, text_samples, device="cpu"):
+        """
+        Analyze which intents the model assigns to given text samples.
+        This helps understand what the model has learned about "why" to say things.
+
+        Args:
+            text_samples (list of str): Text samples to analyze
+            device (str): Device to run on
+
+        Returns:
+            dict: Intent statistics including distribution and per-sample assignments
+        """
+        if not self.config.use_intent:
+            return {"error": "Intent embeddings not enabled"}
+
+        enc = tiktoken.get_encoding("gpt2")
+        self.eval()
+
+        intent_assignments = []
+        intent_logits_list = []
+
+        with torch.no_grad():
+            for text in text_samples:
+                tokens = enc.encode(text)
+                tokens = torch.tensor(tokens, dtype=torch.long).unsqueeze(0).to(device)
+
+                # Get token embeddings and predict intent
+                tok_emb = self.transformer.wte(tokens)
+                seq_repr = tok_emb.mean(dim=1)
+                intent_logits = self.intent_predictor(seq_repr)
+                intent_idx = torch.argmax(intent_logits, dim=-1).item()
+
+                intent_assignments.append(intent_idx)
+                intent_logits_list.append(intent_logits.cpu().numpy())
+
+        # Calculate distribution
+        from collections import Counter
+
+        intent_counts = Counter(intent_assignments)
+
+        return {
+            "assignments": intent_assignments,
+            "distribution": dict(intent_counts),
+            "logits": intent_logits_list,
+            "samples": text_samples,
+        }
+
 
 def generate(
-    num_sequences, max_length, model, context, device, random_number_generator
+    num_sequences,
+    max_length,
+    model,
+    context,
+    device,
+    random_number_generator=None,
+    intent_idx=None,
 ):
     """
     Generate text sequences using the trained GPT model.
@@ -304,6 +409,10 @@ def generate(
         model (GPT): The trained GPT model
         context (str): Initial text context to start generation from
         device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
+        intent_idx (int or torch.Tensor, optional): Intent index(es) to use for generation.
+            If None, intents are predicted automatically.
+            If int, same intent used for all sequences.
+            If tensor of shape (num_sequences,), different intent per sequence.
     """
     # Initialize the tokenizer (GPT-2 uses byte-pair encoding)
     enc = tiktoken.get_encoding("gpt2")
@@ -316,6 +425,19 @@ def generate(
     tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
     x = tokens.to(device)
 
+    # Prepare intent indices if provided
+    if intent_idx is not None:
+        if isinstance(intent_idx, int):
+            # Single intent for all sequences
+            intent_indices = torch.full(
+                (num_sequences,), intent_idx, dtype=torch.long, device=device
+            )
+        else:
+            # Different intent per sequence
+            intent_indices = intent_idx.to(device)
+    else:
+        intent_indices = None
+
     # Set random seed for reproducible generation
     torch.manual_seed(42)
     if device == "cuda":
@@ -325,7 +447,7 @@ def generate(
     while x.size(1) < max_length:
         with torch.no_grad():
             # Get model predictions for next token
-            logits, _ = model(x)  # Shape: (B, T, vocab_size)
+            logits, _ = model(x, intent_idx=intent_indices)  # Shape: (B, T, vocab_size)
 
             # Only use the last token's predictions for next token
             logits = logits[:, -1, :]  # Shape: (B, vocab_size)
@@ -339,7 +461,9 @@ def generate(
 
             # Sample from the top-k distribution
             ix = torch.multinomial(
-                topk_probs, num_samples=1, generator=random_number_generator
+                topk_probs,
+                num_samples=1,
+                # generator=random_number_generator
             )  # Shape: (B, 1)
 
             # Get the actual token indices from the top-k indices
@@ -357,6 +481,34 @@ def generate(
     return all_decoded
 
 
+class DataLoaderLite:
+    def __init__(self, B, T):
+        with open("data/input.txt", "r") as f:
+            text = f.read()
+
+        self.B = B
+        self.T = T
+        import tiktoken
+
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens, dtype=torch.long)
+        print(f"Loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (self.B*self.T)} batches")
+        self.current_position = 0
+
+    def next_batch(self):
+        buf = self.tokens[
+            self.current_position : self.current_position + self.B * self.T + 1
+        ]
+        x = buf[:-1].view(self.B, self.T).to(device)
+        y = buf[1:].view(self.B, self.T).to(device)
+        self.current_position += self.B * self.T
+        if self.current_position + (self.B * self.T + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
+
+
 # Test the model when script is run directly
 if __name__ == "__main__":
     # Determine the best available device for computation
@@ -372,21 +524,36 @@ if __name__ == "__main__":
 
     # Create and initialize the model
 
-    model = GPT.from_pretrained("gpt2")
+    # model = GPT.from_pretrained("gpt2")
+    model = GPT(GPTConfig())
     print("Model loaded")
     model.eval()  # Set to evaluation mode (disables dropout, etc.)
     model.to(device)
 
-    context = "Hello, I'm a language model,"
-    start_time = time.time()
-    decoded = generate(
-        num_sequences=3,  # Generate 3 different sequences
-        max_length=50,  # Each sequence up to 30 tokens
-        model=model,
-        context=context,
-        device=device,
-    )
-    for decoded_seq in decoded:
-        print(">", decoded_seq)
-    end_time = time.time()
-    print(f"Time taken: {end_time - start_time} seconds")
+    dataloader = DataLoaderLite(B=4, T=32)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(2640):
+        x, y = dataloader.next_batch()
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        logits, loss = model(x, y)
+        loss.backward()
+        optimizer.step()
+        print(f"Step {i} | Loss: {loss.item()}")
+
+    # context = "Hello, I'm a language model,"
+    # start_time = time.time()
+    # decoded = generate(
+    #     num_sequences=5,  # Generate 3 different sequences
+    #     max_length=50,  # Each sequence up to 30 tokens
+    #     model=model,
+    #     context=context,
+    #     device=device,
+    #     # random_number_generator=torch.Generator(device=device),
+    # )
+    # for decoded_seq in decoded:
+    #     print(">", decoded_seq)
+    #     print("-"*100)
+    # end_time = time.time()
+    # print(f"Time taken: {end_time - start_time} seconds")
