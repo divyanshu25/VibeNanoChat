@@ -1,77 +1,57 @@
-# NanoGPT
+# 🚀 NanoGPT
 
-A clean, educational implementation of GPT-2 (124M parameters) trained on the OpenWebText dataset. This project demonstrates transformer-based language modeling with distributed training support.
+> A clean, educational implementation of GPT-2 (124M parameters) trained on the OpenWebText dataset. Learn how transformers work by building one yourself!
 
-## Features
+## ✨ What's Inside
 
-- **GPT-2 Architecture** (124M parameters): 12 layers, 12 heads, 768 embedding dimension
-- **Distributed Training**: Multi-GPU support with PyTorch DDP
-- **OpenWebText Dataset**: ~9B training tokens from web content
-- **Modern Training**: Mixed precision (bfloat16), gradient clipping, cosine learning rate schedule
-- **Experiment Tracking**: Weights & Biases integration
-- **Efficient Data Loading**: Memory-mapped binary files for fast I/O
+- **🧠 GPT-2 Architecture** (124M parameters): 12 layers, 12 attention heads, 768 dimensions of pure transformer magic
+- **⚡ Distributed Training**: Scale across multiple GPUs with PyTorch DDP
+- **📚 OpenWebText Dataset**: Train on ~9 billion tokens scraped from the web
+- **🎯 Modern Training Stack**: Mixed precision (bfloat16), gradient clipping, cosine LR scheduling
+- **📊 Experiment Tracking**: Built-in Weights & Biases integration
+- **💾 Efficient Data Loading**: Memory-mapped binary files for lightning-fast I/O
 
-## Project Structure
+## 🎬 Getting Started
 
-```
-NanoGPT/
-├── src/
-│   ├── gpt_2/
-│   │   ├── gpt2_model.py              # GPT-2 model implementation
-│   │   ├── trainer.py                 # Training loop and optimization
-│   │   ├── ddp.py                     # Distributed training launcher
-│   │   ├── open_webtext_dataloader.py # OpenWebText data loader
-│   │   ├── attention.py               # Multi-head self-attention
-│   │   ├── block.py                   # Transformer block
-│   │   ├── mlp.py                     # Feedforward network
-│   │   └── evaluator.py               # Model evaluation
-│   └── data/
-│       └── openwebtext/
-│           └── prepare.py             # Dataset preprocessing script
-├── Makefile                           # Convenient training commands
-├── pyproject.toml                     # Dependencies
-└── README.md
-```
-
-## Getting Started
-
-### 1. Clone and Setup Environment
+### 1. Clone & Setup
 
 ```bash
 git clone https://github.com/yourusername/NanoGPT.git
 cd NanoGPT
 ```
 
-### 2. Install Dependencies
+### 2. 🛠️ Install Dependencies
 
-This project uses [UV](https://github.com/astral-sh/uv) for dependency management:
+We use [UV](https://github.com/astral-sh/uv) because it's blazingly fast:
 
 ```bash
-# Full environment setup
+# 🎯 One command to rule them all
 make environment
 
-# Or step by step:
+# Or step by step if you're old school:
 make uv        # Install UV
 make uvlock    # Lock dependencies
 make venv      # Create virtual environment
 ```
 
-### 3. Prepare OpenWebText Dataset
+### 3. 📊 Prepare the OpenWebText Dataset
 
-Download and tokenize the OpenWebText dataset (~9B tokens):
+Time to download and tokenize ~9 billion tokens of internet wisdom:
 
 ```bash
 cd src/data/openwebtext
 uv run python prepare.py
 ```
 
-This will:
-- Download the OpenWebText dataset from HuggingFace
-- Tokenize with GPT-2 BPE encoding
-- Save to `/sensei-fs/users/divgoyal/openwebtext/` (or modify the path in `prepare.py`)
-- Output: `train.bin` (~17GB, 9B tokens) and `val.bin` (~8.5MB, 4M tokens)
+**What happens next:**
+- 📥 Downloads OpenWebText dataset from HuggingFace (~54GB raw)
+- 🔤 Tokenizes everything with GPT-2 BPE encoding
+- 💾 Saves to `/sensei-fs/users/divgoyal/openwebtext/` (update path as needed)
+- ✅ Creates: `train.bin` (~17GB, 9B tokens) and `val.bin` (~8.5MB, 4M tokens)
 
-### 4. Train the Model
+☕ Grab some coffee - this takes ~15-30 minutes depending on your connection!
+
+### 4. 🔥 Train the Model
 
 #### Single GPU Training
 
@@ -79,135 +59,141 @@ This will:
 python src/gpt_2/ddp.py
 ```
 
-#### Multi-GPU Training (Distributed Data Parallel)
+#### 🚄 Multi-GPU Training (Go Fast!)
 
 ```bash
-# Train with 8 GPUs
+# Train with 8 GPUs (recommended for speed)
 make ddp-train NGPUS=8
 
-# Or with 4 GPUs
+# Got 4 GPUs? No problem!
 make ddp-train NGPUS=4
 
-# Or directly with torchrun
+# Or go manual with torchrun:
 torchrun --standalone --nproc_per_node=8 src/gpt_2/ddp.py
 ```
 
-**Training Configuration:**
-- Batch size per GPU: 64
-- Sequence length: 1024 tokens
-- Total batch size: 524,288 tokens/step (2^19)
-- Max learning rate: 6e-4
-- Warmup steps: 715
-- Total steps: 17,234 (1 epoch over 9B tokens)
-- Optimizer: AdamW with weight decay 0.1
-- Gradient clipping: 1.0
+**⚙️ Training Configuration (The Sweet Spot):**
+- 📦 Batch size per GPU: 64
+- 📏 Sequence length: 1024 tokens
+- 🎯 Total batch size: 524,288 tokens/step (2^19, perfectly balanced as all things should be)
+- 🎓 Max learning rate: 6e-4 (with 715 warmup steps)
+- 🏃 Total steps: 17,234 (one full epoch over 9B tokens)
+- 💪 Optimizer: AdamW with weight decay 0.1
+- ✂️ Gradient clipping: 1.0 (keeps those gradients in check)
 
-## Training Hyperparameters
+## 🎛️ Configuration Deep Dive
 
 ### Model Config (GPT-2 124M)
 
 ```python
-block_size: 1024      # Context window
-vocab_size: 50257     # GPT-2 vocabulary
-n_layer: 12           # Transformer blocks
-n_head: 12            # Attention heads
-n_embed: 768          # Embedding dimension
+block_size: 1024      # Context window size
+vocab_size: 50257     # GPT-2 vocabulary (BPE)
+n_layer: 12           # Transformer blocks (the secret sauce)
+n_head: 12            # Attention heads (parallel thoughts)
+n_embed: 768          # Embedding dimension (the hidden state)
 ```
 
 ### Training Config
 
 ```python
-max_learning_rate: 6e-4
-min_learning_rate: 6e-5  # 10% of max
-warmup_steps: 715
-total_batch_size: 524288  # tokens per step
-weight_decay: 0.10
-gradient_clip_norm: 1.0
+max_learning_rate: 6e-4          # Peak LR (after warmup)
+min_learning_rate: 6e-5          # Final LR (10% of max)
+warmup_steps: 715                # Linear warmup phase
+total_batch_size: 524288         # Tokens per optimization step
+weight_decay: 0.10               # L2 regularization
+gradient_clip_norm: 1.0          # Gradient explosion prevention
 ```
 
-## Monitoring Training
+## 📈 Monitoring Your Training
 
-Training metrics are logged to Weights & Biases:
-- Training loss
-- Learning rate schedule
-- Tokens per second (throughput)
-- Gradient norms
+Training metrics auto-log to **Weights & Biases**:
+- 📉 Training loss (watch it go down!)
+- 📊 Learning rate schedule (that beautiful cosine decay)
+- ⚡ Tokens per second (throughput metrics)
+- 📐 Gradient norms (stability indicators)
 
-View your runs at: https://wandb.ai/
+👉 View your runs at: https://wandb.ai/
 
-## Utilities
+## 🛠️ Handy Commands
 
 ```bash
-# Check GPU status
+# 📊 Check GPU status
 make gpu-status
 
-# Kill all GPU processes
+# 🔪 Kill all GPU processes (nuclear option)
 make kill-gpu
 
-# Keep GPUs warm (for testing)
+# 🔥 Keep GPUs warm for testing
 make gpu-hot GPUS=0,1,2
 ```
 
-## Dataset Details
+## 📚 Dataset Details
 
-**OpenWebText**
-- Source: [Skylion007/openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext)
-- Size: ~8M documents, ~9B tokens
-- Processing: GPT-2 BPE tokenization with EOT tokens
-- Storage: Binary format (uint16) for efficient loading
+**OpenWebText: The Internet in a Box**
+- 🔗 Source: [Skylion007/openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext)
+- 📦 Size: ~8 million documents, ~9 billion tokens
+- 🔤 Processing: GPT-2 BPE tokenization with end-of-text markers
+- 💾 Storage: Efficient binary format (uint16) for blazing-fast loading
 
-## Performance
+## ⚡ Performance Benchmarks
 
-Expected throughput on modern GPUs:
-- A100 80GB (8x): ~350K tokens/sec
-- H100 80GB (8x): ~600K tokens/sec
+**Expected Throughput** (your mileage may vary):
 
-Total training time (1 epoch):
-- 8x A100: ~7 hours
-- 8x H100: ~4 hours
+| Hardware | Tokens/Second | Time per Epoch |
+|----------|---------------|----------------|
+| 8x A100 80GB | ~350K | ~7 hours ⏰ |
+| 8x H100 80GB | ~600K | ~4 hours 🚀 |
 
-## Model Architecture
+*Training 9 billion tokens has never been this fast!*
 
-```
-GPT-2 (124M parameters)
-├── Token Embedding (50257 × 768)
-├── Position Embedding (1024 × 768)
-├── 12 × Transformer Block
-│   ├── Layer Norm
-│   ├── Multi-Head Attention (12 heads)
-│   ├── Layer Norm
-│   └── MLP (768 → 3072 → 768, GELU)
-├── Final Layer Norm
-└── Language Model Head (768 → 50257)
-```
+## 💡 Pro Tips
 
-## Tips
+1. **🎮 Memory Management**: With batch_size=64 and block_size=1024, budget ~40GB VRAM per GPU
+2. **🔄 Gradient Accumulation**: Auto-calculated based on GPU count and target batch size (we do the math for you!)
+3. **💾 Checkpointing**: Models saved periodically during training (no progress lost!)
+4. **⚡ Mixed Precision**: Uses bfloat16 for 2x speedup and 50% memory savings
 
-1. **Memory Management**: With batch_size=64 and block_size=1024, each GPU needs ~40GB VRAM
-2. **Gradient Accumulation**: Automatically calculated based on GPU count and target batch size
-3. **Checkpointing**: Models are saved periodically during training
-4. **Mixed Precision**: Uses bfloat16 for faster training and reduced memory
+## 🔧 Troubleshooting
 
-## Troubleshooting
+**😱 Out of Memory Error?**
+- Turn down `batch_size` in `gpt2_model.py`
+- The system auto-adjusts gradient accumulation steps (smart!)
 
-**Out of Memory Error:**
-- Reduce `batch_size` in `gpt2_model.py`
-- The system will automatically adjust gradient accumulation steps
+**🐌 Data Loading Slow?**
+- Network filesystems don't support mmap (it's okay, we have a fallback)
+- Pro tip: Copy data to local SSD for maximum zoom
 
-**Slow Data Loading:**
-- The dataloader uses fallback loading on network filesystems
-- For best performance, copy data to local SSD
+**🤔 Distributed Training Not Working?**
+- Check NCCL installation: `python -c "import torch; print(torch.cuda.nccl.version())"`
+- Verify GPUs visible: `nvidia-smi`
+- Make sure all GPUs are the same model (mixed GPU types = sadness)
 
-**Distributed Training Issues:**
-- Ensure NCCL is properly installed
-- Check that all GPUs are visible: `nvidia-smi`
+## 🎓 Learning Resources
 
-## Acknowledgements
+Want to understand what's happening under the hood?
 
-- Inspired by [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT)
-- Based on OpenAI's GPT-2 architecture
-- Dataset: [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext)
+- 📺 [Andrej Karpathy's GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY)
+- 📄 [Attention is All You Need](https://arxiv.org/abs/1706.03762) (the paper that started it all)
+- 📚 [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/)
 
-## License
+## 🙏 Acknowledgements
 
-MIT License
+Standing on the shoulders of giants:
+
+- Inspired by [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT) - the OG educational GPT
+- Based on OpenAI's GPT-2 architecture - thank you for open-sourcing!
+- Dataset: [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) - internet gold
+
+## 📜 License
+
+MIT License - Go build something cool!
+
+---
+
+<div align="center">
+
+**Built with ❤️ for learning and experimentation**
+
+If this helped you understand transformers better, ⭐ star the repo!
+
+</div>
