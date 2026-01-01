@@ -1,93 +1,212 @@
 # NanoGPT
 
-NanoGPT is a minimal, educational implementation of a transformer-based language model, inspired by ChatGPT. This project demonstrates how to train a basic transformer from scratch to replicate conversational AI behavior on your own data.
+A clean, educational implementation of GPT-2 (124M parameters) trained on the OpenWebText dataset. This project demonstrates transformer-based language modeling with distributed training support.
 
 ## Features
 
-- Simple, readable codebase for learning and experimentation
-- Implements the core transformer architecture (multi-head self-attention, feedforward, etc.)
-- Trains on plain text data to generate ChatGPT-like responses
-- Easily extensible for research and tinkering
-
-## Getting Started
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/nanogpt.git
-cd nanogpt
-```
-
-### 2. Set Up Your Environment (with UV)
-
-This project uses [UV](https://github.com/astral-sh/uv) for dependency management and virtual environments.
-
-#### Using the Makefile
-
-The Makefile provides convenient targets for setup:
-
-- `make uv` – Installs UV if not already present
-- `make uvlock` – Syncs project dependencies and creates a `uv.lock` file
-- `make dotenv` – Initializes a `.env` file from `.env.template`
-- `make venv` – Sets up the Python virtual environment and installs dependencies
-- `make environment` – Runs all the above steps in order
-
-**Quickstart:**
-
-```bash
-make environment
-source .venv/bin/activate
-```
-
-### 3. Prepare Your Data
-
-- Place your training data (plain text, one conversation per line) in a file, e.g., `data/train.txt`.
-- You can use any text dataset, but conversational data works best for ChatGPT-like behavior.
-
-### 4. Train the Model
-
-```bash
-python src/train.py --data_path data/train.txt --epochs 10 --batch_size 32
-```
-
-- Adjust hyperparameters as needed.
-- Training progress and checkpoints will be saved in the `checkpoints/` directory.
-
-### 5. Generate Text
-
-After training, you can generate text with:
-
-```bash
-python src/generate.py --checkpoint checkpoints/latest.pt --prompt "Hello, how are you?"
-```
+- **GPT-2 Architecture** (124M parameters): 12 layers, 12 heads, 768 embedding dimension
+- **Distributed Training**: Multi-GPU support with PyTorch DDP
+- **OpenWebText Dataset**: ~9B training tokens from web content
+- **Modern Training**: Mixed precision (bfloat16), gradient clipping, cosine learning rate schedule
+- **Experiment Tracking**: Weights & Biases integration
+- **Efficient Data Loading**: Memory-mapped binary files for fast I/O
 
 ## Project Structure
 
 ```
-nanogpt/
-  src/
-    train.py         # Training script
-    model.py         # Transformer model definition
-    generate.py      # Text generation script
-    utils.py         # Helper functions
-  data/              # Place your training data here
-  checkpoints/       # Model checkpoints
-  README.md
-  pyproject.toml
-  Makefile
-  uv.lock
+NanoGPT/
+├── src/
+│   ├── gpt_2/
+│   │   ├── gpt2_model.py              # GPT-2 model implementation
+│   │   ├── trainer.py                 # Training loop and optimization
+│   │   ├── ddp.py                     # Distributed training launcher
+│   │   ├── open_webtext_dataloader.py # OpenWebText data loader
+│   │   ├── attention.py               # Multi-head self-attention
+│   │   ├── block.py                   # Transformer block
+│   │   ├── mlp.py                     # Feedforward network
+│   │   └── evaluator.py               # Model evaluation
+│   └── data/
+│       └── openwebtext/
+│           └── prepare.py             # Dataset preprocessing script
+├── Makefile                           # Convenient training commands
+├── pyproject.toml                     # Dependencies
+└── README.md
 ```
 
-## Customization
+## Getting Started
 
-- **Model size:** Tweak the transformer's depth, width, and attention heads in `model.py`.
-- **Data:** Train on your own conversations or any text corpus.
-- **Sampling:** Adjust temperature and top-k in `generate.py` for more/less creative outputs.
+### 1. Clone and Setup Environment
+
+```bash
+git clone https://github.com/yourusername/NanoGPT.git
+cd NanoGPT
+```
+
+### 2. Install Dependencies
+
+This project uses [UV](https://github.com/astral-sh/uv) for dependency management:
+
+```bash
+# Full environment setup
+make environment
+
+# Or step by step:
+make uv        # Install UV
+make uvlock    # Lock dependencies
+make venv      # Create virtual environment
+```
+
+### 3. Prepare OpenWebText Dataset
+
+Download and tokenize the OpenWebText dataset (~9B tokens):
+
+```bash
+cd src/data/openwebtext
+uv run python prepare.py
+```
+
+This will:
+- Download the OpenWebText dataset from HuggingFace
+- Tokenize with GPT-2 BPE encoding
+- Save to `/sensei-fs/users/divgoyal/openwebtext/` (or modify the path in `prepare.py`)
+- Output: `train.bin` (~17GB, 9B tokens) and `val.bin` (~8.5MB, 4M tokens)
+
+### 4. Train the Model
+
+#### Single GPU Training
+
+```bash
+python src/gpt_2/ddp.py
+```
+
+#### Multi-GPU Training (Distributed Data Parallel)
+
+```bash
+# Train with 8 GPUs
+make ddp-train NGPUS=8
+
+# Or with 4 GPUs
+make ddp-train NGPUS=4
+
+# Or directly with torchrun
+torchrun --standalone --nproc_per_node=8 src/gpt_2/ddp.py
+```
+
+**Training Configuration:**
+- Batch size per GPU: 64
+- Sequence length: 1024 tokens
+- Total batch size: 524,288 tokens/step (2^19)
+- Max learning rate: 6e-4
+- Warmup steps: 715
+- Total steps: 17,234 (1 epoch over 9B tokens)
+- Optimizer: AdamW with weight decay 0.1
+- Gradient clipping: 1.0
+
+## Training Hyperparameters
+
+### Model Config (GPT-2 124M)
+
+```python
+block_size: 1024      # Context window
+vocab_size: 50257     # GPT-2 vocabulary
+n_layer: 12           # Transformer blocks
+n_head: 12            # Attention heads
+n_embed: 768          # Embedding dimension
+```
+
+### Training Config
+
+```python
+max_learning_rate: 6e-4
+min_learning_rate: 6e-5  # 10% of max
+warmup_steps: 715
+total_batch_size: 524288  # tokens per step
+weight_decay: 0.10
+gradient_clip_norm: 1.0
+```
+
+## Monitoring Training
+
+Training metrics are logged to Weights & Biases:
+- Training loss
+- Learning rate schedule
+- Tokens per second (throughput)
+- Gradient norms
+
+View your runs at: https://wandb.ai/
+
+## Utilities
+
+```bash
+# Check GPU status
+make gpu-status
+
+# Kill all GPU processes
+make kill-gpu
+
+# Keep GPUs warm (for testing)
+make gpu-hot GPUS=0,1,2
+```
+
+## Dataset Details
+
+**OpenWebText**
+- Source: [Skylion007/openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext)
+- Size: ~8M documents, ~9B tokens
+- Processing: GPT-2 BPE tokenization with EOT tokens
+- Storage: Binary format (uint16) for efficient loading
+
+## Performance
+
+Expected throughput on modern GPUs:
+- A100 80GB (8x): ~350K tokens/sec
+- H100 80GB (8x): ~600K tokens/sec
+
+Total training time (1 epoch):
+- 8x A100: ~7 hours
+- 8x H100: ~4 hours
+
+## Model Architecture
+
+```
+GPT-2 (124M parameters)
+├── Token Embedding (50257 × 768)
+├── Position Embedding (1024 × 768)
+├── 12 × Transformer Block
+│   ├── Layer Norm
+│   ├── Multi-Head Attention (12 heads)
+│   ├── Layer Norm
+│   └── MLP (768 → 3072 → 768, GELU)
+├── Final Layer Norm
+└── Language Model Head (768 → 50257)
+```
+
+## Tips
+
+1. **Memory Management**: With batch_size=64 and block_size=1024, each GPU needs ~40GB VRAM
+2. **Gradient Accumulation**: Automatically calculated based on GPU count and target batch size
+3. **Checkpointing**: Models are saved periodically during training
+4. **Mixed Precision**: Uses bfloat16 for faster training and reduced memory
+
+## Troubleshooting
+
+**Out of Memory Error:**
+- Reduce `batch_size` in `gpt2_model.py`
+- The system will automatically adjust gradient accumulation steps
+
+**Slow Data Loading:**
+- The dataloader uses fallback loading on network filesystems
+- For best performance, copy data to local SSD
+
+**Distributed Training Issues:**
+- Ensure NCCL is properly installed
+- Check that all GPUs are visible: `nvidia-smi`
 
 ## Acknowledgements
 
-- Inspired by [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT) and OpenAI's GPT models.
-- For educational and research purposes.
+- Inspired by [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT)
+- Based on OpenAI's GPT-2 architecture
+- Dataset: [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext)
 
 ## License
 
