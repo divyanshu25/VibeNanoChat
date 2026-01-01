@@ -108,6 +108,12 @@ class OpenWebtextDataloader:
             size_mb = num_tokens * 2 / (1024 * 1024)  # uint16 = 2 bytes
             print(f"Loaded {num_tokens:,} tokens ({size_mb:.2f} MB) for {split} split")
 
+        self.reset()
+
+    def reset(self):
+        """
+        Reset the data loader to a random starting position.
+        """
         self.current_position = self.batch_size * self.block_size * self.ddp_rank
 
     def next_batch(self):

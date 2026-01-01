@@ -115,6 +115,7 @@ class Trainer:
                 device=self.device,
                 master_process=self.master_process,
                 ddp=self.ddp,
+                ddp_rank=self.ddp_rank,
             )
         else:
             if self.master_process:
@@ -184,6 +185,18 @@ class Trainer:
         ## Start training ##
         # Set precision for matrix multiplications (improves performance on modern GPUs)
         torch.set_float32_matmul_precision("high")
+
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("🚀 STARTING TRAINING")
+            print("=" * 80)
+            print(f"📊 Total steps: {self.max_steps:,}")
+            print(
+                f"📦 Batch size: {self.config.batch_size} x {self.config.block_size} tokens"
+            )
+            print(f"🌐 World size: {self.ddp_world_size} GPUs")
+            print(f"🎯 Total batch size: {self.total_batch_size:,} tokens/step")
+            print("=" * 80 + "\n")
 
         # Main training loop over epochs
         for epoch in range(self.num_epochs):
@@ -268,11 +281,21 @@ class Trainer:
                     )
 
                     # Print comprehensive training statistics
+                    progress = (step + 1) / self.max_steps * 100
                     print(
-                        f"Epoch {epoch} | Step {step} | Loss: {loss_accumulator.item():.4f} | "
-                        f"Tokens per second: {tokens_per_second} | Time taken: {end_time - start_time} seconds | "
-                        f"Gradient norm: {norm: .4e} | Learning rate: {lr: .4e}"
+                        f"[Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
+                        f"Loss: {loss_accumulator.item():.4f} | "
+                        f"LR: {lr:.2e} | "
+                        f"Grad: {norm:.2e} | "
+                        f"Speed: {tokens_per_second/1000:.1f}K tok/s | "
+                        f"Time: {end_time - start_time:.2f}s"
                     )
+
+        # Training complete
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("✅ TRAINING COMPLETE!")
+            print("=" * 80 + "\n")
 
         # Finish wandb run
         wandb.finish()

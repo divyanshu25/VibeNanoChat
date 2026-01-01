@@ -54,7 +54,7 @@ def run_trainer():
             ddp_world_size,
             master_process,
             device,
-            run_evals=False,
+            run_evals=True,
         )
         trainer.train()
     finally:
