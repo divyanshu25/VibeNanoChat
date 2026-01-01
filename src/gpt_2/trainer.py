@@ -8,7 +8,7 @@ sys.path.append(parent_dir)
 
 import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
-from gpt_2.fineweb_dataloader import FinewebDataloader
+from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
 import time
 from gpt_2.gpt2_model import generate
 import math
@@ -23,7 +23,14 @@ class Trainer:
     """
 
     def __init__(
-        self, ddp, ddp_rank, ddp_local_rank, ddp_world_size, master_process, device
+        self,
+        ddp,
+        ddp_rank,
+        ddp_local_rank,
+        ddp_world_size,
+        master_process,
+        device,
+        run_evals=False,
     ):
         """Initialize trainer with model configuration, data loading, and training parameters."""
         # Initialize ddp variables
@@ -33,6 +40,7 @@ class Trainer:
         self.ddp = ddp
         self.device = device
         self.master_process = master_process
+        self.run_evals = run_evals
 
         # Initialize GPT model with default configuration
         self.config = GPTConfig()
@@ -76,12 +84,12 @@ class Trainer:
         self.min_learning_rate = (
             self.max_learning_rate * 0.1
         )  # Minimum learning rate (10% of max)
-        self.warmup_steps = 10  # Steps to warm up from 0 to max learning rate
-        self.max_steps = 50  # Total training steps
+        self.warmup_steps = 715  # Steps to warm up from 0 to max learning rate
+        self.max_steps = 17234  # Total training steps
 
         # Initialize data loader with training data
-        self.train_dataloader = FinewebDataloader(
-            data_dir=f"{parent_dir}/data/edu_fineweb10B",
+        self.train_dataloader = OpenWebtextDataloader(
+            data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
             batch_size=self.config.batch_size,
             block_size=self.config.block_size,
             ddp_world_size=self.ddp_world_size,
@@ -90,23 +98,27 @@ class Trainer:
             master_process=self.master_process,
         )
 
-        # Eval dataloader
-        self.eval_dataloader = FinewebDataloader(
-            data_dir=f"{parent_dir}/data/edu_fineweb10B",
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="val",
-            master_process=self.master_process,
-        )
-        self.evaluator = Evaluators(
-            model=self.model,
-            eval_dataloader=self.eval_dataloader,
-            device=self.device,
-            master_process=self.master_process,
-            ddp=self.ddp,
-        )
+        # Eval dataloader (only initialize if running evals)
+        if self.run_evals:
+            self.eval_dataloader = OpenWebtextDataloader(
+                data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="val",
+                master_process=self.master_process,
+            )
+            self.evaluator = Evaluators(
+                model=self.model,
+                eval_dataloader=self.eval_dataloader,
+                device=self.device,
+                master_process=self.master_process,
+                ddp=self.ddp,
+            )
+        else:
+            if self.master_process:
+                print("Evaluations disabled - skipping eval dataloader initialization")
 
         # Initialize optimizer with AdamW and weight decay for regularization
         self.optimzer = self.raw_model.configure_optimizers(
@@ -128,6 +140,7 @@ class Trainer:
                     "num_epochs": self.num_epochs,
                     "weight_decay": 0.10,
                     "gradient_clip_norm": 1.0,
+                    "run_evals": self.run_evals,
                 },
             )
 
@@ -181,7 +194,7 @@ class Trainer:
                 loss_accumulator = torch.tensor(0.0, device=self.device)
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
-                    x, y = self.dataloader.get_batch()
+                    x, y = self.train_dataloader.next_batch()
                     x, y = x.to(self.device), y.to(self.device)
 
                     # Forward pass: compute predictions and loss
@@ -223,15 +236,15 @@ class Trainer:
 
                 # Calculate training throughput (tokens processed per second)
                 tokens_per_second = (
-                    self.dataloader.batch_size
-                    * self.dataloader.block_size
+                    self.train_dataloader.batch_size
+                    * self.train_dataloader.block_size
                     * self.grad_accumulation_steps
                     * self.ddp_world_size
                     / (end_time - start_time)
                 )
 
                 # Periodically estimate loss on train/val sets for monitoring
-                if step % self.run_evals_after == 0:
+                if self.run_evals and step % self.run_evals_after == 0:
                     self.evaluator.estimate_validation_loss(
                         step=step, checkpoint_model=True, max_steps=self.max_steps
                     )

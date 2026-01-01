@@ -22,7 +22,7 @@ def run_trainer():
             torch.cuda.is_available()
         ), "CUDA is not available"  # check if cuda is available
         init_process_group(backend="nccl")  # initialize process group
-        ddp_rank = int(os.environ["RANK"])  # get rank
+        ddp_rank = int(os.environ["RANK"])  # get rank, each GPU has a different rank
         ddp_local_rank = int(os.environ["LOCAL_RANK"])  # get local rank
         ddp_world_size = int(os.environ.get("WORLD_SIZE", 1))  # get world size
         device = f"cuda:{ddp_local_rank}"  # get device
@@ -44,12 +44,22 @@ def run_trainer():
     if device == "cuda":
         torch.cuda.manual_seed(42)
 
-    trainer = Trainer(
-        ddp, ddp_rank, ddp_local_rank, ddp_world_size, master_process, device
-    )  # create trainer
-    trainer.train()  # train
-    if ddp:
-        destroy_process_group()  # destroy process group
+    # print(f"I am GPU: {ddp_local_rank+1} of {ddp_world_size} with rank: {ddp_rank} and master process: {master_process}")
+
+    try:
+        trainer = Trainer(
+            ddp,
+            ddp_rank,
+            ddp_local_rank,
+            ddp_world_size,
+            master_process,
+            device,
+            run_evals=False,
+        )
+        trainer.train()
+    finally:
+        if ddp:
+            destroy_process_group()
 
 
 if __name__ == "__main__":

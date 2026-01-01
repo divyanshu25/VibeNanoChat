@@ -30,7 +30,7 @@ class GPTConfig:
     n_layer: int = 12  # Number of transformer blocks in the model
     n_head: int = 12  # Number of attention heads per transformer block
     n_embed: int = 768  # Embedding dimension (hidden size)
-    batch_size: int = 16  # Training batch size
+    batch_size: int = 64  # Training batch size
     total_batch_size: int = 524288  # 2^19
 
 
@@ -357,6 +357,35 @@ def generate(
     return all_decoded
 
 
+# class DataLoaderLite:
+#     def __init__(self, B, T):
+
+#         with open("data/input.txt", "r") as f:
+#             text = f.read()
+
+#         import tiktoken
+
+#         self.enc = tiktoken.get_encoding("gpt2")
+#         self.tokens = self.enc.encode(text)
+#         self.tokens = torch.tensor(self.tokens, dtype=torch.long)
+#         self.current_position = 0
+#         self.B = B
+#         self.T = T
+#         print(f"Loaded {len(self.tokens)} tokens")
+#         print(f"1 epoch has {len(self.tokens) // (self.B * self.T)} batches")
+
+#     def next_batch(self):
+#         buf = self.tokens[
+#             self.current_position : self.current_position + self.B * self.T + 1
+#         ]
+#         x = buf[:-1].view(self.B, self.T)
+#         y = buf[1:].view(self.B, self.T)
+#         self.current_position += self.B * self.T
+#         if self.current_position + (self.B * self.T + 1) > len(self.tokens):
+#             self.current_position = 0
+#         return x, y
+
+
 # Test the model when script is run directly
 if __name__ == "__main__":
     # Determine the best available device for computation
@@ -370,23 +399,92 @@ if __name__ == "__main__":
 
     print(f"Using device: {device}")
 
-    # Create and initialize the model
+    # # Create and initialize the model
 
-    model = GPT.from_pretrained("gpt2")
-    print("Model loaded")
-    model.eval()  # Set to evaluation mode (disables dropout, etc.)
-    model.to(device)
+    # torch.manual_seed(1337)
+    # if device == "cuda":
+    #     torch.cuda.manual_seed(1337)
 
-    context = "Hello, I'm a language model,"
-    start_time = time.time()
-    decoded = generate(
-        num_sequences=3,  # Generate 3 different sequences
-        max_length=50,  # Each sequence up to 30 tokens
-        model=model,
-        context=context,
-        device=device,
-    )
-    for decoded_seq in decoded:
-        print(">", decoded_seq)
-    end_time = time.time()
-    print(f"Time taken: {end_time - start_time} seconds")
+    # total_batch_size = 524288
+    # B = 32
+    # T = 1024
+
+    # assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B * T"
+    # grad_accumulation_steps = total_batch_size // (B * T)
+
+    # print(f"Total batch size: {total_batch_size}")
+    # print(f"Batch size: {B}")
+    # print(f"Sequence length: {T}")
+    # print(f"Grad accumulation steps: {grad_accumulation_steps}")
+
+    # train_loader = DataLoaderLite(B, T)
+
+    # torch.set_float32_matmul_precision("high")
+
+    # model = GPT(GPTConfig(vocab_size=50304))
+    # print("Model loaded")
+    # model.eval()  # Set to evaluation mode (disables dropout, etc.)
+    # model.to(device)
+    # model = torch.compile(model)
+
+    # max_lr = 6e-4
+    # min_lr = 0.1 * max_lr
+    # warmup_steps = 10
+    # max_steps = 50
+
+    # import math
+    # def get_lr(step):
+    #     if step < warmup_steps:
+    #         return max_lr * ((step+1)/warmup_steps)
+    #     elif step > max_steps:
+    #         return min_lr
+    #     else:
+    #         decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+    #         assert 0 <= decay_ratio <= 1
+    #         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    #         return min_lr + coeff * (max_lr - min_lr)
+
+    # # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    # optimizer = model.configure_optimizers(learning_rate=max_lr, weight_decay=0.1, device=device)
+
+    # import time
+
+    # for step in range(max_steps):
+    #     t0 = time.time()
+    #     optimizer.zero_grad()
+    #     loss_accumulator = torch.tensor(0.0, device=device)
+    #     for micro_step in range(grad_accumulation_steps):
+    #         x, y = train_loader.next_batch()
+    #         x = x.to(device)
+    #         y = y.to(device)
+
+    #         with torch.autocast(device_type=device, dtype=torch.bfloat16):
+    #             logits, loss = model(x, y)
+    #         loss = loss / grad_accumulation_steps
+    #         loss_accumulator += loss
+    #         loss.backward()
+
+    #     norm =torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)# clip gradients to max norm of 1.0
+    #     lr = get_lr(step)
+    #     for param_group in optimizer.param_groups:
+    #         param_group["lr"] = lr
+    #     optimizer.step()
+    #     torch.cuda.synchronize()
+    #     t1 = time.time()
+    #     dt = (t1 - t0)
+    #     tokens_per_sec = (train_loader.B * train_loader.T * grad_accumulation_steps) / dt
+    #     print(f"Step {step} | Loss: {loss_accumulator.item()} | Learning Rate: {lr : .4e} | Gradient Norm: {norm: .4f} | Time: {dt*1000:.2f} ms | tokens/sec: {tokens_per_sec}")
+
+    # context = "Hello, I'm a language model,"
+    # start_time = time.time()
+    # decoded = generate(
+    #     num_sequences=3,  # Generate 3 different sequences
+    #     max_length=50,  # Each sequence up to 30 tokens
+    #     model=model,
+    #     context=context,
+    #     device=device,
+    # )
+    # for decoded_seq in decoded:
+    #     print(">", decoded_seq)
+    # end_time = time.time()
+    # print(f"Time taken: {end_time - start_time} seconds")

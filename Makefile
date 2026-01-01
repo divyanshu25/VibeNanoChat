@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel kill-gpu gpu-hot gpu-status ddp-train
 
 
 dotenv: ## Initialize .env file
@@ -85,8 +85,31 @@ black-formatting:
 	@echo "✅ Code formatted with Black!"
 
 
+kill-gpu: ## Kill all GPU processes
+	@echo "🔪 Killing all GPU processes..."
+	@nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9
+	@echo "✅ All GPU processes stopped!"
+	@echo "💡 Run 'nvidia-smi' to verify GPUs are free"
 
 
+gpu-hot: ## Keep GPUs at ~90%+ utilization. Usage: make gpu-hot [GPUS=0,1,2]
+	@echo "🔥 Starting GPU heating..."
+	@if [ -z "$(GPUS)" ]; then \
+		$(uv) run python scripts/keep_gpus_hot.py; \
+	else \
+		$(uv) run python scripts/keep_gpus_hot.py $(GPUS); \
+	fi
+
+
+gpu-status: ## Show current GPU utilization and memory usage
+	@nvidia-smi
+
+
+ddp-train: ## Run DDP training with torchrun. Usage: make ddp-train [NGPUS=4]
+	@echo "🚀 Starting DDP training with torchrun..."
+	@NGPUS=$${NGPUS:-4}; \
+	echo "📊 Using $$NGPUS GPUs for distributed training"; \
+	$(uv) run torchrun --standalone --nproc_per_node=$$NGPUS src/gpt_2/ddp.py
 
 
 
