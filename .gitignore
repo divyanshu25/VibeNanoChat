@@ -16,3 +16,6 @@
 
 # Weights & Biases
 wandb/
+
+# Training logs
+logs/

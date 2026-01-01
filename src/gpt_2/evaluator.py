@@ -5,13 +5,23 @@ from gpt_2.gpt2_model import generate
 
 
 class Evaluators:
-    def __init__(self, model, eval_dataloader, device, master_process, ddp, ddp_rank=0):
+    def __init__(
+        self,
+        model,
+        eval_dataloader,
+        device,
+        master_process,
+        ddp,
+        ddp_rank=0,
+        generation_log_file=None,
+    ):
         self.model = model
         self.eval_dataloader = eval_dataloader
         self.device = device
         self.master_process = master_process
         self.ddp = ddp
         self.ddp_rank = ddp_rank
+        self.generation_log_file = generation_log_file
 
     def estimate_validation_loss(self, step, checkpoint_model=False, max_steps=None):
         """
@@ -68,7 +78,11 @@ class Evaluators:
             print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
 
     def sample_from_model(
-        self, num_sequences=4, max_length=32, context="Hello, I'm a language model,"
+        self,
+        num_sequences=4,
+        max_length=32,
+        context="Hello, I'm a language model,",
+        step=None,
     ):
         if not self.master_process:
             return
@@ -85,6 +99,7 @@ class Evaluators:
             random_number_generator=sample_rng,
         )
 
+        # Print to console (truncated)
         print(f"🎯 SAMPLE GENERATIONS:")
         for i, decoded_seq in enumerate(decoded, 1):
             # Truncate if too long and add ellipsis
@@ -93,3 +108,18 @@ class Evaluators:
             )
             print(f"  {i}. {display_text}")
         print()
+
+        # Save full generations to log file
+        if self.generation_log_file:
+            from datetime import datetime
+
+            with open(self.generation_log_file, "a") as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                step_info = f"Step {step}" if step is not None else "Unknown Step"
+                f.write(f"\n{'='*80}\n")
+                f.write(f"Timestamp: {timestamp} | {step_info}\n")
+                f.write(f"Context: {context}\n")
+                f.write(f"{'='*80}\n")
+                for i, decoded_seq in enumerate(decoded, 1):
+                    f.write(f"\nGeneration {i}:\n{decoded_seq}\n")
+                f.write(f"\n{'='*80}\n")

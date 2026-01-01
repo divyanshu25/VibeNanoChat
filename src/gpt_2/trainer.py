@@ -14,6 +14,7 @@ from gpt_2.gpt2_model import generate
 import math
 import wandb
 from gpt_2.evaluator import Evaluators
+from datetime import datetime
 
 
 class Trainer:
@@ -41,6 +42,18 @@ class Trainer:
         self.device = device
         self.master_process = master_process
         self.run_evals = run_evals
+
+        # Setup generation log file (only on master process)
+        if self.master_process:
+            log_dir = "logs"
+            os.makedirs(log_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.generation_log_file = os.path.join(
+                log_dir, f"generations_{timestamp}.txt"
+            )
+            print(f"📝 Saving generations to: {self.generation_log_file}")
+        else:
+            self.generation_log_file = None
 
         # Initialize GPT model with default configuration
         self.config = GPTConfig()
@@ -116,6 +129,7 @@ class Trainer:
                 master_process=self.master_process,
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
+                generation_log_file=self.generation_log_file,
             )
         else:
             if self.master_process:
@@ -265,6 +279,7 @@ class Trainer:
                         num_sequences=4,
                         max_length=32,
                         context="Hello, I'm a language model,",
+                        step=step,
                     )
                 # Log metrics to wandb
                 if self.master_process:
