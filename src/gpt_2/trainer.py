@@ -75,7 +75,7 @@ class Trainer:
         # Training hyperparameters
         self.num_epochs = 1  # Number of complete passes through the dataset
 
-        self.run_evals_after = 250  # Run evals every N steps
+        self.run_evals_after = self.config.eval_interval  # Run evals every N steps
 
         self.total_batch_size = self.config.total_batch_size
         self.grad_accumulation_steps = self.total_batch_size // (
@@ -130,6 +130,7 @@ class Trainer:
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
                 generation_log_file=self.generation_log_file,
+                checkpoint_interval=self.config.checkpoint_interval,
             )
         else:
             if self.master_process:

@@ -14,6 +14,7 @@ class Evaluators:
         ddp,
         ddp_rank=0,
         generation_log_file=None,
+        checkpoint_interval=5000,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -22,6 +23,7 @@ class Evaluators:
         self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.generation_log_file = generation_log_file
+        self.checkpoint_interval = checkpoint_interval
 
     def estimate_validation_loss(self, step, checkpoint_model=False, max_steps=None):
         """
@@ -62,12 +64,14 @@ class Evaluators:
             wandb.log({"val_loss": val_loss_accumulator.item(), "step": step})
 
         if self.master_process and (
-            (checkpoint_model and step > 0 and step % 5000 == 0)
+            (checkpoint_model and step > 0 and step % self.checkpoint_interval == 0)
             or step == max_steps - 1
         ):
+            # Get the underlying model (unwrap DDP if needed)
+            model_to_save = self.model.module if self.ddp else self.model
             checkpoint = {
-                "model": self.model.state_dict(),
-                "config": self.model.config,
+                "model": model_to_save.state_dict(),  # Save unwrapped model state
+                "config": model_to_save.config,
                 "step": step,
                 "val_loss": val_loss_accumulator.item(),
             }
