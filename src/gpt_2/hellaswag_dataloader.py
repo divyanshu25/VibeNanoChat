@@ -77,7 +77,8 @@ class HellaSwagDataloader:
 
         # Process batch
         # Each example has 4 completions, so we'll have batch_size * 4 sequences
-        max_length = 1024
+        # HellaSwag sequences are short (~87 avg, ~212 max), so we use 256 instead of 1024
+        max_length = 256
         x = []
         y = []
 

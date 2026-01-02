@@ -96,7 +96,7 @@ class Evaluators:
 
         self.model.eval()
         self.hellaswag_dataloader.reset()
-        hellaswag_accuracy_steps = 314
+        hellaswag_accuracy_steps = 79
         hellaswag_accuracy_accumulator = torch.tensor(0.0, device=self.device)
         total_processed_examples = torch.tensor(0.0, device=self.device)
         with torch.no_grad():

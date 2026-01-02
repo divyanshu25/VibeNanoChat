@@ -125,7 +125,7 @@ class Trainer:
             )
             self.hellaswag_dataloader = HellaSwagDataloader(
                 data_dir=f"/sensei-fs/users/divgoyal/hellaswag",
-                batch_size=(self.config.batch_size // 4),
+                batch_size=self.config.batch_size,
                 ddp_world_size=self.ddp_world_size,
                 ddp_rank=self.ddp_rank,
                 split="validation",

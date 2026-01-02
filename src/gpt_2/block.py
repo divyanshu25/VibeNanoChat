@@ -42,12 +42,12 @@ class Block(nn.Module):
         # First residual connection: x + attention(norm(x))
         # Apply layer norm, then self-attention, then add residual connection
         # The residual connection helps with gradient flow and training stability
-        x = x + self.attn(self.ln_1(x))
+        x = x + self.attn(self.ln_1(x))  # shape: (B, T, n_embed)
 
         # Second residual connection: x + mlp(norm(x))
         # Apply layer norm, then MLP, then add residual connection
         # This creates a two-stage processing: attention -> feed-forward
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.mlp(self.ln_2(x))  # shape: (B, T, n_embed)
 
         # Return the processed representation
-        return x
+        return x  # shape: (B, T, n_embed)
