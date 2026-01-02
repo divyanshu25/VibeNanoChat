@@ -337,12 +337,14 @@ def generate(
 
             # Apply top-k sampling (k=50) for diverse generation
             # This helps avoid repetitive text by sampling from top-k most likely tokens
-            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            topk_probs, topk_indices = torch.topk(
+                probs, 50, dim=-1
+            )  # topk_probs: (B, 50), topk_indices: (B, 50)
 
             # Sample from the top-k distribution
             ix = torch.multinomial(
                 topk_probs, num_samples=1, generator=random_number_generator
-            )  # Shape: (B, 1)
+            )  # ix: (B, 1)
 
             # Get the actual token indices from the top-k indices
             xcol = torch.gather(topk_indices, -1, ix)  # Shape: (B, 1)

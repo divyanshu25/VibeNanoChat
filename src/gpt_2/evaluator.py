@@ -9,6 +9,7 @@ class Evaluators:
         self,
         model,
         eval_dataloader,
+        hellaswag_dataloader,
         device,
         master_process,
         ddp,
@@ -18,6 +19,7 @@ class Evaluators:
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
+        self.hellaswag_dataloader = hellaswag_dataloader
         self.device = device
         self.master_process = master_process
         self.ddp = ddp
@@ -81,6 +83,49 @@ class Evaluators:
             torch.save(checkpoint, checkpoint_path)
             print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
 
+    def estimate_hellaswag_accuracy(self, step):
+        """
+        Estimate the accuracy of the model on the HellaSwag dataset.
+        """
+        self.model.eval()
+        self.hellaswag_dataloader.reset()
+        hellaswag_accuracy_steps = 314
+        hellaswag_accuracy_accumulator = torch.tensor(0.0, device=self.device)
+        total_processed_examples = torch.tensor(0.0, device=self.device)
+        with torch.no_grad():
+            for k in range(hellaswag_accuracy_steps):
+                X, Y = self.hellaswag_dataloader.next_batch()
+                X = X.to(self.device)
+                Y = Y.to(self.device)
+                with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
+                    logits, _ = self.model(X)  # Model returns (logits, loss)
+
+                num_correct = self.hellaswag_dataloader.calculate_correctness(
+                    logits, Y, X
+                )
+                hellaswag_accuracy_accumulator += num_correct
+                total_processed_examples += len(Y)
+
+        self.model.train()
+        if self.ddp:
+            # Sum up correct predictions and total examples across all GPUs
+            torch.distributed.all_reduce(
+                hellaswag_accuracy_accumulator, op=torch.distributed.ReduceOp.SUM
+            )
+            torch.distributed.all_reduce(
+                total_processed_examples, op=torch.distributed.ReduceOp.SUM
+            )
+        hellaswag_accuracy = (
+            hellaswag_accuracy_accumulator.item() / total_processed_examples.item()
+        )
+        if self.master_process:
+            print(f"\n{'='*80}")
+            print(
+                f"📊 HELLASWAG | Step {step:>5} | HellaSwag Accuracy: {hellaswag_accuracy:.4f}"
+            )
+            print(f"{'='*80}\n")
+            wandb.log({"hellaswag_accuracy": hellaswag_accuracy, "step": step})
+
     def sample_from_model(
         self,
         num_sequences=4,
@@ -108,7 +153,7 @@ class Evaluators:
         for i, decoded_seq in enumerate(decoded, 1):
             # Truncate if too long and add ellipsis
             display_text = (
-                decoded_seq if len(decoded_seq) <= 100 else decoded_seq[:100] + "..."
+                decoded_seq if len(decoded_seq) <= 200 else decoded_seq[:200] + "..."
             )
             print(f"  {i}. {display_text}")
         print()

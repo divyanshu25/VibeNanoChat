@@ -9,6 +9,7 @@ sys.path.append(parent_dir)
 import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
 from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
+from gpt_2.hellaswag_dataloader import HellaSwagDataloader
 import time
 from gpt_2.gpt2_model import generate
 import math
@@ -122,9 +123,18 @@ class Trainer:
                 split="val",
                 master_process=self.master_process,
             )
+            self.hellaswag_dataloader = HellaSwagDataloader(
+                data_dir=f"/sensei-fs/users/divgoyal/hellaswag",
+                batch_size=(self.config.batch_size // 4),
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="validation",
+                master_process=self.master_process,
+            )
             self.evaluator = Evaluators(
                 model=self.model,
                 eval_dataloader=self.eval_dataloader,
+                hellaswag_dataloader=self.hellaswag_dataloader,
                 device=self.device,
                 master_process=self.master_process,
                 ddp=self.ddp,
@@ -276,6 +286,7 @@ class Trainer:
                     self.evaluator.estimate_validation_loss(
                         step=step, checkpoint_model=True, max_steps=self.max_steps
                     )
+                    self.evaluator.estimate_hellaswag_accuracy(step=step)
                     self.evaluator.sample_from_model(
                         num_sequences=4,
                         max_length=32,
