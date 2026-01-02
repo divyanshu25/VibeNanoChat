@@ -1,6 +1,7 @@
 import torch
 import wandb
 import os
+import time
 from gpt_2.gpt2_model import generate
 
 
@@ -35,6 +36,8 @@ class Evaluators:
         Returns:
             dict: Contains 'train' and 'val' average losses
         """
+        start_time = time.time()
+
         self.model.eval()
         val_loss_accumulator = torch.tensor(0.0, device=self.device)
         self.eval_dataloader.reset()
@@ -57,10 +60,12 @@ class Evaluators:
                 val_loss_accumulator, op=torch.distributed.ReduceOp.AVG
             )
 
+        elapsed_time = time.time() - start_time
+
         if self.master_process:
             print(f"\n{'='*80}")
             print(
-                f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss_accumulator.item():.4f}"
+                f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss_accumulator.item():.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
             wandb.log({"val_loss": val_loss_accumulator.item(), "step": step})
@@ -87,6 +92,8 @@ class Evaluators:
         """
         Estimate the accuracy of the model on the HellaSwag dataset.
         """
+        start_time = time.time()
+
         self.model.eval()
         self.hellaswag_dataloader.reset()
         hellaswag_accuracy_steps = 314
@@ -118,10 +125,13 @@ class Evaluators:
         hellaswag_accuracy = (
             hellaswag_accuracy_accumulator.item() / total_processed_examples.item()
         )
+
+        elapsed_time = time.time() - start_time
+
         if self.master_process:
             print(f"\n{'='*80}")
             print(
-                f"📊 HELLASWAG | Step {step:>5} | HellaSwag Accuracy: {hellaswag_accuracy:.4f}"
+                f"📊 HELLASWAG | Step {step:>5} | Accuracy: {hellaswag_accuracy:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
             wandb.log({"hellaswag_accuracy": hellaswag_accuracy, "step": step})
@@ -136,6 +146,8 @@ class Evaluators:
         if not self.master_process:
             return
 
+        start_time = time.time()
+
         sample_rng = torch.Generator(device=self.device)
         sample_rng.manual_seed(42 + self.ddp_rank)
 
@@ -148,8 +160,10 @@ class Evaluators:
             random_number_generator=sample_rng,
         )
 
+        elapsed_time = time.time() - start_time
+
         # Print to console (truncated)
-        print(f"🎯 SAMPLE GENERATIONS:")
+        print(f"🎯 SAMPLE GENERATIONS (Time: {elapsed_time:.2f}s):")
         for i, decoded_seq in enumerate(decoded, 1):
             # Truncate if too long and add ellipsis
             display_text = (
