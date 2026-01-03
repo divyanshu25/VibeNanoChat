@@ -1,0 +1,581 @@
+"""
+Prepare TaskMixture datasets for mid-training.
+
+This script pre-tokenizes SmolTalk, MMLU, and GSM8K datasets and saves them
+as binary files for efficient loading during multi-GPU training.
+
+Datasets:
+- SmolTalk: General conversations (~460K train rows)
+- MMLU auxiliary_train: Multiple choice problems from ARC, MC_TEST, OBQA, RACE (~100K train rows)
+- GSM8K: Math reasoning (~8K train rows)
+
+Total: ~568K training examples
+
+Output:
+- train.bin: Concatenated tokenized data for training
+- val.bin: Concatenated tokenized data for validation
+- metadata.json: Token statistics and special token mapping
+
+Usage:
+    python data/task_mixture/prepare.py
+
+    # Or with custom output directory:
+    python data/task_mixture/prepare.py --output_dir /path/to/output
+"""
+
+import os
+import json
+import argparse
+from tqdm import tqdm
+import numpy as np
+import tiktoken
+from datasets import load_dataset, concatenate_datasets
+
+# Number of workers for parallel dataset processing (using HuggingFace datasets .map())
+NUM_PROC = 8
+
+
+# =============================================================================
+# SECTION 1: SPECIAL TOKENS DEFINITION & CUSTOM TOKENIZER
+# =============================================================================
+# We extend the GPT-2 vocabulary (50257 tokens) with 5 new special tokens
+# for chat formatting. These tokens mark the start/end of user and assistant turns.
+#
+# We use tiktoken's built-in special token support by creating a custom Encoding
+# that includes our new tokens. This is cleaner and more efficient than manually
+# parsing special tokens.
+
+
+def get_special_tokens():
+    """
+    Define special tokens for chat format.
+
+    Token IDs start at 50257 (right after GPT-2's vocab which ends at 50256).
+
+    Returns:
+        dict: Mapping of special token strings to their token IDs
+    """
+    return {
+        "<|bos|>": 50257,  # Beginning of sequence - marks start of conversation
+        "<|user_start|>": 50258,  # Marks start of user message
+        "<|user_end|>": 50259,  # Marks end of user message
+        "<|assistant_start|>": 50260,  # Marks start of assistant response
+        "<|assistant_end|>": 50261,  # Marks end of assistant response
+    }
+
+
+def get_custom_tokenizer():
+    """
+    Create a custom tiktoken encoder with our special tokens registered.
+
+    This extends the GPT-2 tokenizer by adding our 5 chat-format special tokens.
+    The custom encoder can then handle these tokens natively via encode/decode.
+
+    Returns:
+        tuple: (custom_encoder, special_tokens_dict)
+    """
+    # Get the base GPT-2 encoding
+    base_enc = tiktoken.get_encoding("gpt2")
+
+    # Define our custom special tokens
+    special_tokens = get_special_tokens()
+
+    # Create a new encoding that includes both:
+    # 1. GPT-2's existing special tokens (like <|endoftext|>)
+    # 2. Our new chat-format special tokens
+    enc = tiktoken.Encoding(
+        name="nano_chat",  # Custom name for our extended tokenizer
+        pat_str=base_enc._pat_str,  # Use same regex pattern for tokenization
+        mergeable_ranks=base_enc._mergeable_ranks,  # Use same BPE merges
+        special_tokens={
+            **base_enc._special_tokens,  # Keep GPT-2's <|endoftext|> (id=50256)
+            **special_tokens,  # Add our 5 new special tokens
+        },
+    )
+
+    return enc, special_tokens
+
+
+# =============================================================================
+# SECTION 3: DATASET FORMATTING FUNCTIONS
+# =============================================================================
+# Each dataset has its own structure. These functions convert raw examples
+# into a unified chat format using our special tokens.
+#
+# Final format for all datasets:
+#   <|bos|><|user_start|>...<|user_end|><|assistant_start|>...<|assistant_end|>
+
+
+def format_smoltalk(example):
+    """
+    Format SmolTalk conversation to chat format.
+
+    SmolTalk structure:
+        {'messages': [{'role': 'user', 'content': '...'}, {'role': 'assistant', 'content': '...'}, ...]}
+
+    Output format:
+        <|bos|><|user_start|>...<|user_end|><|assistant_start|>...<|assistant_end|>...
+
+    Note: Multi-turn conversations will have alternating user/assistant blocks.
+    """
+    messages = example["messages"]
+    formatted_parts = ["<|bos|>"]  # Start with beginning-of-sequence token
+
+    for msg in messages:
+        role = msg["role"].lower()
+        content = msg["content"]
+
+        if role == "user":
+            formatted_parts.append(f"<|user_start|>{content}<|user_end|>")
+        elif role == "assistant":
+            formatted_parts.append(f"<|assistant_start|>{content}<|assistant_end|>")
+        else:
+            # Handle other roles (system, etc.) as user for simplicity
+            formatted_parts.append(f"<|user_start|>{content}<|user_end|>")
+
+    return {"text": "".join(formatted_parts)}
+
+
+def format_mmlu(example):
+    """
+    Format MMLU multiple-choice question to chat format.
+
+    MMLU structure:
+        {'question': '...', 'choices': ['A', 'B', 'C', 'D'], 'answer': 0, 'subject': 'physics'}
+
+    Output format:
+        <|bos|><|user_start|>Subject: physics
+
+        What is the speed of light?
+
+        A. 3x10^8 m/s
+        B. 3x10^6 m/s
+        C. 3x10^4 m/s
+        D. 3x10^2 m/s<|user_end|><|assistant_start|>The answer is A. 3x10^8 m/s<|assistant_end|>
+    """
+    question = example["question"]
+    choices = example["choices"]
+    answer_idx = example["answer"]  # Integer index (0-3)
+    subject = example.get("subject", "")
+
+    # Format choices as A, B, C, D
+    choice_labels = ["A", "B", "C", "D"]
+    choices_text = "\n".join(
+        [f"{label}. {choice}" for label, choice in zip(choice_labels, choices)]
+    )
+
+    # Get the correct answer text (e.g., "A. 3x10^8 m/s")
+    correct_answer = f"{choice_labels[answer_idx]}. {choices[answer_idx]}"
+
+    # Build the user prompt with optional subject
+    if subject:
+        user_content = f"Subject: {subject}\n\n{question}\n\n{choices_text}"
+    else:
+        user_content = f"{question}\n\n{choices_text}"
+
+    # Combine into final chat format
+    text = (
+        f"<|bos|>"
+        f"<|user_start|>{user_content}<|user_end|>"
+        f"<|assistant_start|>The answer is {correct_answer}<|assistant_end|>"
+    )
+    return {"text": text}
+
+
+def format_gsm8k(example):
+    """
+    Format GSM8K math problem to chat format.
+
+    GSM8K structure:
+        {'question': 'Janet has 3 apples...', 'answer': 'Janet has 3 apples. She buys 2 more... #### 5'}
+
+    Output format:
+        <|bos|><|user_start|>Janet has 3 apples...<|user_end|>
+        <|assistant_start|>Janet has 3 apples. She buys 2 more... #### 5<|assistant_end|>
+
+    Note: GSM8K answers include step-by-step reasoning followed by #### and the final answer.
+    """
+    question = example["question"]
+    answer = example["answer"]  # Contains reasoning + "#### final_answer"
+
+    text = (
+        f"<|bos|>"
+        f"<|user_start|>{question}<|user_end|>"
+        f"<|assistant_start|>{answer}<|assistant_end|>"
+    )
+    return {"text": text}
+
+
+# =============================================================================
+# SECTION 4: DATASET LOADING AND COMBINATION
+# =============================================================================
+# Load each dataset from HuggingFace, apply formatting, and combine them.
+
+
+def print_sample_example(dataset_name, example_text):
+    """Print a sample example from a dataset for debugging/verification."""
+    print(f"\n  {'─' * 50}")
+    print(f"  📝 Sample from {dataset_name}:")
+    print(f"  {'─' * 50}")
+    # Truncate long examples for display
+    display_text = (
+        example_text[:600] + "..." if len(example_text) > 600 else example_text
+    )
+    # Indent each line for better formatting
+    for line in display_text.split("\n"):
+        print(f"  {line}")
+    print(f"  {'─' * 50}")
+
+
+def load_and_format_datasets(split, cache_dir=None):
+    """
+    Load all three datasets, format them, and combine into one.
+
+    Args:
+        split: "train" or "test"
+        cache_dir: Directory to cache downloaded HuggingFace datasets
+
+    Returns:
+        Combined HuggingFace Dataset with all examples formatted
+    """
+    datasets = []
+
+    # -------------------------------------------------------------------------
+    # Dataset 1: SmolTalk - General conversations
+    # -------------------------------------------------------------------------
+    # SmolTalk has millions of examples, so we randomly sample 460K for training
+    # to keep the dataset balanced with MMLU and GSM8K
+    SMOLTALK_TRAIN_SAMPLES = 460_000
+    SMOLTALK_TEST_SAMPLES = 5_000  # Smaller sample for validation
+
+    print(f"\n📚 Loading SmolTalk ({split})...")
+    try:
+        # Load the "all" config which includes all conversation types
+        smoltalk = load_dataset(
+            "HuggingFaceTB/smoltalk", "all", split=split, cache_dir=cache_dir
+        )
+        print(f"  Loaded {len(smoltalk):,} examples, sampling randomly...")
+
+        # Randomly sample to get desired number of examples
+        # Using seed=42 for reproducibility
+        target_samples = (
+            SMOLTALK_TRAIN_SAMPLES if split == "train" else SMOLTALK_TEST_SAMPLES
+        )
+        if len(smoltalk) > target_samples:
+            smoltalk = smoltalk.shuffle(seed=42).select(range(target_samples))
+            print(f"  Sampled {len(smoltalk):,} examples")
+
+        # Apply formatting function to convert to chat format
+        # remove_columns removes original columns, keeping only 'text'
+
+        smoltalk = smoltalk.map(
+            format_smoltalk, remove_columns=smoltalk.column_names, num_proc=NUM_PROC
+        )
+        print(f"  ✓ SmolTalk: {len(smoltalk):,} examples")
+        # Show one example for verification
+        print_sample_example("SmolTalk", smoltalk[0]["text"])
+        datasets.append(smoltalk)
+    except Exception as e:
+        print(f"  ✗ SmolTalk failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Dataset 2: MMLU - Multiple choice problems
+    # -------------------------------------------------------------------------
+    # MMLU auxiliary_train contains ~100K examples from various sources:
+    # ARC (science), MC_TEST (reading), OBQA (science), RACE (reading)
+
+    print(f"\n📚 Loading MMLU auxiliary_train ({split})...")
+    try:
+        # MMLU splits: test, validation, dev, auxiliary_train
+        # We use auxiliary_train for training (99,842 examples)
+        # For validation, we use the validation split (1,531 examples)
+        mmlu_split = "auxiliary_train" if split == "train" else "validation"
+
+        mmlu = load_dataset("cais/mmlu", "all", split=mmlu_split, cache_dir=cache_dir)
+
+        mmlu = mmlu.map(
+            format_mmlu, remove_columns=mmlu.column_names, num_proc=NUM_PROC
+        )
+        print(f"  ✓ MMLU ({mmlu_split}): {len(mmlu):,} examples")
+
+        print_sample_example("MMLU", mmlu[0]["text"])
+        datasets.append(mmlu)
+    except Exception as e:
+        print(f"  ✗ MMLU failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Dataset 3: GSM8K - Math word problems with step-by-step solutions
+    # -------------------------------------------------------------------------
+    # GSM8K has ~8K training examples of grade school math problems
+
+    print(f"\n📚 Loading GSM8K ({split})...")
+    try:
+        gsm8k = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
+        gsm8k = gsm8k.map(
+            format_gsm8k, remove_columns=gsm8k.column_names, num_proc=NUM_PROC
+        )
+        print(f"  ✓ GSM8K: {len(gsm8k):,} examples")
+
+        print_sample_example("GSM8K", gsm8k[0]["text"])
+        datasets.append(gsm8k)
+    except Exception as e:
+        print(f"  ✗ GSM8K failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Combine all datasets
+    # -------------------------------------------------------------------------
+    if not datasets:
+        raise ValueError("No datasets were loaded successfully!")
+
+    # concatenate_datasets joins all datasets into one
+    combined = concatenate_datasets(datasets)
+
+    # Shuffle like a deck of cards - interleave examples from all datasets
+    print("\n🔀 Shuffling combined dataset...")
+    combined = combined.shuffle(seed=42)
+    print(f"\n✅ Combined & shuffled: {len(combined):,} total examples")
+
+    return combined
+
+
+# =============================================================================
+# SECTION 5: TOKENIZATION AND SAVING TO BINARY
+# =============================================================================
+# Convert formatted text to token IDs and save as binary files for fast loading.
+
+
+def tokenize_and_save(dataset, output_file, enc, special_tokens):
+    """
+    Tokenize all examples and save as a binary file.
+
+    Args:
+        dataset: HuggingFace Dataset with 'text' column
+        output_file: Path to save binary file (e.g., "train.bin")
+        enc: Custom tiktoken encoder with special tokens registered
+        special_tokens: dict of special token mappings (for display purposes)
+
+    Returns:
+        int: Total number of tokens in the saved file
+    """
+    print(f"\n🔄 Tokenizing and saving to {output_file}...")
+
+    # -------------------------------------------------------------------------
+    # Debug: Print sample examples before and after tokenization
+    # -------------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("📋 SAMPLE EXAMPLES (before and after tokenization)")
+    print("=" * 60)
+
+    num_samples = min(3, len(dataset))
+    for i in range(num_samples):
+        example = dataset[i]
+        text = example["text"]
+        # Use tiktoken's native special token support!
+        # allowed_special="all" tells tiktoken to recognize all registered special tokens
+        tokens = enc.encode(text, allowed_special="all")
+
+        print(f"\n{'─' * 60}")
+        print(f"🔹 Example {i + 1}")
+        print(f"{'─' * 60}")
+
+        # Show original text (truncated if too long)
+        print(f"\n📝 BEFORE (raw text, {len(text)} chars):")
+        display_text = text[:500] + "..." if len(text) > 500 else text
+        print(display_text)
+
+        # Show token IDs (first 100)
+        print(f"\n🔢 AFTER (token IDs, {len(tokens)} tokens):")
+        display_tokens = tokens[:100]
+        print(display_tokens)
+        if len(tokens) > 100:
+            print(f"   ... ({len(tokens) - 100} more tokens)")
+
+        # Decode tokens back to text to verify encoding is correct
+        # The custom encoder can decode special tokens natively!
+        print(f"\n🔄 DECODED (tokens → text):")
+        decoded_text = enc.decode(display_tokens[:50])
+        # Show special tokens in brackets for visibility
+        for token_str in special_tokens.keys():
+            decoded_text = decoded_text.replace(token_str, f"[{token_str}]")
+        print(decoded_text)
+        if len(display_tokens) > 50:
+            print(f"   ... (truncated)")
+
+    print("\n" + "=" * 60)
+    print("End of samples")
+    print("=" * 60 + "\n")
+
+    # -------------------------------------------------------------------------
+    # Tokenize all examples using dataset.map()
+    # -------------------------------------------------------------------------
+    def tokenize_example(example):
+        tokens = enc.encode(example["text"], allowed_special="all")
+        return {"ids": tokens, "len": len(tokens)}
+
+    print("  Tokenizing dataset...")
+    tokenized = dataset.map(
+        tokenize_example,
+        remove_columns=["text"],
+        desc="Tokenizing",
+        num_proc=1,  # tiktoken is already fast, parallelism can cause issues
+    )
+
+    # Calculate total tokens
+    total_tokens = sum(tokenized["len"])
+    print(f"  Total tokens: {total_tokens:,}")
+
+    # -------------------------------------------------------------------------
+    # Save to binary file using memmap (memory efficient)
+    # -------------------------------------------------------------------------
+    # Use uint16 (max 65535) - sufficient for GPT-2 vocab (~50k) + custom tokens
+    dtype = np.uint16
+
+    # Create memory-mapped file - writes directly to disk, not RAM
+    arr = np.memmap(output_file, dtype=dtype, mode="w+", shape=(total_tokens,))
+
+    # Write in batches to avoid memory overflow
+    total_batches = min(1024, len(tokenized))  # Don't use more batches than examples
+    idx = 0
+    for batch_idx in tqdm(range(total_batches), desc="Writing to disk"):
+        # Get one batch (1/total_batches of dataset)
+        batch = tokenized.shard(
+            num_shards=total_batches, index=batch_idx, contiguous=True
+        ).with_format("numpy")
+
+        # Concatenate all token IDs in this batch
+        arr_batch = np.concatenate(batch["ids"])
+
+        # Write batch to file and advance position
+        arr[idx : idx + len(arr_batch)] = arr_batch
+        idx += len(arr_batch)
+
+    # Ensure all data is written to disk
+    arr.flush()
+
+    size_mb = os.path.getsize(output_file) / (1024 * 1024)
+    print(f"  Saved {output_file} ({size_mb:.2f} MB)")
+
+    return total_tokens
+
+
+# =============================================================================
+# SECTION 6: MAIN ENTRY POINT
+# =============================================================================
+
+
+def main():
+    """Main function to prepare the TaskMixture dataset."""
+
+    # -------------------------------------------------------------------------
+    # Parse command line arguments
+    # -------------------------------------------------------------------------
+    parser = argparse.ArgumentParser(description="Prepare TaskMixture datasets")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+        help="Directory to save processed data (train.bin, val.bin, metadata.json)",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default="/sensei-fs/users/divgoyal/nanochat_midtraining_data/hf_cache",
+        help="Directory to cache downloaded HuggingFace datasets",
+    )
+    args = parser.parse_args()
+
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print("=" * 80)
+    print("🔧 TaskMixture Dataset Preparation")
+    print("=" * 80)
+
+    # -------------------------------------------------------------------------
+    # Initialize custom tokenizer with special tokens
+    # -------------------------------------------------------------------------
+    # Create a custom tiktoken encoder that has our special tokens registered
+    # This allows us to use enc.encode(text, allowed_special="all") directly
+    enc, special_tokens = get_custom_tokenizer()
+
+    print(f"\n📝 Tokenizer info:")
+    print(
+        f"   Vocab size (with special tokens): {enc.n_vocab}"
+    )  # 50262 (50257 base + 5 new)
+    print(f"   Custom special tokens: {len(special_tokens)}")  # 5 new tokens
+    print(f"   Special tokens: {list(special_tokens.keys())}")
+
+    # -------------------------------------------------------------------------
+    # Prepare metadata to save
+    # -------------------------------------------------------------------------
+    # Note: enc.n_vocab now includes both base GPT-2 tokens and our special tokens
+    base_vocab_size = 50257  # Original GPT-2 vocab size
+    metadata = {
+        "base_vocab_size": base_vocab_size,
+        "extended_vocab_size": enc.n_vocab,  # Already includes special tokens
+        "special_tokens": special_tokens,
+        "dtype": "uint16",  # Important for loading the binary files correctly
+        "splits": {},
+    }
+
+    # -------------------------------------------------------------------------
+    # Process train and test splits
+    # -------------------------------------------------------------------------
+    for split in ["train", "test"]:
+        print(f"\n{'=' * 80}")
+        print(f"📊 Processing {split} split...")
+        print("=" * 80)
+
+        try:
+            # Step 1: Load and format all datasets for this split
+            dataset = load_and_format_datasets(split, args.cache_dir)
+
+            # Step 2: Tokenize and save to binary file
+            # Note: "test" split is saved as "val.bin" (common naming convention)
+            split_name = "val" if split == "test" else split
+            output_file = os.path.join(args.output_dir, f"{split_name}.bin")
+            num_tokens = tokenize_and_save(dataset, output_file, enc, special_tokens)
+
+            # Step 3: Record statistics in metadata
+            metadata["splits"][split_name] = {
+                "num_examples": len(dataset),
+                "num_tokens": num_tokens,
+                "file": f"{split_name}.bin",
+            }
+        except Exception as e:
+            print(f"  ✗ Failed to process {split}: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    # -------------------------------------------------------------------------
+    # Save metadata JSON
+    # -------------------------------------------------------------------------
+    metadata_file = os.path.join(args.output_dir, "metadata.json")
+    with open(metadata_file, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"\n📋 Saved metadata to {metadata_file}")
+
+    # -------------------------------------------------------------------------
+    # Print summary
+    # -------------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("✅ PREPARATION COMPLETE")
+    print("=" * 80)
+    print(f"\nOutput directory: {args.output_dir}")
+    print("\nFiles created:")
+    for split_name, info in metadata["splits"].items():
+        print(
+            f"  - {info['file']}: {info['num_tokens']:,} tokens from {info['num_examples']:,} examples"
+        )
+    print(f"  - metadata.json")
+    print(
+        "\nTo use in training, update TaskMixtureDataloader to read from these .bin files."
+    )
+
+
+# =============================================================================
+# Run main() when script is executed directly
+# =============================================================================
+if __name__ == "__main__":
+    main()
