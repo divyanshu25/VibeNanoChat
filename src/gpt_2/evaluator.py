@@ -2,6 +2,7 @@ import torch
 import wandb
 import os
 import time
+import math
 from gpt_2.gpt2_model import generate
 
 
@@ -28,6 +29,22 @@ class Evaluators:
         self.generation_log_file = generation_log_file
         self.checkpoint_interval = checkpoint_interval
 
+    @staticmethod
+    def loss_to_bpb(loss):
+        """
+        Convert cross-entropy loss (in nats) to bits per byte (BPB).
+
+        Args:
+            loss: Cross-entropy loss value
+
+        Returns:
+            float: Bits per byte metric
+
+        Formula: BPB = loss × log₂(e)
+        Lower BPB is better (perfect prediction = 0, random = ~8)
+        """
+        return loss * math.log2(math.e)
+
     def estimate_validation_loss(self, step, checkpoint_model=False, max_steps=None):
         """
         Estimate average loss on both training and validation sets.
@@ -50,7 +67,7 @@ class Evaluators:
                 Y = Y.to(self.device)
                 with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
                     _, loss = self.model(X, Y)
-                loss = loss / val_loss_steps
+                loss = loss / val_loss_steps  # shape: (1, 1)
                 val_loss_accumulator += loss
 
         self.model.train()
@@ -62,13 +79,19 @@ class Evaluators:
 
         elapsed_time = time.time() - start_time
 
+        # Calculate BPB (bits per byte) from loss
+        val_loss = val_loss_accumulator.item()
+        val_bpb = self.loss_to_bpb(val_loss)
+
         if self.master_process:
             print(f"\n{'='*80}")
             print(
-                f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss_accumulator.item():.4f} | Time: {elapsed_time:.2f}s"
+                f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss:.4f} | BPB: {val_bpb:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
-            wandb.log({"val_loss": val_loss_accumulator.item(), "step": step})
+            wandb.log({"val_loss": val_loss, "val_bpb": val_bpb, "step": step})
+
+        return {"val_loss": val_loss, "val_bpb": val_bpb}
 
         if self.master_process and (
             (checkpoint_model and step > 0 and step % self.checkpoint_interval == 0)

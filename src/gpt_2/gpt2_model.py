@@ -29,6 +29,7 @@ class GPTConfig:
     vocab_size: int = 50257  # Size of the vocabulary (number of unique tokens)
     n_layer: int = 12  # Number of transformer blocks in the model
     n_head: int = 12  # Number of attention heads per transformer block
+    n_kv_head: int = 4  # Number of KV heads for GQA (None = MHA, uses n_head)
     n_embed: int = 768  # Embedding dimension (hidden size)
     batch_size: int = 64  # Training batch size
     total_batch_size: int = 524288  # 2^19
@@ -205,7 +206,9 @@ class GPT(nn.Module):
         loss = None
         if targets is not None:
             # Reshape for cross-entropy loss computation
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1)
+            )  # shape of loss: (1,) because we are using mean reduction
 
         return logits, loss
 

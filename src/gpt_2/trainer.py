@@ -295,11 +295,14 @@ class Trainer:
                     )
                 # Log metrics to wandb
                 if self.master_process:
+                    train_loss = loss_accumulator.item()
+                    train_bpb = Evaluators.loss_to_bpb(train_loss)
                     wandb.log(
                         {
                             "epoch": epoch,
                             "step": step,
-                            "train_loss": loss_accumulator.item(),
+                            "train_loss": train_loss,
+                            "train_bpb": train_bpb,
                             "learning_rate": lr,
                             "tokens_per_second": tokens_per_second,
                             "time_taken": end_time - start_time,
@@ -311,7 +314,7 @@ class Trainer:
                     progress = (step + 1) / self.max_steps * 100
                     print(
                         f"[Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
-                        f"Loss: {loss_accumulator.item():.4f} | "
+                        f"Loss: {train_loss:.4f} | BPB: {train_bpb:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Grad: {norm:.2e} | "
                         f"Speed: {tokens_per_second/1000:.1f}K tok/s | "
