@@ -19,3 +19,6 @@ wandb/
 
 # Training logs
 logs/
+
+# Binary files
+*.bin
