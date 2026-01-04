@@ -7,7 +7,7 @@ sys.path.append(parent_dir)
 
 
 import torch
-import tiktoken
+from gpt_2.utils import get_custom_tokenizer
 
 
 class DataLoader:
@@ -20,8 +20,8 @@ class DataLoader:
         ddp_rank,
     ):
         self.data = open(data_file, "r", encoding="utf-8").read()  # read data file
-        self.enc = tiktoken.get_encoding("gpt2")  # get encoding
-        self.tokens = self.enc.encode(self.data)  # encode data
+        self.enc, _ = get_custom_tokenizer()  # get custom tokenizer with special tokens
+        self.tokens = self.enc.encode(self.data, allowed_special="all")  # encode data
         self.tokens = torch.tensor(self.tokens, dtype=torch.long)  # convert to tensor
         self.train_data = self.tokens[
             : int(0.9 * len(self.tokens))

@@ -18,6 +18,7 @@ class Evaluators:
         ddp_rank=0,
         generation_log_file=None,
         checkpoint_interval=5000,
+        mid_training=False,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -28,6 +29,8 @@ class Evaluators:
         self.ddp_rank = ddp_rank
         self.generation_log_file = generation_log_file
         self.checkpoint_interval = checkpoint_interval
+        self.mid_training = mid_training
+        self.checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
 
     @staticmethod
     def loss_to_bpb(loss):
@@ -45,7 +48,9 @@ class Evaluators:
         """
         return loss * math.log2(math.e)
 
-    def estimate_validation_loss(self, step, checkpoint_model=False, max_steps=None):
+    def estimate_validation_loss(
+        self, step, checkpoint_model=False, max_steps=None, epoch=0, global_step=None
+    ):
         """
         Estimate average loss on both training and validation sets.
         This provides a more stable estimate than single-batch loss.
@@ -89,9 +94,13 @@ class Evaluators:
                 f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss:.4f} | BPB: {val_bpb:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
-            wandb.log({"val_loss": val_loss, "val_bpb": val_bpb, "step": step})
-
-        return {"val_loss": val_loss, "val_bpb": val_bpb}
+            wandb.log(
+                {
+                    "val_loss": val_loss,
+                    "val_bpb": val_bpb,
+                    "step": global_step if global_step is not None else step,
+                }
+            )
 
         if self.master_process and (
             (checkpoint_model and step > 0 and step % self.checkpoint_interval == 0)
@@ -107,11 +116,11 @@ class Evaluators:
             }
             checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/checkpoints"
             os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = f"{checkpoint_dir}/model_checkpoint_{step}.pt"
+            checkpoint_path = f"{checkpoint_dir}/model_checkpoint_epoch{epoch}_step{step}{self.checkpoint_suffix}.pt"
             torch.save(checkpoint, checkpoint_path)
             print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
 
-    def estimate_hellaswag_accuracy(self, step):
+    def estimate_hellaswag_accuracy(self, step, global_step=None):
         """
         Estimate the accuracy of the model on the HellaSwag dataset.
         """
@@ -157,7 +166,12 @@ class Evaluators:
                 f"📊 HELLASWAG | Step {step:>5} | Accuracy: {hellaswag_accuracy:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
-            wandb.log({"hellaswag_accuracy": hellaswag_accuracy, "step": step})
+            wandb.log(
+                {
+                    "hellaswag_accuracy": hellaswag_accuracy,
+                    "step": global_step if global_step is not None else step,
+                }
+            )
 
     def sample_from_model(
         self,

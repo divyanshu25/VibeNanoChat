@@ -105,11 +105,25 @@ gpu-status: ## Show current GPU utilization and memory usage
 	@nvidia-smi
 
 
-ddp-train: ## Run DDP training with torchrun. Usage: make ddp-train [NGPUS=4]
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=8] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [NO_EVALS=true]
 	@echo "🚀 Starting DDP training with torchrun..."
-	@NGPUS=$${NGPUS:-4}; \
+	@NGPUS=$${NGPUS:-8}; \
+	MODE=$${MODE:-pretraining}; \
+	CHECKPOINT=$${CHECKPOINT:-}; \
+	NO_EVALS=$${NO_EVALS:-}; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
-	$(uv) run torchrun --standalone --nproc_per_node=$$NGPUS src/gpt_2/ddp.py
+	echo "🎯 Training mode: $$MODE"; \
+	CMD="$(uv) run torchrun --standalone --nproc_per_node=$$NGPUS src/gpt_2/ddp.py --mode $$MODE"; \
+	if [ -n "$$CHECKPOINT" ]; then \
+		echo "📂 Using checkpoint: $$CHECKPOINT"; \
+		CMD="$$CMD --checkpoint $$CHECKPOINT"; \
+	fi; \
+	if [ "$$NO_EVALS" = "true" ]; then \
+		echo "⏩ Evaluations disabled"; \
+		CMD="$$CMD --no-evals"; \
+	fi; \
+	echo ""; \
+	eval $$CMD
 
 
 

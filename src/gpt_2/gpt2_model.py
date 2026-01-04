@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from gpt_2.block import Block
-import tiktoken
+from gpt_2.utils import get_custom_tokenizer
 import inspect
 import time
 
@@ -26,10 +26,12 @@ class GPTConfig:
     """
 
     block_size: int = 1024  # Maximum sequence length (context window)
-    vocab_size: int = 50257  # Size of the vocabulary (number of unique tokens)
+    # Vocab size: 50257 (GPT-2) + 5 special tokens for chat format
+    # Special tokens: <|bos|>, <|user_start|>, <|user_end|>, <|assistant_start|>, <|assistant_end|>
+    vocab_size: int = 50262  # Extended vocabulary (50257 base + 5 special tokens)
     n_layer: int = 12  # Number of transformer blocks in the model
     n_head: int = 12  # Number of attention heads per transformer block
-    n_kv_head: int = 4  # Number of KV heads for GQA (None = MHA, uses n_head)
+    n_kv_head: int = 12  # Number of KV heads for GQA (None = MHA, uses n_head)
     n_embed: int = 768  # Embedding dimension (hidden size)
     batch_size: int = 64  # Training batch size
     total_batch_size: int = 524288  # 2^19
@@ -310,11 +312,11 @@ def generate(
         context (str): Initial text context to start generation from
         device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
     """
-    # Initialize the tokenizer (GPT-2 uses byte-pair encoding)
-    enc = tiktoken.get_encoding("gpt2")
+    # Initialize the custom tokenizer with special tokens for chat format
+    enc, _ = get_custom_tokenizer()
 
-    # Encode the context string to token indices
-    tokens = enc.encode(context)
+    # Encode the context string to token indices (allow special tokens in context)
+    tokens = enc.encode(context, allowed_special="all")
     tokens = torch.tensor(tokens, dtype=torch.long)
 
     # Create multiple copies for batch generation

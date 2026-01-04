@@ -1,9 +1,13 @@
 import os
+import sys
 import shutil
 from tqdm import tqdm
 import numpy as np
-import tiktoken
 from datasets import load_dataset
+
+# Add src to path so we can import from gpt_2 module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+from gpt_2.utils import get_custom_tokenizer
 
 # Number of workers for parallel processing (typically ~half of CPU cores)
 num_proc = 8
@@ -11,8 +15,8 @@ num_proc = 8
 # Number of workers for dataset loading (may differ based on network speed)
 num_proc_load_dataset = num_proc
 
-# Initialize GPT-2 tokenizer
-enc = tiktoken.get_encoding("gpt2")
+# Initialize custom tokenizer with special tokens
+enc, _ = get_custom_tokenizer()
 
 # Directories
 output_dir = "/mnt/localssd/NanoGPT/data/openwebtext"  # Local disk (mmap compatible)

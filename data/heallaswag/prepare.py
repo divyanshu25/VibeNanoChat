@@ -13,14 +13,18 @@ Output: Processed JSON files ready for evaluation
 """
 
 import os
+import sys
 import json
 from tqdm import tqdm
 import numpy as np
-import tiktoken
 from datasets import load_dataset
 
-# Initialize GPT-2 tokenizer for preprocessing
-enc = tiktoken.get_encoding("gpt2")
+# Add src to path so we can import from gpt_2 module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+from gpt_2.utils import get_custom_tokenizer
+
+# Initialize custom tokenizer with special tokens for preprocessing
+enc, _ = get_custom_tokenizer()
 
 
 def process_example(example):

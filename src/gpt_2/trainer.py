@@ -10,6 +10,7 @@ import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
 from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
 from gpt_2.hellaswag_dataloader import HellaSwagDataloader
+from gpt_2.task_mixture_dataloader import TaskMixtureDataloader
 import time
 from gpt_2.gpt2_model import generate
 import math
@@ -33,8 +34,23 @@ class Trainer:
         master_process,
         device,
         run_evals=False,
+        mid_training=False,
+        checkpoint_path=None,
     ):
-        """Initialize trainer with model configuration, data loading, and training parameters."""
+        """
+        Initialize trainer with model configuration, data loading, and training parameters.
+
+        Args:
+            ddp: Whether to use distributed data parallel
+            ddp_rank: Rank of current process
+            ddp_local_rank: Local rank of current process
+            ddp_world_size: Total number of processes
+            master_process: Whether this is the master process
+            device: Device to train on
+            run_evals: Whether to run evaluations
+            mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
+            checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
+        """
         # Initialize ddp variables
         self.ddp_rank = ddp_rank
         self.ddp_local_rank = ddp_local_rank
@@ -43,6 +59,8 @@ class Trainer:
         self.device = device
         self.master_process = master_process
         self.run_evals = run_evals
+        self.mid_training = mid_training
+        self.checkpoint_path = checkpoint_path
 
         # Setup generation log file (only on master process)
         if self.master_process:
@@ -59,6 +77,12 @@ class Trainer:
         # Initialize GPT model with default configuration
         self.config = GPTConfig()
         self.model = GPT(self.config)
+
+        # Load checkpoint if provided (for mid-training or resuming)
+        self.start_step = 0
+        if self.checkpoint_path:
+            self._load_checkpoint(self.checkpoint_path)
+
         self.model.to(self.device)
 
         # Optional: Compile model for faster training (commented out to avoid warnings)
@@ -74,7 +98,7 @@ class Trainer:
             self.raw_model = self.model
 
         # Training hyperparameters
-        self.num_epochs = 1  # Number of complete passes through the dataset
+        self.num_epochs = 3  # Number of complete passes through the dataset
 
         self.run_evals_after = self.config.eval_interval  # Run evals every N steps
 
@@ -94,23 +118,49 @@ class Trainer:
             print(f"Grad accumulation steps: {self.grad_accumulation_steps}")
 
         # Learning rate scheduling parameters
-        self.max_learning_rate = 6e-4  # Peak learning rate
-        self.min_learning_rate = (
-            self.max_learning_rate * 0.1
-        )  # Minimum learning rate (10% of max)
-        self.warmup_steps = 715  # Steps to warm up from 0 to max learning rate
-        self.max_steps = 17234  # Total training steps
+        if self.mid_training:
+            # Lower learning rate for mid-training/fine-tuning
+            self.max_learning_rate = 1e-4  # Lower LR for fine-tuning
+            self.min_learning_rate = self.max_learning_rate * 0.1
+            self.warmup_steps = 100  # Shorter warmup for fine-tuning
+            self.max_steps = 5000  # Fewer steps for mid-training
+        else:
+            # Standard pretraining parameters
+            self.max_learning_rate = 6e-4  # Peak learning rate
+            self.min_learning_rate = (
+                self.max_learning_rate * 0.1
+            )  # Minimum learning rate (10% of max)
+            self.warmup_steps = 715  # Steps to warm up from 0 to max learning rate
+            self.max_steps = 17234  # Total training steps
 
         # Initialize data loader with training data
-        self.train_dataloader = OpenWebtextDataloader(
-            data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="train",
-            master_process=self.master_process,
-        )
+        if self.mid_training:
+            # Use TaskMixture for mid-training (SmolTalk, MMLU, GSM8K)
+            if self.master_process:
+                print("\n" + "=" * 80)
+                print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
+                print("=" * 80 + "\n")
+
+            self.train_dataloader = TaskMixtureDataloader(
+                data_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="train",
+                master_process=self.master_process,
+            )
+        else:
+            # Use OpenWebText for pretraining
+            self.train_dataloader = OpenWebtextDataloader(
+                data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="train",
+                master_process=self.master_process,
+            )
 
         # Eval dataloader (only initialize if running evals)
         if self.run_evals:
@@ -141,6 +191,7 @@ class Trainer:
                 ddp_rank=self.ddp_rank,
                 generation_log_file=self.generation_log_file,
                 checkpoint_interval=self.config.checkpoint_interval,
+                mid_training=self.mid_training,
             )
         else:
             if self.master_process:
@@ -153,10 +204,16 @@ class Trainer:
 
         # Initialize wandb for experiment tracking
         if self.master_process:
+            project_name = (
+                "gpt2-midtraining" if self.mid_training else "gpt2-pretraining"
+            )
             wandb.init(
-                project="gpt2-fineweb",
+                project=project_name,
                 config={
                     "model_type": "GPT-2",
+                    "training_mode": (
+                        "mid-training" if self.mid_training else "pretraining"
+                    ),
                     "batch_size": self.config.batch_size,
                     "block_size": self.config.block_size,
                     "max_learning_rate": self.max_learning_rate,
@@ -167,33 +224,75 @@ class Trainer:
                     "weight_decay": 0.10,
                     "gradient_clip_norm": 1.0,
                     "run_evals": self.run_evals,
+                    "start_step": self.start_step,
                 },
             )
 
-    def get_lr(self, step):
+    def _load_checkpoint(self, checkpoint_path):
+        """
+        Load model weights and optimizer state from a checkpoint.
+
+        Args:
+            checkpoint_path (str): Path to the checkpoint file
+        """
+        if self.master_process:
+            print(f"\n{'='*80}")
+            print(f"📂 Loading checkpoint from: {checkpoint_path}")
+            print(f"{'='*80}\n")
+
+        # weights_only=False required for loading custom classes like GPTConfig
+        # (PyTorch 2.6+ defaults to weights_only=True for security)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=False
+        )
+
+        # Load model state
+        self.model.load_state_dict(checkpoint["model"])
+
+        # Load config if available
+        if "config" in checkpoint:
+            self.config = checkpoint["config"]
+
+        # Load step if available (for resuming)
+        if "step" in checkpoint:
+            self.start_step = checkpoint["step"]
+            if self.master_process:
+                print(f"✅ Loaded checkpoint from step {self.start_step}")
+
+        # Load val loss if available
+        if "val_loss" in checkpoint and self.master_process:
+            print(f"   Checkpoint val_loss: {checkpoint['val_loss']:.4f}")
+
+        if self.master_process:
+            print(f"{'='*80}\n")
+
+    def get_lr(self, global_step):
         """
         Implement learning rate scheduling with warmup and cosine annealing.
 
         - Warmup: Linear increase from 0 to max_lr over warmup_steps
         - Cosine annealing: Smooth decay from max_lr to min_lr using cosine function
-        - Constant: min_lr after max_steps
+        - Constant: min_lr after total_steps
 
         Args:
-            step (int): Current training step
+            global_step (int): Current global training step (across all epochs)
 
         Returns:
             float: Learning rate for current step
         """
-        if step < self.warmup_steps:
+        # Total steps across all epochs
+        total_steps = self.max_steps * self.num_epochs
+
+        if global_step < self.warmup_steps:
             # Linear warmup: gradually increase learning rate
-            lr = self.max_learning_rate * (step + 1) / self.warmup_steps
-        elif step > self.max_steps:
-            # After max steps, use minimum learning rate
+            lr = self.max_learning_rate * (global_step + 1) / self.warmup_steps
+        elif global_step > total_steps:
+            # After total steps, use minimum learning rate
             lr = self.min_learning_rate
         else:
             # Cosine annealing: smooth decay using cosine function
-            decay_ratio = (step - self.warmup_steps) / (
-                self.max_steps - self.warmup_steps
+            decay_ratio = (global_step - self.warmup_steps) / (
+                total_steps - self.warmup_steps
             )
             assert 0 <= decay_ratio <= 1
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # Cosine coefficient
@@ -212,10 +311,18 @@ class Trainer:
         torch.set_float32_matmul_precision("high")
 
         if self.master_process:
+            total_steps = self.max_steps * self.num_epochs
             print("\n" + "=" * 80)
-            print("🚀 STARTING TRAINING")
+            if self.mid_training:
+                print("🔄 STARTING MID-TRAINING")
+            else:
+                print("🚀 STARTING TRAINING")
             print("=" * 80)
-            print(f"📊 Total steps: {self.max_steps:,}")
+            if self.start_step > 0:
+                print(f"📍 Resuming from step: {self.start_step:,}")
+            print(f"📊 Steps per epoch: {self.max_steps:,}")
+            print(f"📊 Total epochs: {self.num_epochs}")
+            print(f"📊 Total steps: {total_steps:,}")
             print(
                 f"📦 Batch size: {self.config.batch_size} x {self.config.block_size} tokens"
             )
@@ -224,9 +331,12 @@ class Trainer:
             print("=" * 80 + "\n")
 
         # Main training loop over epochs
+        global_step = (
+            self.start_step
+        )  # Track global step across all epochs for LR scheduling
         for epoch in range(self.num_epochs):
             # Process all batches in the current epoch
-            for step in range(self.max_steps):
+            for step in range(self.start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
                 self.optimzer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
@@ -259,8 +369,8 @@ class Trainer:
                     self.model.parameters(), 1.0
                 )  # Clip gradients to max norm of 1.0
 
-                # Update learning rate based on current step
-                lr = self.get_lr(step)
+                # Update learning rate based on global step (continuous across epochs)
+                lr = self.get_lr(global_step)
                 for param_group in self.optimzer.param_groups:
                     param_group["lr"] = lr
 
@@ -282,11 +392,19 @@ class Trainer:
                 )
 
                 # Periodically estimate loss on train/val sets for monitoring
-                if self.run_evals and step % self.run_evals_after == 0:
+                if self.run_evals and (
+                    step % self.run_evals_after == 0 or step == self.max_steps - 1
+                ):
                     self.evaluator.estimate_validation_loss(
-                        step=step, checkpoint_model=True, max_steps=self.max_steps
+                        step=step,
+                        checkpoint_model=True,
+                        max_steps=self.max_steps,
+                        epoch=epoch,
+                        global_step=global_step,
                     )
-                    self.evaluator.estimate_hellaswag_accuracy(step=step)
+                    self.evaluator.estimate_hellaswag_accuracy(
+                        step=step, global_step=global_step
+                    )
                     self.evaluator.sample_from_model(
                         num_sequences=4,
                         max_length=32,
@@ -300,7 +418,8 @@ class Trainer:
                     wandb.log(
                         {
                             "epoch": epoch,
-                            "step": step,
+                            "epoch_step": step,
+                            "step": global_step,
                             "train_loss": train_loss,
                             "train_bpb": train_bpb,
                             "learning_rate": lr,
@@ -311,15 +430,19 @@ class Trainer:
                     )
 
                     # Print comprehensive training statistics
-                    progress = (step + 1) / self.max_steps * 100
+                    total_steps = self.max_steps * self.num_epochs
+                    progress = (global_step + 1) / total_steps * 100
                     print(
-                        f"[Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
+                        f"[Epoch {epoch+1}/{self.num_epochs}] [Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
                         f"Loss: {train_loss:.4f} | BPB: {train_bpb:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Grad: {norm:.2e} | "
                         f"Speed: {tokens_per_second/1000:.1f}K tok/s | "
                         f"Time: {end_time - start_time:.2f}s"
                     )
+
+                # Increment global step counter
+                global_step += 1
 
         # Training complete
         if self.master_process:
