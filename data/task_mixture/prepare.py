@@ -26,6 +26,7 @@ Usage:
 import os
 import json
 import argparse
+import shutil
 from tqdm import tqdm
 import numpy as np
 import tiktoken
@@ -417,7 +418,7 @@ def tokenize_and_save(dataset, output_file, enc, special_tokens):
         tokenize_example,
         remove_columns=["text"],
         desc="Tokenizing",
-        num_proc=1,  # tiktoken is already fast, parallelism can cause issues
+        num_proc=NUM_PROC,
     )
 
     # Calculate total tokens
@@ -473,8 +474,14 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
+        default="/mnt/localssd/NanoGPT/data/task_mixture",  # Local disk (mmap compatible)
+        help="Local directory to save processed data (must support mmap)",
+    )
+    parser.add_argument(
+        "--final_dir",
+        type=str,
         default="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
-        help="Directory to save processed data (train.bin, val.bin, metadata.json)",
+        help="Final destination to copy files to (can be network filesystem)",
     )
     parser.add_argument(
         "--cache_dir",
@@ -572,6 +579,29 @@ def main():
     print(
         "\nTo use in training, update TaskMixtureDataloader to read from these .bin files."
     )
+
+    # -------------------------------------------------------------------------
+    # Copy files to final destination (network filesystem) and delete local copy
+    # -------------------------------------------------------------------------
+    if args.final_dir and args.final_dir != args.output_dir:
+        print(f"\n📦 Copying files to {args.final_dir}...")
+        os.makedirs(args.final_dir, exist_ok=True)
+
+        files_to_copy = ["train.bin", "val.bin", "metadata.json"]
+        for filename in files_to_copy:
+            src = os.path.join(args.output_dir, filename)
+            dst = os.path.join(args.final_dir, filename)
+            if os.path.exists(src):
+                print(f"  Copying {filename}...")
+                shutil.copy2(src, dst)
+                print(f"  ✓ {filename} copied")
+                # Delete local copy
+                os.remove(src)
+                print(f"  🗑️  {filename} deleted from local")
+            else:
+                print(f"  ⚠️  {filename} not found, skipping")
+
+        print(f"\n✅ Files copied to {args.final_dir} and local copies deleted")
 
 
 # =============================================================================

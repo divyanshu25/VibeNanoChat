@@ -1,4 +1,5 @@
 import os
+import shutil
 from tqdm import tqdm
 import numpy as np
 import tiktoken
@@ -13,9 +14,13 @@ num_proc_load_dataset = num_proc
 # Initialize GPT-2 tokenizer
 enc = tiktoken.get_encoding("gpt2")
 
+# Directories
+output_dir = "/mnt/localssd/NanoGPT/data/openwebtext"  # Local disk (mmap compatible)
+final_dir = "/sensei-fs/users/divgoyal/openwebtext"  # Final destination (network FS)
+cache_dir = "/sensei-fs/users/divgoyal/openwebtext/hf_cache"
+
 if __name__ == "__main__":
     # Load OpenWebText dataset (~54GB, 8M documents)
-    cache_dir = "/sensei-fs/users/divgoyal/openwebtext/hf_cache"
     dataset = load_dataset(
         "Skylion007/openwebtext", num_proc=num_proc_load_dataset, cache_dir=cache_dir
     )
@@ -42,7 +47,6 @@ if __name__ == "__main__":
 
     # Write tokenized data to binary files for training
     # Strategy: Concatenate all token IDs into one continuous array per split
-    output_dir = "/sensei-fs/users/divgoyal/openwebtext"
     os.makedirs(output_dir, exist_ok=True)
 
     for split, dset in tokenized.items():
@@ -72,6 +76,27 @@ if __name__ == "__main__":
 
         # Ensure all data is written to disk
         arr.flush()
+
+    # Copy files to final destination (network filesystem) and delete local copy
+    if final_dir and final_dir != output_dir:
+        print(f"\n📦 Copying files to {final_dir}...")
+        os.makedirs(final_dir, exist_ok=True)
+
+        files_to_copy = ["train.bin", "val.bin"]
+        for filename in files_to_copy:
+            src = os.path.join(output_dir, filename)
+            dst = os.path.join(final_dir, filename)
+            if os.path.exists(src):
+                print(f"  Copying {filename}...")
+                shutil.copy2(src, dst)
+                print(f"  ✓ {filename} copied")
+                # Delete local copy
+                os.remove(src)
+                print(f"  🗑️  {filename} deleted from local")
+            else:
+                print(f"  ⚠️  {filename} not found, skipping")
+
+        print(f"\n✅ Files copied to {final_dir} and local copies deleted")
 
     # Output files:
     # train.bin: ~17GB, ~9B tokens
