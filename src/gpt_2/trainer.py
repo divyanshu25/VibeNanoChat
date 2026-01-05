@@ -14,7 +14,7 @@ from gpt_2.gpt2_model import GPT, GPTConfig
 from gpt_2.fineweb_edu_dataloader import FinewebEduDataloader
 from gpt_2.hellaswag_dataloader import HellaSwagDataloader
 from gpt_2.task_mixture_dataloader import TaskMixtureDataloader
-from gpt_2.utils import get_lr, load_checkpoint, save_checkpoint
+from gpt_2.utils import get_lr, load_checkpoint, save_checkpoint, accumulate_bpb
 import time
 import wandb
 from gpt_2.evaluator import Evaluators
@@ -79,6 +79,7 @@ class Trainer:
         self._setup_dataloaders()
         self._setup_optimizer_and_checkpoint()
         self._setup_wandb()
+        # self._setup_token_bytes()
 
     def _setup_logging(self):
         """Setup generation log file for tracking model outputs."""
@@ -264,6 +265,19 @@ class Trainer:
                 },
             )
 
+    def _setup_token_bytes(self):
+        """Load pre-computed token_bytes tensor for BPB calculation."""
+        if self.token_bytes_path is not None:
+            self._token_bytes = torch.load(self.token_bytes_path, weights_only=True).to(
+                self.device
+            )
+        else:
+            self._token_bytes = None
+            if self.master_process:
+                print(
+                    "⚠️  token_bytes_path not provided - train BPB will not be computed"
+                )
+
     def train(self):
         """
         Main training loop that implements the full training procedure.
@@ -324,13 +338,10 @@ class Trainer:
                     loss_accumulator += loss
 
                     # Accumulate for BPB calculation
-                    if self.run_evals:
-                        token_bytes = self.evaluator._token_bytes
-                        if token_bytes is not None:
-                            y_flat = y.view(-1)
-                            num_bytes = token_bytes[y_flat]
-                            total_nats += (per_token_loss * (num_bytes > 0)).sum()
-                            total_bytes += num_bytes.sum()
+                    # if self._token_bytes is not None:
+                    #     nats, bytes = accumulate_bpb(per_token_loss, y, self._token_bytes)
+                    #     total_nats += nats
+                    #     total_bytes += bytes
 
                     if self.ddp:
                         self.model.require_backward_grad_sync = (
@@ -342,13 +353,13 @@ class Trainer:
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
                     )
-                    if self.run_evals:
-                        torch.distributed.all_reduce(
-                            total_nats, op=torch.distributed.ReduceOp.SUM
-                        )
-                        torch.distributed.all_reduce(
-                            total_bytes, op=torch.distributed.ReduceOp.SUM
-                        )
+                    # if self._token_bytes is not None:
+                    #     torch.distributed.all_reduce(
+                    #         total_nats, op=torch.distributed.ReduceOp.SUM
+                    #     )
+                    #     torch.distributed.all_reduce(
+                    #         total_bytes, op=torch.distributed.ReduceOp.SUM
+                    #     )
 
                 # Gradient clipping to prevent exploding gradients
                 # This stabilizes training by limiting gradient magnitude
@@ -431,12 +442,12 @@ class Trainer:
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()
-                    # Compute train BPB
-                    total_bytes_val = total_bytes.item()
-                    if total_bytes_val > 0:
-                        train_bpb = total_nats.item() / (math.log(2) * total_bytes_val)
-                    else:
-                        train_bpb = float("inf")
+                    # # Compute train BPB
+                    # total_bytes_val = total_bytes.item()
+                    # if total_bytes_val > 0:
+                    #     train_bpb = total_nats.item() / (math.log(2) * total_bytes_val)
+                    # else:
+                    #     train_bpb = float("inf")
 
                     wandb.log(
                         {
@@ -444,7 +455,7 @@ class Trainer:
                             "epoch_step": step,
                             "step": global_step,
                             "train_loss": train_loss,
-                            "train_bpb": train_bpb,
+                            # "train_bpb": train_bpb,
                             "learning_rate": lr,
                             "tokens_per_second": tokens_per_second,
                             "time_taken": end_time - start_time,
@@ -457,7 +468,7 @@ class Trainer:
                     progress = (global_step + 1) / total_steps * 100
                     print(
                         f"[Epoch {epoch+1}/{self.num_epochs}] [Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
-                        f"Loss: {train_loss:.4f} | BPB: {train_bpb:.4f} | "
+                        f"Loss: {train_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Grad: {norm:.2e} | "
                         f"Speed: {tokens_per_second/1000:.1f}K tok/s | "

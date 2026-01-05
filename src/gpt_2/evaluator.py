@@ -4,6 +4,7 @@ import wandb
 import time
 import math
 from gpt_2.gpt2_model import generate
+from gpt_2.utils import accumulate_bpb
 
 
 class Evaluators:
@@ -76,23 +77,9 @@ class Evaluators:
                 val_loss_accumulator += per_token_loss.mean() / val_loss_steps
 
                 # BPB calculation
-                y = Y.view(-1)
-                if (y.int() < 0).any():
-                    # Handle ignored targets (e.g. -1)
-                    valid = y >= 0
-                    y_safe = torch.where(valid, y, torch.zeros_like(y))
-                    num_bytes = torch.where(
-                        valid,
-                        token_bytes[y_safe],
-                        torch.zeros_like(y, dtype=token_bytes.dtype),
-                    )
-                    total_nats += (per_token_loss * (num_bytes > 0)).sum()
-                    total_bytes += num_bytes.sum()
-                else:
-                    # Fast path: no ignored targets
-                    num_bytes = token_bytes[y]
-                    total_nats += (per_token_loss * (num_bytes > 0)).sum()
-                    total_bytes += num_bytes.sum()
+                nats, bytes = accumulate_bpb(per_token_loss, Y, token_bytes)
+                total_nats += nats
+                total_bytes += bytes
 
         self.model.train()
 

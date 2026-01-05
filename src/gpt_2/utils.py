@@ -233,3 +233,41 @@ def save_checkpoint(
 
     torch.save(checkpoint, checkpoint_path)
     print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
+
+
+def accumulate_bpb(per_token_loss, targets, token_bytes):
+    """
+    Accumulate total nats and bytes for BPB calculation.
+
+    Handles:
+    - Special tokens (token_bytes == 0): excluded from calculation
+    - Ignored targets (negative indices): excluded from calculation
+
+    Args:
+        per_token_loss: Per-token loss tensor, shape (B*T,)
+        targets: Target token IDs, shape (B, T) or (B*T,)
+        token_bytes: Tensor mapping token ID to byte length, shape (vocab_size,)
+
+    Returns:
+        tuple: (nats_sum, bytes_sum) to add to running totals
+    """
+    y = targets.view(-1)
+
+    if (y.int() < 0).any():
+        # Handle ignored targets (e.g. -1)
+        valid = y >= 0
+        y_safe = torch.where(valid, y, torch.zeros_like(y))
+        num_bytes = torch.where(
+            valid,
+            token_bytes[y_safe],
+            torch.zeros_like(y, dtype=token_bytes.dtype),
+        )
+    else:
+        # Fast path: no ignored targets
+        num_bytes = token_bytes[y]
+
+    # Exclude special tokens (num_bytes == 0) from loss sum
+    nats_sum = (per_token_loss * (num_bytes > 0)).sum()
+    bytes_sum = num_bytes.sum()
+
+    return nats_sum, bytes_sum
