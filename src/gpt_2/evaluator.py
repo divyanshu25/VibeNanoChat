@@ -27,20 +27,22 @@ class Evaluators:
         self.generation_log_file = generation_log_file
 
     @staticmethod
-    def loss_to_bpb(loss):
+    def loss_to_bpb(loss, bytes_per_token=4.0):
         """
         Convert cross-entropy loss (in nats) to bits per byte (BPB).
 
         Args:
             loss: Cross-entropy loss value
+            bytes_per_token: Average bytes per token (default 4.0 for GPT-2 on English)
 
         Returns:
             float: Bits per byte metric
 
-        Formula: BPB = loss × log₂(e)
+        Formula: BPB = loss × log₂(e) / bytes_per_token
         Lower BPB is better (perfect prediction = 0, random = ~8)
         """
-        return loss * math.log2(math.e)
+        bits_per_token = loss * math.log2(math.e)
+        return bits_per_token / bytes_per_token
 
     def estimate_validation_loss(self, step, global_step=None):
         """
@@ -59,7 +61,7 @@ class Evaluators:
         self.model.eval()
         val_loss_accumulator = torch.tensor(0.0, device=self.device)
         self.eval_dataloader.reset()
-        val_loss_steps = 34
+        val_loss_steps = 39  # this number of eval tokens divided by batch size
 
         with torch.no_grad():
             for k in range(val_loss_steps):
@@ -72,7 +74,6 @@ class Evaluators:
                 val_loss_accumulator += loss
 
         self.model.train()
-
         if self.ddp:
             torch.distributed.all_reduce(
                 val_loss_accumulator, op=torch.distributed.ReduceOp.AVG

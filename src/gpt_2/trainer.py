@@ -130,8 +130,8 @@ class Trainer:
         if self.mid_training:
             self.max_learning_rate = 1e-4
             self.min_learning_rate = self.max_learning_rate * 0.1
-            self.warmup_steps = 100
-            self.max_steps = 5000
+            self.warmup_steps = 80
+            self.max_steps = 878
         else:
             self.max_learning_rate = 6e-4
             self.min_learning_rate = self.max_learning_rate * 0.1
