@@ -68,8 +68,12 @@ def generate_response(model, tokenizer, prompt, device, max_new_tokens=256):
                 break
 
     generated_tokens = tokens[0, prompt_length:].tolist()
-    response = tokenizer.decode(generated_tokens)
+    raw_response = tokenizer.decode(generated_tokens)
 
+    # Highlight special tokens in red brackets for debugging
+    RED = "\033[91m"
+    RESET = "\033[0m"
+    response = raw_response
     for token_str in [
         "<|assistant_end|>",
         "<|endoftext|>",
@@ -78,9 +82,9 @@ def generate_response(model, tokenizer, prompt, device, max_new_tokens=256):
         "<|assistant_start|>",
         "<|bos|>",
     ]:
-        response = response.replace(token_str, "")
+        response = response.replace(token_str, f"{RED}[{token_str}]{RESET}")
 
-    return response.strip()
+    return response.strip(), raw_response
 
 
 def format_chat_prompt(messages):
@@ -144,9 +148,15 @@ def main():
             messages.append({"role": "user", "content": user_input})
             prompt = format_chat_prompt(messages)
 
-            print("Assistant: ", end="", flush=True)
-            response = generate_response(model, tokenizer, prompt, device)
-            print(response + "\n")
+            # Debug: show prompt with special tokens
+            print(f"\n[INPUT] {prompt}")
+
+            response, raw_response = generate_response(model, tokenizer, prompt, device)
+
+            # Debug: show raw response with special tokens
+            print(f"[OUTPUT] {raw_response}")
+
+            print(f"\nAssistant: {response}\n")
 
             messages.append({"role": "assistant", "content": response})
 

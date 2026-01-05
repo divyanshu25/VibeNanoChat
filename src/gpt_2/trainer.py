@@ -224,6 +224,7 @@ class Trainer:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
+                self.config.checkpoint_interval = 800
                 if self.master_process:
                     print(
                         "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"

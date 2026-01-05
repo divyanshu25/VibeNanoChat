@@ -182,7 +182,7 @@ def save_checkpoint(
     val_loss: float,
     checkpoint_dir: str,
     ddp: bool = False,
-    checkpoint_interval: int = 1000,
+    checkpoint_interval: int = 200,
     max_steps: int = 17234,
     num_epochs: int = 3,
     master_process: bool = True,
@@ -229,7 +229,9 @@ def save_checkpoint(
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
-    checkpoint_path = f"{checkpoint_dir}/model_checkpoint_epoch{epoch}_step{step}{checkpoint_suffix}.pt"
+    checkpoint_path = (
+        f"{checkpoint_dir}/model_checkpoint_global{global_step}{checkpoint_suffix}.pt"
+    )
 
     torch.save(checkpoint, checkpoint_path)
     print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
