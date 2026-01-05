@@ -140,34 +140,31 @@ class Trainer:
 
     def _setup_dataloaders(self):
         """Initialize train and eval dataloaders based on training mode."""
+        # Select dataloader class and data directory based on training mode
         if self.mid_training:
+            DataloaderClass = TaskMixtureDataloader
+            data_dir = "/sensei-fs/users/divgoyal/nanochat_midtraining_data"
             if self.master_process:
                 print("\n" + "=" * 80)
                 print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
                 print("=" * 80 + "\n")
-            self.train_dataloader = TaskMixtureDataloader(
-                data_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="train",
-                master_process=self.master_process,
-            )
         else:
-            self.train_dataloader = FinewebEduDataloader(
-                data_dir="/sensei-fs/users/divgoyal/fineweb_edu",
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="train",
-                master_process=self.master_process,
-            )
+            DataloaderClass = FinewebEduDataloader
+            data_dir = "/sensei-fs/users/divgoyal/fineweb_edu"
+
+        self.train_dataloader = DataloaderClass(
+            data_dir=data_dir,
+            batch_size=self.config.batch_size,
+            block_size=self.config.block_size,
+            ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            split="train",
+            master_process=self.master_process,
+        )
 
         if self.run_evals:
-            self.eval_dataloader = FinewebEduDataloader(
-                data_dir="/sensei-fs/users/divgoyal/fineweb_edu",
+            self.eval_dataloader = DataloaderClass(
+                data_dir=data_dir,
                 batch_size=self.config.batch_size,
                 block_size=self.config.block_size,
                 ddp_world_size=self.ddp_world_size,
@@ -364,20 +361,27 @@ class Trainer:
                 # Periodically estimate loss on train/val sets for monitoring
                 total_steps = self.max_steps * self.num_epochs
                 val_loss = None  # Will be set if evals run
-                if self.run_evals and (
+                should_eval = (
                     global_step % self.run_evals_after == 0
                     or global_step == total_steps - 1
-                ):
+                )
+                if self.run_evals and should_eval:
                     val_loss = self.evaluator.estimate_validation_loss(
                         step=step, global_step=global_step
                     )
-                    self.evaluator.estimate_hellaswag_accuracy(
-                        step=step, global_step=global_step
+                    if not self.mid_training:
+                        self.evaluator.estimate_hellaswag_accuracy(
+                            step=step, global_step=global_step
+                        )
+                    sample_context = (
+                        "<|bos|><|user_start|>Give me a random joke.<|user_end|>"
+                        if self.mid_training
+                        else "Hello, I'm a language model,"
                     )
                     self.evaluator.sample_from_model(
                         num_sequences=4,
                         max_length=32,
-                        context="Hello, I'm a language model,",
+                        context=sample_context,
                         step=step,
                     )
 
