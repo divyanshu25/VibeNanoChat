@@ -89,12 +89,12 @@ class HellaSwagDataloader:
             for i in range(4):
                 seq = example["context_tokens"] + example["ending_tokens"][i]
 
-                # Truncate ending if too long (context is always <= 1024)
+                # Truncate ending if too long
                 if len(seq) > max_length:
-                    # Keep all context + truncate ending to fit within 1024
+                    # Keep all context + truncate ending to fit within max_length
                     seq = seq[:max_length]
 
-                # Pad to exactly 1024 tokens
+                # Pad to exactly max_length tokens
                 # Using 50256 (GPT-2's EOS token) for padding
                 padded_seq = seq + [50256] * (max_length - len(seq))
 
@@ -104,7 +104,7 @@ class HellaSwagDataloader:
             y.append([example["label"], context_len])
 
         # Convert to tensors
-        x = torch.tensor(x, dtype=torch.long)  # Shape: (batch_size * 4, 1024)
+        x = torch.tensor(x, dtype=torch.long)  # Shape: (batch_size * 4, 256)
         y = torch.tensor(y, dtype=torch.long)  # Shape: (batch_size, 2)
 
         return x, y
@@ -120,9 +120,9 @@ class HellaSwagDataloader:
         4. Compare with ground truth label
 
         Args:
-            logits: (B*4, 1024, vocab_size) - Model predictions
+            logits: (B*4, 256, vocab_size) - Model predictions
             y: (B, 2) - Each row is [label, context_length]
-            x: (B*4, 1024) - Input token sequences
+            x: (B*4, 256) - Input token sequences
 
         Returns:
             num_correct: Number of correct predictions
@@ -132,8 +132,8 @@ class HellaSwagDataloader:
 
         for i in range(B):
             # Get the 4 full sequences (context + ending) for this example
-            seq_logits = logits[i * 4 : (i + 1) * 4]  # Shape: (4, 1024, vocab_size)
-            seq_tokens = x[i * 4 : (i + 1) * 4]  # Shape: (4, 1024)
+            seq_logits = logits[i * 4 : (i + 1) * 4]  # Shape: (4, 256, vocab_size)
+            seq_tokens = x[i * 4 : (i + 1) * 4]  # Shape: (4, 256)
 
             # Context length for this example (where endings start)
             context_len = y[i][1].item()

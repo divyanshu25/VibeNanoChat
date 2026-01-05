@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         # This is more memory efficient than manually repeating K/V heads
         y = F.scaled_dot_product_attention(
             q, k, v, is_causal=True, enable_gqa=(self.n_kv_head < self.n_head)
-        )
+        )  # shape (B, n_head, T, head_dim)
 
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)

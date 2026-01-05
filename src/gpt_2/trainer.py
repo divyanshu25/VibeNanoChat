@@ -8,12 +8,13 @@ sys.path.append(parent_dir)
 
 import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
-from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
+
+# from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
+from gpt_2.fineweb_edu_dataloader import FinewebEduDataloader
 from gpt_2.hellaswag_dataloader import HellaSwagDataloader
 from gpt_2.task_mixture_dataloader import TaskMixtureDataloader
+from gpt_2.utils import get_lr, load_checkpoint, save_checkpoint
 import time
-from gpt_2.gpt2_model import generate
-import math
 import wandb
 from gpt_2.evaluator import Evaluators
 from datetime import datetime
@@ -80,8 +81,30 @@ class Trainer:
 
         # Load checkpoint if provided (for mid-training or resuming)
         self.start_step = 0
+        self.start_epoch = 0
+        self.start_global_step = 0
         if self.checkpoint_path:
-            self._load_checkpoint(self.checkpoint_path)
+            checkpoint_result = load_checkpoint(
+                checkpoint_path=self.checkpoint_path,
+                model=self.model,
+                device=self.device,
+                master_process=self.master_process,
+            )
+            if checkpoint_result["config"]:
+                self.config = checkpoint_result["config"]
+
+            # For mid-training, start fresh (only load weights, not training state)
+            # For resuming pretraining, continue from saved step
+            if self.mid_training:
+                self.start_epoch = 0
+                self.start_step = 0
+                self.start_global_step = 0
+                if self.master_process:
+                    print("🔄 Mid-training mode: Starting from step 0 (weights loaded)")
+            else:
+                self.start_epoch = checkpoint_result["start_epoch"]
+                self.start_step = checkpoint_result["start_step"]
+                self.start_global_step = checkpoint_result["start_global_step"]
 
         self.model.to(self.device)
 
@@ -98,7 +121,7 @@ class Trainer:
             self.raw_model = self.model
 
         # Training hyperparameters
-        self.num_epochs = 3  # Number of complete passes through the dataset
+        self.num_epochs = 2  # Number of complete passes through the dataset
 
         self.run_evals_after = self.config.eval_interval  # Run evals every N steps
 
@@ -131,7 +154,12 @@ class Trainer:
                 self.max_learning_rate * 0.1
             )  # Minimum learning rate (10% of max)
             self.warmup_steps = 715  # Steps to warm up from 0 to max learning rate
-            self.max_steps = 17234  # Total training steps
+            self.max_steps = 18977  # Total training steps
+
+        # Handle epoch boundary for resumed checkpoints (must be after max_steps is set)
+        if self.checkpoint_path and self.start_step >= self.max_steps:
+            self.start_step = 0
+            self.start_epoch += 1
 
         # Initialize data loader with training data
         if self.mid_training:
@@ -152,8 +180,17 @@ class Trainer:
             )
         else:
             # Use OpenWebText for pretraining
-            self.train_dataloader = OpenWebtextDataloader(
-                data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+            # self.train_dataloader = OpenWebtextDataloader(
+            #     data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+            #     batch_size=self.config.batch_size,
+            #     block_size=self.config.block_size,
+            #     ddp_world_size=self.ddp_world_size,
+            #     ddp_rank=self.ddp_rank,
+            #     split="train",
+            #     master_process=self.master_process,
+            # )
+            self.train_dataloader = FinewebEduDataloader(
+                data_dir=f"/sensei-fs/users/divgoyal/fineweb_edu",
                 batch_size=self.config.batch_size,
                 block_size=self.config.block_size,
                 ddp_world_size=self.ddp_world_size,
@@ -164,8 +201,17 @@ class Trainer:
 
         # Eval dataloader (only initialize if running evals)
         if self.run_evals:
-            self.eval_dataloader = OpenWebtextDataloader(
-                data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+            # self.eval_dataloader = OpenWebtextDataloader(
+            #     data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
+            #     batch_size=self.config.batch_size,
+            #     block_size=self.config.block_size,
+            #     ddp_world_size=self.ddp_world_size,
+            #     ddp_rank=self.ddp_rank,
+            #     split="val",
+            #     master_process=self.master_process,
+            # )
+            self.eval_dataloader = FinewebEduDataloader(
+                data_dir=f"/sensei-fs/users/divgoyal/fineweb_edu",
                 batch_size=self.config.batch_size,
                 block_size=self.config.block_size,
                 ddp_world_size=self.ddp_world_size,
@@ -190,8 +236,6 @@ class Trainer:
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
                 generation_log_file=self.generation_log_file,
-                checkpoint_interval=self.config.checkpoint_interval,
-                mid_training=self.mid_training,
             )
         else:
             if self.master_process:
@@ -228,79 +272,6 @@ class Trainer:
                 },
             )
 
-    def _load_checkpoint(self, checkpoint_path):
-        """
-        Load model weights and optimizer state from a checkpoint.
-
-        Args:
-            checkpoint_path (str): Path to the checkpoint file
-        """
-        if self.master_process:
-            print(f"\n{'='*80}")
-            print(f"📂 Loading checkpoint from: {checkpoint_path}")
-            print(f"{'='*80}\n")
-
-        # weights_only=False required for loading custom classes like GPTConfig
-        # (PyTorch 2.6+ defaults to weights_only=True for security)
-        checkpoint = torch.load(
-            checkpoint_path, map_location=self.device, weights_only=False
-        )
-
-        # Load model state
-        self.model.load_state_dict(checkpoint["model"])
-
-        # Load config if available
-        if "config" in checkpoint:
-            self.config = checkpoint["config"]
-
-        # Load step if available (for resuming)
-        if "step" in checkpoint:
-            self.start_step = checkpoint["step"]
-            if self.master_process:
-                print(f"✅ Loaded checkpoint from step {self.start_step}")
-
-        # Load val loss if available
-        if "val_loss" in checkpoint and self.master_process:
-            print(f"   Checkpoint val_loss: {checkpoint['val_loss']:.4f}")
-
-        if self.master_process:
-            print(f"{'='*80}\n")
-
-    def get_lr(self, global_step):
-        """
-        Implement learning rate scheduling with warmup and cosine annealing.
-
-        - Warmup: Linear increase from 0 to max_lr over warmup_steps
-        - Cosine annealing: Smooth decay from max_lr to min_lr using cosine function
-        - Constant: min_lr after total_steps
-
-        Args:
-            global_step (int): Current global training step (across all epochs)
-
-        Returns:
-            float: Learning rate for current step
-        """
-        # Total steps across all epochs
-        total_steps = self.max_steps * self.num_epochs
-
-        if global_step < self.warmup_steps:
-            # Linear warmup: gradually increase learning rate
-            lr = self.max_learning_rate * (global_step + 1) / self.warmup_steps
-        elif global_step > total_steps:
-            # After total steps, use minimum learning rate
-            lr = self.min_learning_rate
-        else:
-            # Cosine annealing: smooth decay using cosine function
-            decay_ratio = (global_step - self.warmup_steps) / (
-                total_steps - self.warmup_steps
-            )
-            assert 0 <= decay_ratio <= 1
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # Cosine coefficient
-            lr = self.min_learning_rate + coeff * (
-                self.max_learning_rate - self.min_learning_rate
-            )
-        return lr
-
     def train(self):
         """
         Main training loop that implements the full training procedure.
@@ -318,8 +289,11 @@ class Trainer:
             else:
                 print("🚀 STARTING TRAINING")
             print("=" * 80)
-            if self.start_step > 0:
-                print(f"📍 Resuming from step: {self.start_step:,}")
+            if self.start_global_step > 0:
+                print(
+                    f"📍 Resuming from epoch {self.start_epoch}, step {self.start_step} "
+                    f"(global step {self.start_global_step:,})"
+                )
             print(f"📊 Steps per epoch: {self.max_steps:,}")
             print(f"📊 Total epochs: {self.num_epochs}")
             print(f"📊 Total steps: {total_steps:,}")
@@ -331,12 +305,12 @@ class Trainer:
             print("=" * 80 + "\n")
 
         # Main training loop over epochs
-        global_step = (
-            self.start_step
-        )  # Track global step across all epochs for LR scheduling
-        for epoch in range(self.num_epochs):
+        global_step = self.start_global_step  # Track global step across all epochs
+        for epoch in range(self.start_epoch, self.num_epochs):
             # Process all batches in the current epoch
-            for step in range(self.start_step, self.max_steps):
+            # Only use start_step for the first resumed epoch, then start from 0
+            epoch_start_step = self.start_step if epoch == self.start_epoch else 0
+            for step in range(epoch_start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
                 self.optimzer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
@@ -370,7 +344,14 @@ class Trainer:
                 )  # Clip gradients to max norm of 1.0
 
                 # Update learning rate based on global step (continuous across epochs)
-                lr = self.get_lr(global_step)
+                lr = get_lr(
+                    global_step=global_step,
+                    warmup_steps=self.warmup_steps,
+                    max_steps=self.max_steps,
+                    num_epochs=self.num_epochs,
+                    max_learning_rate=self.max_learning_rate,
+                    min_learning_rate=self.min_learning_rate,
+                )
                 for param_group in self.optimzer.param_groups:
                     param_group["lr"] = lr
 
@@ -392,15 +373,14 @@ class Trainer:
                 )
 
                 # Periodically estimate loss on train/val sets for monitoring
+                total_steps = self.max_steps * self.num_epochs
+                val_loss = None  # Will be set if evals run
                 if self.run_evals and (
-                    step % self.run_evals_after == 0 or step == self.max_steps - 1
+                    global_step % self.run_evals_after == 0
+                    or global_step == total_steps - 1
                 ):
-                    self.evaluator.estimate_validation_loss(
-                        step=step,
-                        checkpoint_model=True,
-                        max_steps=self.max_steps,
-                        epoch=epoch,
-                        global_step=global_step,
+                    val_loss = self.evaluator.estimate_validation_loss(
+                        step=step, global_step=global_step
                     )
                     self.evaluator.estimate_hellaswag_accuracy(
                         step=step, global_step=global_step
@@ -411,6 +391,22 @@ class Trainer:
                         context="Hello, I'm a language model,",
                         step=step,
                     )
+
+                # Save checkpoint at intervals or at end of training (independent of evals)
+                save_checkpoint(
+                    model=self.model,
+                    step=step,
+                    epoch=epoch,
+                    global_step=global_step,
+                    val_loss=val_loss,
+                    checkpoint_dir="/sensei-fs/users/divgoyal/nanogpt/checkpoints",
+                    ddp=self.ddp,
+                    checkpoint_interval=self.config.checkpoint_interval,
+                    max_steps=self.max_steps,
+                    num_epochs=self.num_epochs,
+                    master_process=self.master_process,
+                    mid_training=self.mid_training,
+                )
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()

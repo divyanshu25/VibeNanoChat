@@ -2,10 +2,15 @@
 Shared utilities for NanoGPT project.
 
 This module provides common functionality used across the project,
-including the custom tokenizer with special tokens for chat format.
+including the custom tokenizer with special tokens for chat format,
+learning rate scheduling, and checkpoint management.
 """
 
+import math
+import os
+
 import tiktoken
+import torch
 
 
 def get_special_tokens():
@@ -56,3 +61,164 @@ def get_custom_tokenizer():
     )
 
     return enc, special_tokens
+
+
+def get_lr(
+    global_step: int,
+    warmup_steps: int,
+    max_steps: int,
+    num_epochs: int,
+    max_learning_rate: float,
+    min_learning_rate: float,
+) -> float:
+    """
+    Implement learning rate scheduling with warmup and cosine annealing.
+
+    - Warmup: Linear increase from 0 to max_lr over warmup_steps
+    - Cosine annealing: Smooth decay from max_lr to min_lr using cosine function
+    - Constant: min_lr after total_steps
+
+    Args:
+        global_step: Current global training step (across all epochs)
+        warmup_steps: Number of steps for linear warmup
+        max_steps: Maximum steps per epoch
+        num_epochs: Total number of epochs
+        max_learning_rate: Peak learning rate
+        min_learning_rate: Minimum learning rate after decay
+
+    Returns:
+        float: Learning rate for current step
+    """
+    total_steps = max_steps * num_epochs
+
+    if global_step < warmup_steps:
+        # Linear warmup: gradually increase learning rate
+        lr = max_learning_rate * (global_step + 1) / warmup_steps
+    elif global_step > total_steps:
+        # After total steps, use minimum learning rate
+        lr = min_learning_rate
+    else:
+        # Cosine annealing: smooth decay using cosine function
+        decay_ratio = (global_step - warmup_steps) / (total_steps - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        lr = min_learning_rate + coeff * (max_learning_rate - min_learning_rate)
+    return lr
+
+
+def load_checkpoint(
+    checkpoint_path: str,
+    model: torch.nn.Module,
+    device: str,
+    master_process: bool = True,
+) -> dict:
+    """
+    Load model weights from a checkpoint.
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model: The model to load weights into
+        device: Device to map the checkpoint to
+        master_process: Whether this is the master process (for logging)
+
+    Returns:
+        dict: Dictionary with 'start_step', 'start_epoch', 'start_global_step', 'config', 'val_loss'
+    """
+    if master_process:
+        print(f"\n{'='*80}")
+        print(f"📂 Loading checkpoint from: {checkpoint_path}")
+        print(f"{'='*80}\n")
+
+    # weights_only=False required for loading custom classes like GPTConfig
+    # (PyTorch 2.6+ defaults to weights_only=True for security)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Load model state
+    model.load_state_dict(checkpoint["model"])
+
+    # Extract training state
+    result = {
+        "config": checkpoint.get("config"),
+        "start_epoch": checkpoint.get("epoch", 0),
+        "start_step": 0,
+        "start_global_step": 0,
+        "val_loss": checkpoint.get("val_loss"),
+    }
+
+    # Load step if available (for resuming)
+    if "step" in checkpoint:
+        result["start_step"] = checkpoint["step"] + 1
+
+    # Load global_step if available
+    if "global_step" in checkpoint:
+        result["start_global_step"] = checkpoint["global_step"] + 1
+
+    if master_process:
+        print(
+            f"✅ Resuming from epoch {result['start_epoch']}, step {result['start_step']}"
+        )
+        print(f"   Global step: {result['start_global_step']}")
+        if result["val_loss"] is not None:
+            print(f"   Checkpoint val_loss: {result['val_loss']:.4f}")
+        print(f"{'='*80}\n")
+
+    return result
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    step: int,
+    epoch: int,
+    global_step: int,
+    val_loss: float,
+    checkpoint_dir: str,
+    ddp: bool = False,
+    checkpoint_interval: int = 1000,
+    max_steps: int = 17234,
+    num_epochs: int = 3,
+    master_process: bool = True,
+    mid_training: bool = False,
+) -> None:
+    """
+    Save model checkpoint at specified intervals.
+
+    Args:
+        model: The model to save (can be DDP wrapped)
+        step: Current step within epoch
+        epoch: Current epoch
+        global_step: Global step across all epochs
+        val_loss: Validation loss for this checkpoint
+        checkpoint_dir: Directory to save checkpoints
+        ddp: Whether using distributed data parallel
+        checkpoint_interval: Save checkpoint every N steps
+        max_steps: Maximum steps per epoch
+        num_epochs: Total number of epochs
+        master_process: Whether this is the master process
+        mid_training: Whether this is mid-training mode
+    """
+    total_steps = max_steps * num_epochs
+    should_save = (global_step > 0 and global_step % checkpoint_interval == 0) or (
+        global_step == total_steps - 1
+    )
+
+    if not (master_process and should_save):
+        return
+
+    # Get the underlying model (unwrap DDP if needed)
+    model_to_save = model.module if ddp else model
+    checkpoint = {
+        "model": model_to_save.state_dict(),
+        "config": model_to_save.config,
+        "step": step,
+        "epoch": epoch,
+        "global_step": global_step,
+        "val_loss": val_loss,
+    }
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
+    checkpoint_path = f"{checkpoint_dir}/model_checkpoint_epoch{epoch}_step{step}{checkpoint_suffix}.pt"
+
+    torch.save(checkpoint, checkpoint_path)
+    print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")

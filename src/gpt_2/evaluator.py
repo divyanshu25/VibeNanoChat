@@ -1,6 +1,5 @@
 import torch
 import wandb
-import os
 import time
 import math
 from gpt_2.gpt2_model import generate
@@ -17,8 +16,6 @@ class Evaluators:
         ddp,
         ddp_rank=0,
         generation_log_file=None,
-        checkpoint_interval=5000,
-        mid_training=False,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -28,9 +25,6 @@ class Evaluators:
         self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.generation_log_file = generation_log_file
-        self.checkpoint_interval = checkpoint_interval
-        self.mid_training = mid_training
-        self.checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
 
     @staticmethod
     def loss_to_bpb(loss):
@@ -48,15 +42,17 @@ class Evaluators:
         """
         return loss * math.log2(math.e)
 
-    def estimate_validation_loss(
-        self, step, checkpoint_model=False, max_steps=None, epoch=0, global_step=None
-    ):
+    def estimate_validation_loss(self, step, global_step=None):
         """
-        Estimate average loss on both training and validation sets.
+        Estimate average loss on validation set.
         This provides a more stable estimate than single-batch loss.
 
+        Args:
+            step: Current step within epoch
+            global_step: Global step across all epochs (for wandb logging)
+
         Returns:
-            dict: Contains 'train' and 'val' average losses
+            float: Validation loss
         """
         start_time = time.time()
 
@@ -102,23 +98,7 @@ class Evaluators:
                 }
             )
 
-        if self.master_process and (
-            (checkpoint_model and step > 0 and step % self.checkpoint_interval == 0)
-            or step == max_steps - 1
-        ):
-            # Get the underlying model (unwrap DDP if needed)
-            model_to_save = self.model.module if self.ddp else self.model
-            checkpoint = {
-                "model": model_to_save.state_dict(),  # Save unwrapped model state
-                "config": model_to_save.config,
-                "step": step,
-                "val_loss": val_loss_accumulator.item(),
-            }
-            checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/checkpoints"
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = f"{checkpoint_dir}/model_checkpoint_epoch{epoch}_step{step}{self.checkpoint_suffix}.pt"
-            torch.save(checkpoint, checkpoint_path)
-            print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")
+        return val_loss
 
     def estimate_hellaswag_accuracy(self, step, global_step=None):
         """
