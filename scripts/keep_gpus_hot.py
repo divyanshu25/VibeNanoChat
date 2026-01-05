@@ -6,9 +6,9 @@ This script runs continuous matrix multiplications on all available GPUs
 to maintain high GPU utilization for testing, benchmarking, or keeping GPUs warm.
 
 Usage:
-    python scripts/keep_gpus_hot.py              # Heat all GPUs
-    python scripts/keep_gpus_hot.py 0            # Heat only GPU 0
-    python scripts/keep_gpus_hot.py 0 2          # Heat GPUs 0 and 2
+    python scripts/keep_gpus_hot.py              # Heat all GPUs immediately
+    python scripts/keep_gpus_hot.py --delay 2    # Wait 2 hours, then heat all GPUs
+    python scripts/keep_gpus_hot.py 0 --delay 1  # Wait 1 hour, then heat GPU 0
     python scripts/keep_gpus_hot.py 0,1,2        # Heat GPUs 0, 1, and 2
 
     Or with make:
@@ -31,11 +31,12 @@ from datetime import datetime
 class GPUHeater:
     """Keeps GPUs hot with continuous computation"""
 
-    def __init__(self, target_utilization=0.90, gpu_ids=None):
+    def __init__(self, target_utilization=0.90, gpu_ids=None, delay_hours=None):
         self.target_utilization = target_utilization
         self.running = True
         self.gpu_workers = []
         self.gpu_ids = gpu_ids  # None means all GPUs
+        self.delay_hours = delay_hours  # Hours to wait before starting
 
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -158,6 +159,30 @@ class GPUHeater:
             print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f} GB) - {status}")
 
         print()
+
+        # Wait for delay if specified
+        if self.delay_hours:
+            delay_seconds = self.delay_hours * 3600
+            print(f"⏳ Waiting {self.delay_hours} hour(s) before starting...")
+            print("💡 Press Ctrl+C to cancel")
+            print("=" * 80)
+
+            start_wait = time.time()
+            try:
+                while self.running and (time.time() - start_wait) < delay_seconds:
+                    remaining = delay_seconds - (time.time() - start_wait)
+                    hours_left = remaining / 3600
+                    if int(remaining) % 60 == 0:  # Print every minute
+                        print(f"⏳ {hours_left:.2f} hours remaining until start...")
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n🛑 Cancelled during wait")
+                return
+
+            if not self.running:
+                return
+            print(f"\n⏱️  Wait complete! Starting GPU heating now...")
+
         print("🚀 Starting GPU heating...")
         print("💡 Press Ctrl+C to stop")
         print("=" * 80)
@@ -173,7 +198,7 @@ class GPUHeater:
             thread.start()
             threads.append(thread)
 
-        # Monitor and keep running
+        # Monitor and keep running indefinitely
         try:
             while self.running:
                 time.sleep(1)
@@ -255,16 +280,22 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s              # Heat all GPUs
-  %(prog)s 0            # Heat only GPU 0
-  %(prog)s 0 2          # Heat GPUs 0 and 2
-  %(prog)s 0,1,2        # Heat GPUs 0, 1, and 2
+  %(prog)s                  # Heat all GPUs immediately
+  %(prog)s --delay 2        # Wait 2 hours, then heat all GPUs
+  %(prog)s 0 --delay 1      # Wait 1 hour, then heat GPU 0
+  %(prog)s 0,1,2            # Heat GPUs 0, 1, and 2
         """,
     )
     parser.add_argument(
         "gpus",
         nargs="*",
         help="GPU IDs to heat (space or comma separated). Leave empty for all GPUs.",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=None,
+        help="Hours to wait before starting (default: start immediately)",
     )
     parser.add_argument(
         "--utilization",
@@ -286,7 +317,9 @@ Examples:
     show_gpu_status()
 
     # Start heating
-    heater = GPUHeater(target_utilization=args.utilization, gpu_ids=gpu_ids)
+    heater = GPUHeater(
+        target_utilization=args.utilization, gpu_ids=gpu_ids, delay_hours=args.delay
+    )
     heater.start()
 
     # Show final status

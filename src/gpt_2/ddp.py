@@ -171,6 +171,7 @@ def run_pretraining(
         run_evals=run_evals,
         mid_training=False,  # Use pretraining configuration
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
+        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
     )
     trainer.train()
 
@@ -244,6 +245,7 @@ def run_midtraining(
         run_evals=run_evals,
         mid_training=True,  # Use mid-training configuration
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
+        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
     )
     trainer.train()
 

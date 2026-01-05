@@ -6,6 +6,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+import math
 import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
 
@@ -37,6 +38,7 @@ class Trainer:
         run_evals=False,
         mid_training=False,
         checkpoint_path=None,
+        token_bytes_path=None,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -51,6 +53,7 @@ class Trainer:
             run_evals: Whether to run evaluations
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
+            token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
         """
         # Store basic config
         self.ddp = ddp
@@ -62,6 +65,7 @@ class Trainer:
         self.run_evals = run_evals
         self.mid_training = mid_training
         self.checkpoint_path = checkpoint_path
+        self.token_bytes_path = token_bytes_path
 
         # Initialize start states
         self.start_step = 0
@@ -108,7 +112,7 @@ class Trainer:
 
     def _setup_hyperparameters(self):
         """Configure training hyperparameters based on training mode."""
-        self.num_epochs = 2
+        self.num_epochs = 6
         self.run_evals_after = self.config.eval_interval
 
         # Batch size and gradient accumulation
@@ -188,7 +192,9 @@ class Trainer:
                 master_process=self.master_process,
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
+                ddp_world_size=self.ddp_world_size,
                 generation_log_file=self.generation_log_file,
+                token_bytes_path=self.token_bytes_path,
             )
         else:
             if self.master_process:
@@ -300,18 +306,32 @@ class Trainer:
                 start_time = time.time()  # Track step timing
                 self.optimizer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
+                # BPB accumulators
+                total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+                total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
+
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
                     x, y = self.train_dataloader.next_batch()
                     x, y = x.to(self.device), y.to(self.device)
 
-                    # Forward pass: compute predictions and loss
+                    # Forward pass: compute per-token loss
                     with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
-                        logits, loss = self.model(x, y)
+                        logits, per_token_loss = self.model(x, y, loss_reduction="none")
 
-                    # normalize loss for gradient accumulation
-                    loss = loss / self.grad_accumulation_steps
+                    # Compute mean loss for backprop
+                    loss = per_token_loss.mean() / self.grad_accumulation_steps
                     loss_accumulator += loss
+
+                    # Accumulate for BPB calculation
+                    if self.run_evals:
+                        token_bytes = self.evaluator._token_bytes
+                        if token_bytes is not None:
+                            y_flat = y.view(-1)
+                            num_bytes = token_bytes[y_flat]
+                            total_nats += (per_token_loss * (num_bytes > 0)).sum()
+                            total_bytes += num_bytes.sum()
+
                     if self.ddp:
                         self.model.require_backward_grad_sync = (
                             micro_step == self.grad_accumulation_steps - 1
@@ -322,6 +342,13 @@ class Trainer:
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
                     )
+                    if self.run_evals:
+                        torch.distributed.all_reduce(
+                            total_nats, op=torch.distributed.ReduceOp.SUM
+                        )
+                        torch.distributed.all_reduce(
+                            total_bytes, op=torch.distributed.ReduceOp.SUM
+                        )
 
                 # Gradient clipping to prevent exploding gradients
                 # This stabilizes training by limiting gradient magnitude
@@ -404,7 +431,13 @@ class Trainer:
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()
-                    train_bpb = Evaluators.loss_to_bpb(train_loss)
+                    # Compute train BPB
+                    total_bytes_val = total_bytes.item()
+                    if total_bytes_val > 0:
+                        train_bpb = total_nats.item() / (math.log(2) * total_bytes_val)
+                    else:
+                        train_bpb = float("inf")
+
                     wandb.log(
                         {
                             "epoch": epoch,

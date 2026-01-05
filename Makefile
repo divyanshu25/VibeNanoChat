@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel kill-gpu gpu-hot gpu-status ddp-train
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel kill-gpu gpu-hot gpu-status ddp-train chat
 
 
 dotenv: ## Initialize .env file
@@ -92,12 +92,17 @@ kill-gpu: ## Kill all GPU processes
 	@echo "💡 Run 'nvidia-smi' to verify GPUs are free"
 
 
-gpu-hot: ## Keep GPUs at ~90%+ utilization. Usage: make gpu-hot [GPUS=0,1,2]
+gpu-hot: ## Keep GPUs at ~90%+ utilization. Usage: make gpu-hot [GPUS=0,1,2] [DELAY=2]
 	@echo "🔥 Starting GPU heating..."
-	@if [ -z "$(GPUS)" ]; then \
-		$(uv) run python scripts/keep_gpus_hot.py; \
+	@DELAY_ARG=""; \
+	if [ -n "$(DELAY)" ]; then \
+		DELAY_ARG="--delay $(DELAY)"; \
+		echo "⏳ Will wait $(DELAY) hour(s) before starting"; \
+	fi; \
+	if [ -z "$(GPUS)" ]; then \
+		$(uv) run python scripts/keep_gpus_hot.py $$DELAY_ARG; \
 	else \
-		$(uv) run python scripts/keep_gpus_hot.py $(GPUS); \
+		$(uv) run python scripts/keep_gpus_hot.py $(GPUS) $$DELAY_ARG; \
 	fi
 
 
@@ -126,4 +131,11 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=8] [MODE=pretrainin
 	eval $$CMD
 
 
+chat: ## Chat with a checkpoint. Usage: make chat CHECKPOINT=/path/to/checkpoint.pt
+	@if [ -z "$(CHECKPOINT)" ]; then \
+		echo "❌ Error: CHECKPOINT is required. Usage: make chat CHECKPOINT=/path/to/checkpoint.pt"; \
+		exit 1; \
+	fi
+	@echo "🤖 Starting chat with checkpoint: $(CHECKPOINT)"
+	@$(uv) run python scripts/chat.py --checkpoint $(CHECKPOINT)
 

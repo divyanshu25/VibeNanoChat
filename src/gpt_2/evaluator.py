@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 import wandb
 import time
 import math
@@ -15,7 +16,9 @@ class Evaluators:
         master_process,
         ddp,
         ddp_rank=0,
+        ddp_world_size=1,
         generation_log_file=None,
+        token_bytes_path=None,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -24,30 +27,21 @@ class Evaluators:
         self.master_process = master_process
         self.ddp = ddp
         self.ddp_rank = ddp_rank
+        self.ddp_world_size = ddp_world_size
         self.generation_log_file = generation_log_file
 
-    @staticmethod
-    def loss_to_bpb(loss, bytes_per_token=4.0):
-        """
-        Convert cross-entropy loss (in nats) to bits per byte (BPB).
-
-        Args:
-            loss: Cross-entropy loss value
-            bytes_per_token: Average bytes per token (default 4.0 for GPT-2 on English)
-
-        Returns:
-            float: Bits per byte metric
-
-        Formula: BPB = loss × log₂(e) / bytes_per_token
-        Lower BPB is better (perfect prediction = 0, random = ~8)
-        """
-        bits_per_token = loss * math.log2(math.e)
-        return bits_per_token / bytes_per_token
+        # Load pre-computed token_bytes tensor for BPB calculation
+        if token_bytes_path is not None:
+            self._token_bytes = torch.load(token_bytes_path, weights_only=True).to(
+                self.device
+            )
+        else:
+            raise ValueError("token_bytes_path is required for BPB calculation")
 
     def estimate_validation_loss(self, step, global_step=None):
         """
-        Estimate average loss on validation set.
-        This provides a more stable estimate than single-batch loss.
+        Estimate average loss on validation set and compute bits per byte (BPB).
+        BPB is tokenization-independent: normalized by actual byte length of tokens.
 
         Args:
             step: Current step within epoch
@@ -59,9 +53,14 @@ class Evaluators:
         start_time = time.time()
 
         self.model.eval()
-        val_loss_accumulator = torch.tensor(0.0, device=self.device)
         self.eval_dataloader.reset()
         val_loss_steps = 39  # this number of eval tokens divided by batch size
+
+        token_bytes = self._token_bytes
+        # Accumulators for loss and BPB
+        val_loss_accumulator = torch.tensor(0.0, device=self.device)
+        total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
 
         with torch.no_grad():
             for k in range(val_loss_steps):
@@ -69,21 +68,50 @@ class Evaluators:
                 X = X.to(self.device)
                 Y = Y.to(self.device)
                 with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
-                    _, loss = self.model(X, Y)
-                loss = loss / val_loss_steps  # shape: (1, 1)
-                val_loss_accumulator += loss
+                    _, per_token_loss = self.model(
+                        X, Y, loss_reduction="none"
+                    )  # (B*T,)
+
+                # Compute mean loss from per-token losses
+                val_loss_accumulator += per_token_loss.mean() / val_loss_steps
+
+                # BPB calculation
+                y = Y.view(-1)
+                if (y.int() < 0).any():
+                    # Handle ignored targets (e.g. -1)
+                    valid = y >= 0
+                    y_safe = torch.where(valid, y, torch.zeros_like(y))
+                    num_bytes = torch.where(
+                        valid,
+                        token_bytes[y_safe],
+                        torch.zeros_like(y, dtype=token_bytes.dtype),
+                    )
+                    total_nats += (per_token_loss * (num_bytes > 0)).sum()
+                    total_bytes += num_bytes.sum()
+                else:
+                    # Fast path: no ignored targets
+                    num_bytes = token_bytes[y]
+                    total_nats += (per_token_loss * (num_bytes > 0)).sum()
+                    total_bytes += num_bytes.sum()
 
         self.model.train()
-        if self.ddp:
-            torch.distributed.all_reduce(
-                val_loss_accumulator, op=torch.distributed.ReduceOp.AVG
-            )
+
+        # Reduce across ranks
+        if self.ddp_world_size > 1:
+            dist.all_reduce(val_loss_accumulator, op=dist.ReduceOp.AVG)
+            dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
 
         elapsed_time = time.time() - start_time
 
-        # Calculate BPB (bits per byte) from loss
+        # Calculate BPB
         val_loss = val_loss_accumulator.item()
-        val_bpb = self.loss_to_bpb(val_loss)
+        total_nats_val = total_nats.item()
+        total_bytes_val = total_bytes.item()
+        if total_bytes_val == 0:
+            val_bpb = float("inf")
+        else:
+            val_bpb = total_nats_val / (math.log(2) * total_bytes_val)
 
         if self.master_process:
             print(f"\n{'='*80}")

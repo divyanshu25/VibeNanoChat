@@ -161,13 +161,14 @@ class GPT(nn.Module):
         )
         return optimizer
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, loss_reduction="mean"):
         """
         Forward pass through the GPT model.
 
         Args:
             idx (torch.Tensor): Input token indices of shape (batch_size, sequence_length)
             targets (torch.Tensor, optional): Target tokens for loss computation
+            loss_reduction (str): Loss reduction mode - 'mean', 'sum', or 'none'
 
         Returns:
             tuple: (logits, loss) where:
@@ -209,8 +210,10 @@ class GPT(nn.Module):
         if targets is not None:
             # Reshape for cross-entropy loss computation
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1)
-            )  # shape of loss: (1,) because we are using mean reduction
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                reduction=loss_reduction,
+            )  # shape depends on reduction: (1,) for mean/sum, (B*T,) for none
 
         return logits, loss
 
