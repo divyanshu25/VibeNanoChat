@@ -110,15 +110,17 @@ def load_checkpoint(
     checkpoint_path: str,
     model: torch.nn.Module,
     device: str,
+    optimizer: torch.optim.Optimizer = None,
     master_process: bool = True,
 ) -> dict:
     """
-    Load model weights from a checkpoint.
+    Load model weights and optionally optimizer state from a checkpoint.
 
     Args:
         checkpoint_path: Path to the checkpoint file
         model: The model to load weights into
         device: Device to map the checkpoint to
+        optimizer: Optional optimizer to load state into (for resuming training)
         master_process: Whether this is the master process (for logging)
 
     Returns:
@@ -135,6 +137,12 @@ def load_checkpoint(
 
     # Load model state
     model.load_state_dict(checkpoint["model"])
+
+    # Load optimizer state if provided and available
+    if optimizer is not None and "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        if master_process:
+            print("✅ Optimizer state loaded")
 
     # Extract training state
     result = {
@@ -167,6 +175,7 @@ def load_checkpoint(
 
 def save_checkpoint(
     model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
     step: int,
     epoch: int,
     global_step: int,
@@ -184,6 +193,7 @@ def save_checkpoint(
 
     Args:
         model: The model to save (can be DDP wrapped)
+        optimizer: The optimizer to save state from
         step: Current step within epoch
         epoch: Current epoch
         global_step: Global step across all epochs
@@ -208,6 +218,7 @@ def save_checkpoint(
     model_to_save = model.module if ddp else model
     checkpoint = {
         "model": model_to_save.state_dict(),
+        "optimizer": optimizer.state_dict(),
         "config": model_to_save.config,
         "step": step,
         "epoch": epoch,

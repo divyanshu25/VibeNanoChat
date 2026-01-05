@@ -52,18 +52,32 @@ class Trainer:
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
         """
-        # Initialize ddp variables
+        # Store basic config
+        self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.ddp_local_rank = ddp_local_rank
         self.ddp_world_size = ddp_world_size
-        self.ddp = ddp
         self.device = device
         self.master_process = master_process
         self.run_evals = run_evals
         self.mid_training = mid_training
         self.checkpoint_path = checkpoint_path
 
-        # Setup generation log file (only on master process)
+        # Initialize start states
+        self.start_step = 0
+        self.start_epoch = 0
+        self.start_global_step = 0
+
+        # Setup components
+        self._setup_logging()
+        self._setup_model()
+        self._setup_hyperparameters()
+        self._setup_dataloaders()
+        self._setup_optimizer_and_checkpoint()
+        self._setup_wandb()
+
+    def _setup_logging(self):
+        """Setup generation log file for tracking model outputs."""
         if self.master_process:
             log_dir = "logs"
             os.makedirs(log_dir, exist_ok=True)
@@ -75,100 +89,62 @@ class Trainer:
         else:
             self.generation_log_file = None
 
-        # Initialize GPT model with default configuration
+    def _setup_model(self):
+        """Initialize GPT model and wrap with DDP if needed."""
         self.config = GPTConfig()
         self.model = GPT(self.config)
-
-        # Load checkpoint if provided (for mid-training or resuming)
-        self.start_step = 0
-        self.start_epoch = 0
-        self.start_global_step = 0
-        if self.checkpoint_path:
-            checkpoint_result = load_checkpoint(
-                checkpoint_path=self.checkpoint_path,
-                model=self.model,
-                device=self.device,
-                master_process=self.master_process,
-            )
-            if checkpoint_result["config"]:
-                self.config = checkpoint_result["config"]
-
-            # For mid-training, start fresh (only load weights, not training state)
-            # For resuming pretraining, continue from saved step
-            if self.mid_training:
-                self.start_epoch = 0
-                self.start_step = 0
-                self.start_global_step = 0
-                if self.master_process:
-                    print("🔄 Mid-training mode: Starting from step 0 (weights loaded)")
-            else:
-                self.start_epoch = checkpoint_result["start_epoch"]
-                self.start_step = checkpoint_result["start_step"]
-                self.start_global_step = checkpoint_result["start_global_step"]
-
         self.model.to(self.device)
 
-        # Optional: Compile model for faster training (commented out to avoid warnings)
-        # Use "reduce-overhead" mode instead of "default" to avoid SM warnings on consumer hardware
+        # Optional: Compile model for faster training
         # self.model = torch.compile(self.model)
 
         if self.ddp:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, device_ids=[self.ddp_local_rank]
             )
-            self.raw_model = self.model.module if self.ddp else self.model
+            self.raw_model = self.model.module
         else:
             self.raw_model = self.model
 
-        # Training hyperparameters
-        self.num_epochs = 2  # Number of complete passes through the dataset
+    def _setup_hyperparameters(self):
+        """Configure training hyperparameters based on training mode."""
+        self.num_epochs = 2
+        self.run_evals_after = self.config.eval_interval
 
-        self.run_evals_after = self.config.eval_interval  # Run evals every N steps
-
+        # Batch size and gradient accumulation
         self.total_batch_size = self.config.total_batch_size
         self.grad_accumulation_steps = self.total_batch_size // (
             self.config.batch_size * self.config.block_size * self.ddp_world_size
-        )  # grad accumulation steps is the total batch size divided by the batch size and block size and ddp world size
+        )
         assert (
             self.total_batch_size
             % (self.config.batch_size * self.config.block_size * self.ddp_world_size)
             == 0
-        ), "Total batch size must be divisible by batch size and block size and ddp world size"
+        ), "Total batch size must be divisible by batch size * block size * world size"
 
-        # Print total batch size and grad accumulation steps
         if self.master_process:
             print(f"Total batch size: {self.total_batch_size}")
             print(f"Grad accumulation steps: {self.grad_accumulation_steps}")
 
         # Learning rate scheduling parameters
         if self.mid_training:
-            # Lower learning rate for mid-training/fine-tuning
-            self.max_learning_rate = 1e-4  # Lower LR for fine-tuning
+            self.max_learning_rate = 1e-4
             self.min_learning_rate = self.max_learning_rate * 0.1
-            self.warmup_steps = 100  # Shorter warmup for fine-tuning
-            self.max_steps = 5000  # Fewer steps for mid-training
+            self.warmup_steps = 100
+            self.max_steps = 5000
         else:
-            # Standard pretraining parameters
-            self.max_learning_rate = 6e-4  # Peak learning rate
-            self.min_learning_rate = (
-                self.max_learning_rate * 0.1
-            )  # Minimum learning rate (10% of max)
-            self.warmup_steps = 715  # Steps to warm up from 0 to max learning rate
-            self.max_steps = 18977  # Total training steps
+            self.max_learning_rate = 6e-4
+            self.min_learning_rate = self.max_learning_rate * 0.1
+            self.warmup_steps = 715
+            self.max_steps = 18977
 
-        # Handle epoch boundary for resumed checkpoints (must be after max_steps is set)
-        if self.checkpoint_path and self.start_step >= self.max_steps:
-            self.start_step = 0
-            self.start_epoch += 1
-
-        # Initialize data loader with training data
+    def _setup_dataloaders(self):
+        """Initialize train and eval dataloaders based on training mode."""
         if self.mid_training:
-            # Use TaskMixture for mid-training (SmolTalk, MMLU, GSM8K)
             if self.master_process:
                 print("\n" + "=" * 80)
                 print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
                 print("=" * 80 + "\n")
-
             self.train_dataloader = TaskMixtureDataloader(
                 data_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
                 batch_size=self.config.batch_size,
@@ -179,18 +155,8 @@ class Trainer:
                 master_process=self.master_process,
             )
         else:
-            # Use OpenWebText for pretraining
-            # self.train_dataloader = OpenWebtextDataloader(
-            #     data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
-            #     batch_size=self.config.batch_size,
-            #     block_size=self.config.block_size,
-            #     ddp_world_size=self.ddp_world_size,
-            #     ddp_rank=self.ddp_rank,
-            #     split="train",
-            #     master_process=self.master_process,
-            # )
             self.train_dataloader = FinewebEduDataloader(
-                data_dir=f"/sensei-fs/users/divgoyal/fineweb_edu",
+                data_dir="/sensei-fs/users/divgoyal/fineweb_edu",
                 batch_size=self.config.batch_size,
                 block_size=self.config.block_size,
                 ddp_world_size=self.ddp_world_size,
@@ -199,19 +165,9 @@ class Trainer:
                 master_process=self.master_process,
             )
 
-        # Eval dataloader (only initialize if running evals)
         if self.run_evals:
-            # self.eval_dataloader = OpenWebtextDataloader(
-            #     data_dir=f"/sensei-fs/users/divgoyal/openwebtext",
-            #     batch_size=self.config.batch_size,
-            #     block_size=self.config.block_size,
-            #     ddp_world_size=self.ddp_world_size,
-            #     ddp_rank=self.ddp_rank,
-            #     split="val",
-            #     master_process=self.master_process,
-            # )
             self.eval_dataloader = FinewebEduDataloader(
-                data_dir=f"/sensei-fs/users/divgoyal/fineweb_edu",
+                data_dir="/sensei-fs/users/divgoyal/fineweb_edu",
                 batch_size=self.config.batch_size,
                 block_size=self.config.block_size,
                 ddp_world_size=self.ddp_world_size,
@@ -220,7 +176,7 @@ class Trainer:
                 master_process=self.master_process,
             )
             self.hellaswag_dataloader = HellaSwagDataloader(
-                data_dir=f"/sensei-fs/users/divgoyal/hellaswag",
+                data_dir="/sensei-fs/users/divgoyal/hellaswag",
                 batch_size=self.config.batch_size,
                 ddp_world_size=self.ddp_world_size,
                 ddp_rank=self.ddp_rank,
@@ -241,12 +197,45 @@ class Trainer:
             if self.master_process:
                 print("Evaluations disabled - skipping eval dataloader initialization")
 
-        # Initialize optimizer with AdamW and weight decay for regularization
-        self.optimzer = self.raw_model.configure_optimizers(
+    def _setup_optimizer_and_checkpoint(self):
+        """Initialize optimizer and load checkpoint if provided."""
+        self.optimizer = self.raw_model.configure_optimizers(
             learning_rate=self.max_learning_rate, weight_decay=0.10, device=self.device
         )
 
-        # Initialize wandb for experiment tracking
+        if self.checkpoint_path:
+            # For mid-training: only load model weights (fresh optimizer)
+            # For resuming pretraining: load both model and optimizer state
+            checkpoint_result = load_checkpoint(
+                checkpoint_path=self.checkpoint_path,
+                model=self.raw_model,
+                device=self.device,
+                optimizer=None if self.mid_training else self.optimizer,
+                master_process=self.master_process,
+            )
+            if checkpoint_result["config"]:
+                self.config = checkpoint_result["config"]
+
+            if self.mid_training:
+                self.start_epoch = 0
+                self.start_step = 0
+                self.start_global_step = 0
+                if self.master_process:
+                    print(
+                        "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"
+                    )
+            else:
+                self.start_epoch = checkpoint_result["start_epoch"]
+                self.start_step = checkpoint_result["start_step"]
+                self.start_global_step = checkpoint_result["start_global_step"]
+
+            # Handle epoch boundary for resumed checkpoints
+            if self.start_step >= self.max_steps:
+                self.start_step = 0
+                self.start_epoch += 1
+
+    def _setup_wandb(self):
+        """Initialize Weights & Biases for experiment tracking."""
         if self.master_process:
             project_name = (
                 "gpt2-midtraining" if self.mid_training else "gpt2-pretraining"
@@ -312,7 +301,7 @@ class Trainer:
             epoch_start_step = self.start_step if epoch == self.start_epoch else 0
             for step in range(epoch_start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
-                self.optimzer.zero_grad()
+                self.optimizer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
@@ -352,11 +341,11 @@ class Trainer:
                     max_learning_rate=self.max_learning_rate,
                     min_learning_rate=self.min_learning_rate,
                 )
-                for param_group in self.optimzer.param_groups:
+                for param_group in self.optimizer.param_groups:
                     param_group["lr"] = lr
 
                 # Apply gradients to update model parameters
-                self.optimzer.step()
+                self.optimizer.step()
 
                 # Synchronize CUDA operations for accurate timing
                 if self.device == "cuda":
@@ -395,6 +384,7 @@ class Trainer:
                 # Save checkpoint at intervals or at end of training (independent of evals)
                 save_checkpoint(
                     model=self.model,
+                    optimizer=self.optimizer,
                     step=step,
                     epoch=epoch,
                     global_step=global_step,
