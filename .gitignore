@@ -23,3 +23,5 @@ logs/
 # Binary files
 *.bin
 *.pt
+
+resources/eval_bundle/

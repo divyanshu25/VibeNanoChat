@@ -59,6 +59,7 @@ class GPT(nn.Module):
         """
         super().__init__()
         self.config = config
+        self.max_seq_len = config.block_size  # Maximum sequence length for evaluation
 
         # Define the main transformer components
         self.transformer = nn.ModuleDict(
