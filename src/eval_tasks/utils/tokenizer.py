@@ -43,7 +43,9 @@ class SimpleTokenizer:
             If single string input: List of token IDs
             If list input: List of lists of token IDs
         """
-        if isinstance(texts, str):
+        is_single_string = isinstance(texts, str)
+
+        if is_single_string:
             texts = [texts]
 
         results = []
@@ -54,7 +56,7 @@ class SimpleTokenizer:
             results.append(tokens)
 
         # If single string was passed, return flat list (not nested)
-        if len(results) == 1:
+        if is_single_string:
             return results[0]
         return results
 

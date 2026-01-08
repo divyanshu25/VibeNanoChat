@@ -112,13 +112,17 @@ gpu-status: ## Show current GPU utilization and memory usage
 
 ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [NO_EVALS=true] [CORE_EVALS=true]
 	@echo "🚀 Starting DDP training with torchrun..."
+	@mkdir -p logs
 	@NGPUS=$${NGPUS:-2}; \
 	MODE=$${MODE:-pretraining}; \
 	CHECKPOINT=$${CHECKPOINT:-}; \
 	NO_EVALS=$${NO_EVALS:-false}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
+	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
+	LOG_FILE="logs/ddp_train_$${TIMESTAMP}.log"; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
+	echo "📝 Logging to: $$LOG_FILE"; \
 	CMD="$(uv) run torchrun --standalone --nproc_per_node=$$NGPUS src/gpt_2/ddp.py --mode $$MODE"; \
 	if [ -n "$$CHECKPOINT" ]; then \
 		echo "📂 Using checkpoint: $$CHECKPOINT"; \
@@ -133,7 +137,7 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		CMD="$$CMD --run-core-evals"; \
 	fi; \
 	echo ""; \
-	eval $$CMD
+	eval $$CMD 2>&1 | tee $$LOG_FILE
 
 
 chat: ## Chat with a checkpoint. Usage: make chat CHECKPOINT=/path/to/checkpoint.pt
