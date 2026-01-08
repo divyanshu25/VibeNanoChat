@@ -12,12 +12,18 @@ from gpt_2.gpt2_model import GPT, GPTConfig
 
 # from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
-from eval_tasks.hellaswag import HellaSwagDataloader
 from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
-from gpt_2.utils import get_lr, load_checkpoint, save_checkpoint, accumulate_bpb
+from gpt_2.utils import (
+    get_lr,
+    load_checkpoint,
+    save_checkpoint,
+    accumulate_bpb,
+    get_custom_tokenizer,
+)
 import time
 import wandb
 from gpt_2.evaluator import Evaluators
+from eval_tasks import CoreEvaluator
 from datetime import datetime
 
 
@@ -36,8 +42,10 @@ class Trainer:
         master_process,
         device,
         run_evals=False,
+        run_core_evals=False,
         mid_training=False,
         checkpoint_path=None,
+        checkpoint_dir=None,
         token_bytes_path=None,
     ):
         """
@@ -51,8 +59,10 @@ class Trainer:
             master_process: Whether this is the master process
             device: Device to train on
             run_evals: Whether to run evaluations
+            run_core_evals: Whether to run CORE benchmark evaluations
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
+            checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
         """
         # Store basic config
@@ -63,8 +73,10 @@ class Trainer:
         self.device = device
         self.master_process = master_process
         self.run_evals = run_evals
+        self.run_core_evals = run_core_evals
         self.mid_training = mid_training
         self.checkpoint_path = checkpoint_path
+        self.checkpoint_dir = checkpoint_dir
         self.token_bytes_path = token_bytes_path
 
         # Initialize start states
@@ -113,7 +125,7 @@ class Trainer:
 
     def _setup_hyperparameters(self):
         """Configure training hyperparameters based on training mode."""
-        self.num_epochs = 6
+        self.num_epochs = 2
         self.run_evals_after = self.config.eval_interval
 
         # Batch size and gradient accumulation
@@ -177,18 +189,9 @@ class Trainer:
                 split="val",
                 master_process=self.master_process,
             )
-            self.hellaswag_dataloader = HellaSwagDataloader(
-                data_dir="/sensei-fs/users/divgoyal/hellaswag",
-                batch_size=self.config.batch_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="validation",
-                master_process=self.master_process,
-            )
             self.evaluator = Evaluators(
                 model=self.model,
                 eval_dataloader=self.eval_dataloader,
-                hellaswag_dataloader=self.hellaswag_dataloader,
                 device=self.device,
                 master_process=self.master_process,
                 ddp=self.ddp,
@@ -200,6 +203,35 @@ class Trainer:
         else:
             if self.master_process:
                 print("Evaluations disabled - skipping eval dataloader initialization")
+
+        # Initialize CORE evaluator if requested
+        if self.run_core_evals:
+            enc, _ = get_custom_tokenizer()
+            # For smaller/faster evals during training, limit to subset of tasks
+            # You can remove tasks_to_run to run all tasks, or adjust max_examples_per_task
+            # core_tasks_subset = [
+            #     'hellaswag_zeroshot',
+            #     'arc_easy',
+            #     'arc_challenge',
+            #     'copa',
+            #     'winograd',
+            #     'winogrande',
+            #     'lambada_openai',
+            # ]
+            self.core_evaluator = CoreEvaluator(
+                model=self.raw_model,
+                tokenizer=enc,
+                device=self.device,
+                master_process=self.master_process,
+                ddp=self.ddp,
+                ddp_rank=self.ddp_rank,
+                ddp_world_size=self.ddp_world_size,
+                eval_bundle_path="/mnt/localssd/NanoGPT/resources/eval_bundle",
+                # tasks_to_run=core_tasks_subset,
+                max_examples_per_task=500,  # Limit examples for faster eval during training
+            )
+        else:
+            self.core_evaluator = None
 
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
@@ -262,6 +294,7 @@ class Trainer:
                     "weight_decay": 0.10,
                     "gradient_clip_norm": 1.0,
                     "run_evals": self.run_evals,
+                    "run_core_evals": self.run_core_evals,
                     "start_step": self.start_step,
                 },
             )
@@ -408,10 +441,6 @@ class Trainer:
                     val_loss = self.evaluator.estimate_validation_loss(
                         step=step, global_step=global_step
                     )
-                    if not self.mid_training:
-                        self.evaluator.estimate_hellaswag_accuracy(
-                            step=step, global_step=global_step
-                        )
                     sample_context = (
                         "<|bos|><|user_start|>Give me a random joke.<|user_end|>"
                         if self.mid_training
@@ -424,6 +453,12 @@ class Trainer:
                         step=step,
                     )
 
+                # Run CORE evaluations if enabled
+                if self.run_core_evals and should_eval:
+                    self.core_evaluator.evaluate_all_tasks(
+                        step=step, global_step=global_step
+                    )
+
                 # Save checkpoint at intervals or at end of training (independent of evals)
                 save_checkpoint(
                     model=self.model,
@@ -432,7 +467,7 @@ class Trainer:
                     epoch=epoch,
                     global_step=global_step,
                     val_loss=val_loss,
-                    checkpoint_dir="/sensei-fs/users/divgoyal/nanogpt/checkpoints",
+                    checkpoint_dir=self.checkpoint_dir,
                     ddp=self.ddp,
                     checkpoint_interval=self.config.checkpoint_interval,
                     max_steps=self.max_steps,

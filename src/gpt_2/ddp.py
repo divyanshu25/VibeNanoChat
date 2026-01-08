@@ -74,10 +74,6 @@ def setup_distributed():
         print(f"Initializing DDP at rank: {os.environ['RANK']}")
         assert torch.cuda.is_available(), "CUDA is not available"
 
-        # Initialize NCCL backend (optimized for NVIDIA GPU communication)
-        # This sets up communication primitives like all_reduce, broadcast, etc.
-        init_process_group(backend="nccl")
-
         # Extract rank information from environment
         ddp_rank = int(os.environ["RANK"])  # Global rank across all nodes
         ddp_local_rank = int(os.environ["LOCAL_RANK"])  # Rank within this node
@@ -87,6 +83,11 @@ def setup_distributed():
         # e.g., rank 0 → cuda:0, rank 1 → cuda:1, etc.
         device = f"cuda:{ddp_local_rank}"
         torch.cuda.set_device(device)
+
+        # Initialize NCCL backend (optimized for NVIDIA GPU communication)
+        # This sets up communication primitives like all_reduce, broadcast, etc.
+        # Pass device_id to avoid warnings about device not being specified
+        init_process_group(backend="nccl", device_id=torch.device(device))
 
         # Only rank 0 should handle logging, checkpointing, and evaluation
         master_process = ddp_rank == 0
@@ -126,6 +127,7 @@ def run_pretraining(
     master_process,
     device,
     run_evals,
+    run_core_evals=False,
     checkpoint_path=None,
 ):
     """
@@ -161,6 +163,8 @@ def run_pretraining(
 
     # Create trainer with mid_training=False for pretraining mode
     # This tells the trainer to use pretraining hyperparameters and data
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
     trainer = Trainer(
         ddp=ddp,
         ddp_rank=ddp_rank,
@@ -169,14 +173,16 @@ def run_pretraining(
         master_process=master_process,
         device=device,
         run_evals=run_evals,
+        run_core_evals=run_core_evals,
         mid_training=False,  # Use pretraining configuration
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
+        checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
     )
     trainer.train()
 
     # Construct path to the final checkpoint for potential mid-training continuation
-    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/checkpoints"
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints"
     final_checkpoint = os.path.join(
         checkpoint_dir, f"model_checkpoint_{trainer.max_steps-1}_pretraining.pt"
     )
@@ -195,7 +201,8 @@ def run_midtraining(
     master_process,
     device,
     run_evals,
-    checkpoint_path,
+    run_core_evals=False,
+    checkpoint_path=None,
 ):
     """
     Execute the mid-training phase.
@@ -235,6 +242,8 @@ def run_midtraining(
 
     # Create trainer with mid_training=True to use mid-training configuration
     # This loads the checkpoint and uses mid-training hyperparameters/data
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
     trainer = Trainer(
         ddp=ddp,
         ddp_rank=ddp_rank,
@@ -243,8 +252,10 @@ def run_midtraining(
         master_process=master_process,
         device=device,
         run_evals=run_evals,
+        run_core_evals=run_core_evals,
         mid_training=True,  # Use mid-training configuration
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
+        checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
     )
     trainer.train()
@@ -287,6 +298,7 @@ def run_trainer(args):
                 master_process,
                 device,
                 args.run_evals,
+                run_core_evals=args.run_core_evals,
                 checkpoint_path=args.checkpoint,  # Optional: resume from checkpoint
             )
 
@@ -303,7 +315,8 @@ def run_trainer(args):
                 master_process,
                 device,
                 args.run_evals,
-                args.checkpoint,
+                run_core_evals=args.run_core_evals,
+                checkpoint_path=args.checkpoint,
             )
 
         # -----------------------------------------------------------------------
@@ -326,6 +339,7 @@ def run_trainer(args):
                 master_process,
                 device,
                 args.run_evals,
+                run_core_evals=args.run_core_evals,
             )
 
             # Transition message
@@ -345,7 +359,8 @@ def run_trainer(args):
                 master_process,
                 device,
                 args.run_evals,
-                checkpoint_path,
+                run_core_evals=args.run_core_evals,
+                checkpoint_path=checkpoint_path,
             )
 
             if master_process:
@@ -400,6 +415,13 @@ if __name__ == "__main__":
         "--no-evals",
         action="store_true",
         help="Disable evaluations during training (faster training)",
+    )
+
+    # CORE evaluation toggle (default: disabled)
+    parser.add_argument(
+        "--run-core-evals",
+        action="store_true",
+        help="Enable CORE benchmark evaluations during training (recommended for tracking model quality)",
     )
 
     # Parse and process arguments

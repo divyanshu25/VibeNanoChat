@@ -12,7 +12,6 @@ class Evaluators:
         self,
         model,
         eval_dataloader,
-        hellaswag_dataloader,
         device,
         master_process,
         ddp,
@@ -23,7 +22,6 @@ class Evaluators:
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
-        self.hellaswag_dataloader = hellaswag_dataloader
         self.device = device
         self.master_process = master_process
         self.ddp = ddp
@@ -115,59 +113,6 @@ class Evaluators:
             )
 
         return val_loss
-
-    def estimate_hellaswag_accuracy(self, step, global_step=None):
-        """
-        Estimate the accuracy of the model on the HellaSwag dataset.
-        """
-        start_time = time.time()
-
-        self.model.eval()
-        self.hellaswag_dataloader.reset()
-        hellaswag_accuracy_steps = 79
-        hellaswag_accuracy_accumulator = torch.tensor(0.0, device=self.device)
-        total_processed_examples = torch.tensor(0.0, device=self.device)
-        with torch.no_grad():
-            for k in range(hellaswag_accuracy_steps):
-                X, Y = self.hellaswag_dataloader.next_batch()
-                X = X.to(self.device)
-                Y = Y.to(self.device)
-                with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
-                    logits, _ = self.model(X)  # Model returns (logits, loss)
-
-                num_correct = self.hellaswag_dataloader.calculate_correctness(
-                    logits, Y, X
-                )
-                hellaswag_accuracy_accumulator += num_correct
-                total_processed_examples += len(Y)
-
-        self.model.train()
-        if self.ddp:
-            # Sum up correct predictions and total examples across all GPUs
-            torch.distributed.all_reduce(
-                hellaswag_accuracy_accumulator, op=torch.distributed.ReduceOp.SUM
-            )
-            torch.distributed.all_reduce(
-                total_processed_examples, op=torch.distributed.ReduceOp.SUM
-            )
-        hellaswag_accuracy = (
-            hellaswag_accuracy_accumulator.item() / total_processed_examples.item()
-        )
-
-        elapsed_time = time.time() - start_time
-
-        if self.master_process:
-            print(f"\n{'='*80}")
-            print(
-                f"📊 HELLASWAG | Step {step:>5} | Accuracy: {hellaswag_accuracy:.4f} | Time: {elapsed_time:.2f}s"
-            )
-            print(f"{'='*80}\n")
-            wandb.log(
-                {
-                    "hellaswag_accuracy": hellaswag_accuracy,
-                    "step": global_step if global_step is not None else step,
-                }
-            )
 
     def sample_from_model(
         self,

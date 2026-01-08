@@ -110,12 +110,13 @@ gpu-status: ## Show current GPU utilization and memory usage
 	@nvidia-smi
 
 
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=8] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [NO_EVALS=true]
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [NO_EVALS=true] [CORE_EVALS=true]
 	@echo "🚀 Starting DDP training with torchrun..."
-	@NGPUS=$${NGPUS:-8}; \
+	@NGPUS=$${NGPUS:-2}; \
 	MODE=$${MODE:-pretraining}; \
 	CHECKPOINT=$${CHECKPOINT:-}; \
-	NO_EVALS=$${NO_EVALS:-}; \
+	NO_EVALS=$${NO_EVALS:-false}; \
+	CORE_EVALS=$${CORE_EVALS:-false}; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
 	CMD="$(uv) run torchrun --standalone --nproc_per_node=$$NGPUS src/gpt_2/ddp.py --mode $$MODE"; \
@@ -126,6 +127,10 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=8] [MODE=pretrainin
 	if [ "$$NO_EVALS" = "true" ]; then \
 		echo "⏩ Evaluations disabled"; \
 		CMD="$$CMD --no-evals"; \
+	fi; \
+	if [ "$$CORE_EVALS" = "true" ]; then \
+		echo "📊 CORE benchmark evaluations enabled"; \
+		CMD="$$CMD --run-core-evals"; \
 	fi; \
 	echo ""; \
 	eval $$CMD
