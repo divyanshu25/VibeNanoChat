@@ -10,10 +10,10 @@ import math
 import torch
 from gpt_2.gpt2_model import GPT, GPTConfig
 
-# from gpt_2.open_webtext_dataloader import OpenWebtextDataloader
-from gpt_2.fineweb_edu_dataloader import FinewebEduDataloader
-from gpt_2.hellaswag_dataloader import HellaSwagDataloader
-from gpt_2.task_mixture_dataloader import TaskMixtureDataloader
+# from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
+from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
+from eval_tasks.hellaswag import HellaSwagDataloader
+from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
 from gpt_2.utils import get_lr, load_checkpoint, save_checkpoint, accumulate_bpb
 import time
 import wandb
