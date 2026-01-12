@@ -19,13 +19,14 @@ Usage:
 Stop with Ctrl+C
 """
 
-import torch
-import torch.nn as nn
-import time
+import argparse
 import signal
 import sys
-import argparse
+import time
 from datetime import datetime
+
+import torch
+import torch.nn as nn
 
 
 class GPUHeater:
@@ -94,7 +95,7 @@ class GPUHeater:
             iteration = 0
             while self.running:
                 # Matrix multiplication (keeps CUDA cores busy)
-                result = torch.matmul(matrix_a, matrix_b)
+                torch.matmul(matrix_a, matrix_b)
 
                 # Neural network forward pass (keeps tensor cores busy)
                 output = model(input_tensor)
@@ -181,7 +182,7 @@ class GPUHeater:
 
             if not self.running:
                 return
-            print(f"\n⏱️  Wait complete! Starting GPU heating now...")
+            print("\n⏱️  Wait complete! Starting GPU heating now...")
 
         print("🚀 Starting GPU heating...")
         print("💡 Press Ctrl+C to stop")

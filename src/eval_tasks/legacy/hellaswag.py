@@ -1,8 +1,8 @@
-import os
 import json
+import os
+
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 
 class HellaSwagDataloader:

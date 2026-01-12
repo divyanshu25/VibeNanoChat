@@ -1,9 +1,10 @@
 import os
-import sys
 import shutil
-from tqdm import tqdm
+import sys
+
 import numpy as np
 from datasets import load_dataset
+from tqdm import tqdm
 
 # Add src to path so we can import from gpt_2 module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))

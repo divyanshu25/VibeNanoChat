@@ -12,23 +12,15 @@ TODOs:
 """
 
 import random
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 
-from .prompt_rendering import (
-    render_prompts_mc,
-    render_prompts_schema,
-    render_prompts_lm,
-)
-from .token_batching import (
-    batch_sequences_mc,
-    batch_sequences_schema,
-    batch_sequences_lm,
-    stack_sequences,
-)
-
+from .prompt_rendering import (render_prompts_lm, render_prompts_mc,
+                               render_prompts_schema)
+from .token_batching import (batch_sequences_lm, batch_sequences_mc,
+                             batch_sequences_schema, stack_sequences)
 
 # =============================================================================
 # MODEL EVALUATION

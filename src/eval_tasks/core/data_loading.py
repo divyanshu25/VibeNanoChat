@@ -6,7 +6,7 @@ Handles loading evaluation data from JSONL files and YAML configuration files.
 
 import json
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import yaml
 

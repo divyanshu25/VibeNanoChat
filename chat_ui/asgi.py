@@ -16,6 +16,7 @@ Usage from project root:
 """
 
 import os
+
 from chat_ui.server import app
 
 # Get port from environment variable or default to 8003
@@ -27,7 +28,7 @@ application = app
 if __name__ == "__main__":
     # For development/testing only
     import uvicorn
-    
+
     print("🚀 Starting NanoGPT Chat Server...")
     print(f"🌐 Server will be available at: http://0.0.0.0:{PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

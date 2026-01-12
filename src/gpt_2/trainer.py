@@ -1,31 +1,26 @@
 # Add gpt_2 to python path
-import sys
 import os
+import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-import math
-import torch
-from gpt_2.gpt2_model import GPT
-from gpt_2.config import GPTConfig
+import time
+from datetime import datetime
 
+import torch
+
+import wandb
 # from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
 from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
-from gpt_2.utils import (
-    get_lr,
-    load_checkpoint,
-    save_checkpoint,
-    accumulate_bpb,
-    get_custom_tokenizer,
-)
-import time
-import wandb
-from gpt_2.evaluator import Evaluators
 from eval_tasks import CoreEvaluator
-from datetime import datetime
+from gpt_2.config import GPTConfig
+from gpt_2.evaluator import Evaluators
+from gpt_2.gpt2_model import GPT
+from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
+                         save_checkpoint)
 
 
 class Trainer:
@@ -356,8 +351,8 @@ class Trainer:
                 self.optimizer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
                 # BPB accumulators
-                total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
-                total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
+                torch.tensor(0.0, dtype=torch.float32, device=self.device)
+                torch.tensor(0, dtype=torch.int64, device=self.device)
 
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device

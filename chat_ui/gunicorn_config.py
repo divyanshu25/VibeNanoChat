@@ -7,7 +7,6 @@ chat server with optimal performance and reliability.
 Documentation: https://docs.gunicorn.org/en/stable/settings.html
 """
 
-import multiprocessing
 import os
 
 # ==============================================================================
@@ -113,11 +112,13 @@ def on_starting(server):
     print(f"📍 Server binding to: {bind}")
     print(f"👷 Workers: {workers} (uvicorn async workers)")
     print(f"⏱️  Timeout: {timeout}s (for model inference)")
-    print("📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints")
+    print(
+        "📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+    )
     print("🌐 Access URLs:")
-    print(f"   - Chat UI:      http://localhost:8003/")
-    print(f"   - API Docs:     http://localhost:8003/docs")
-    print(f"   - OpenAPI:      http://localhost:8003/openapi.json")
+    print("   - Chat UI:      http://localhost:8003/")
+    print("   - API Docs:     http://localhost:8003/docs")
+    print("   - OpenAPI:      http://localhost:8003/openapi.json")
 
 
 def on_reload(server):

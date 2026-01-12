@@ -38,3 +38,8 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.ruff.lint]
+# Ignore E402 errors globally (module level import not at top)
+# These are intentional due to sys.path.append before imports
+ignore = ["E402"]

@@ -1,9 +1,10 @@
 import os
-import sys
 import shutil
-from tqdm import tqdm
+import sys
+
 import numpy as np
 from datasets import load_dataset
+from tqdm import tqdm
 
 # Add src to path so we can import from gpt_2 module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
@@ -32,7 +33,7 @@ FINEWEB_CONFIG = "sample-10BT"  # Change this to use different subsets
 
 if __name__ == "__main__":
     print(f"📚 Loading FineWeb-Edu dataset (config: {FINEWEB_CONFIG})...")
-    print(f"   This may take a while for larger subsets.\n")
+    print("   This may take a while for larger subsets.\n")
 
     # Load FineWeb-Edu dataset from HuggingFace
     # The dataset has a "train" split only

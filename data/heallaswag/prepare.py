@@ -12,12 +12,13 @@ Dataset format:
 Output: Processed JSON files ready for evaluation
 """
 
+import json
 import os
 import sys
-import json
-from tqdm import tqdm
+
 import numpy as np
 from datasets import load_dataset
+from tqdm import tqdm
 
 # Add src to path so we can import from gpt_2 module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
@@ -73,7 +74,7 @@ def calculate_statistics(processed_data):
         len(ending) for ex in processed_data for ending in ex["ending_tokens"]
     ]
 
-    print(f"\nDataset Statistics:")
+    print("\nDataset Statistics:")
     print(f"  Number of examples: {num_examples}")
     print(
         f"  Context length - mean: {np.mean(ctx_lengths):.1f}, "

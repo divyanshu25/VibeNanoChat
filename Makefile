@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel kill-gpu gpu-hot gpu-status ddp-train chat-server
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train chat-server
 
 
 dotenv: ## Initialize .env file
@@ -79,10 +79,19 @@ jupyter-kernel: venv ## Register environment as Jupyter kernel
 	@echo
 
 
-black-formatting:
-	@echo "🔄 Formatting code with Black..."
+format: ## Format code with Black and isort
+	@echo "🎨 Formatting code..."
 	@$(uv) tool run black .
-	@echo "✅ Code formatted with Black!"
+	@$(uv) tool run isort .
+	@echo "✅ Code formatted!"
+
+lint: ## Run linting with ruff
+	@echo "🔍 Linting with ruff..."
+	@$(uv) tool run ruff check .
+	@echo "✅ Linting complete!"
+
+check: format lint ## Run format + lint
+	@echo "✅ All checks passed!"
 
 
 kill-gpu: ## Kill all GPU processes

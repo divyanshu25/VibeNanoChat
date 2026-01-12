@@ -1,19 +1,20 @@
 # Add gpt_2 to python path
-import sys
 import os
+import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+import inspect
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
 from gpt_2.block import Block
 from gpt_2.config import GPTConfig
 from gpt_2.utils import get_custom_tokenizer
-import inspect
-import time
 
 
 class GPT(nn.Module):
@@ -273,7 +274,7 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
 
-        print(f"All parameters initialized and match in size")
+        print("All parameters initialized and match in size")
         return model
 
 

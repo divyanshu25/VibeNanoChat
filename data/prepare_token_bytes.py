@@ -5,6 +5,7 @@ Run once to generate token_bytes.pt
 
 import os
 import sys
+
 import torch
 
 # Add parent directory to path
