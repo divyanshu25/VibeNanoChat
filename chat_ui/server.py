@@ -143,12 +143,28 @@ def load_model(checkpoint_path: str):
         tokenizer, _ = get_custom_tokenizer()
 
     print(f"🔧 Loading checkpoint: {checkpoint_path}")
-    model = GPT(GPTConfig())
-    model.to(device)
-    load_checkpoint(checkpoint_path, model, device, optimizer=None, master_process=True)
-    model.eval()
-    current_checkpoint = checkpoint_path
-    print(f"✅ Loaded: {os.path.basename(checkpoint_path)}")
+
+    # Create model as local variable first to avoid corrupting global state on failure
+    new_model = None
+    try:
+        new_model = GPT(GPTConfig())
+        new_model.to(device)
+        load_checkpoint(
+            checkpoint_path, new_model, device, optimizer=None, master_process=True
+        )
+        new_model.eval()
+
+        # Only update global state after successful loading
+        model = new_model
+        current_checkpoint = checkpoint_path
+        print(f"✅ Loaded: {os.path.basename(checkpoint_path)}")
+
+    except Exception as e:
+        # Ensure model remains None if loading fails
+        model = None
+        current_checkpoint = None
+        print(f"❌ Failed to load checkpoint: {e}")
+        raise  # Re-raise to propagate error to caller
 
 
 def format_chat_prompt(messages):
