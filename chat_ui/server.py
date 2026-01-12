@@ -197,13 +197,31 @@ async def list_checkpoints():
 async def load_checkpoint_endpoint(request: CheckpointRequest):
     """Load a specific checkpoint."""
     try:
-        checkpoint_path = os.path.join(CHECKPOINT_DIR, request.checkpoint)
-        if not os.path.exists(checkpoint_path):
+        # Resolve paths to prevent directory traversal attacks
+        checkpoint_dir = Path(CHECKPOINT_DIR).resolve()
+        requested_path = (checkpoint_dir / request.checkpoint).resolve()
+
+        # Validate that the resolved path is within the checkpoint directory
+        try:
+            requested_path.relative_to(checkpoint_dir)
+        except ValueError:
+            raise HTTPException(
+                status_code=403, detail="Access denied: Path traversal detected"
+            )
+
+        # Check if file exists
+        if not requested_path.exists():
             raise HTTPException(
                 status_code=404, detail=f"Checkpoint not found: {request.checkpoint}"
             )
 
-        load_model(checkpoint_path)
+        # Verify it's a file (not a directory)
+        if not requested_path.is_file():
+            raise HTTPException(
+                status_code=400, detail="Invalid checkpoint: Not a file"
+            )
+
+        load_model(str(requested_path))
 
         return JSONResponse(
             content={
@@ -212,6 +230,8 @@ async def load_checkpoint_endpoint(request: CheckpointRequest):
                 "message": f"Loaded {request.checkpoint}",
             }
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -228,11 +248,13 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        # Add user message to history
-        conversation_history.append({"role": "user", "content": request.message})
+        # Create temporary conversation with user message for prompt generation
+        temp_conversation = conversation_history + [
+            {"role": "user", "content": request.message}
+        ]
 
-        # Generate prompt from conversation history
-        prompt = format_chat_prompt(conversation_history)
+        # Generate prompt from temporary conversation
+        prompt = format_chat_prompt(temp_conversation)
 
         # Generate response
         response = generate_response(
@@ -242,12 +264,14 @@ async def chat(request: ChatRequest):
             top_k=request.top_k,
         )
 
-        # Add assistant response to history
+        # Only add to permanent history after successful generation
+        conversation_history.append({"role": "user", "content": request.message})
         conversation_history.append({"role": "assistant", "content": response})
 
         return ChatResponse(response=response, conversation=conversation_history)
 
     except Exception as e:
+        # Conversation history remains unchanged if generation fails
         raise HTTPException(status_code=500, detail=str(e))
 
 

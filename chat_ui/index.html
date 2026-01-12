@@ -782,14 +782,20 @@
                 ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>'
                 : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
             
-            notification.innerHTML = `
-                <div class="flex items-center gap-3">
-                    <div class="flex-shrink-0">
-                        ${icon}
-                    </div>
-                    <div>${message}</div>
-                </div>
-            `;
+            // Create notification structure safely
+            const container = document.createElement('div');
+            container.className = 'flex items-center gap-3';
+            
+            const iconContainer = document.createElement('div');
+            iconContainer.className = 'flex-shrink-0';
+            iconContainer.innerHTML = icon;
+            
+            const messageContainer = document.createElement('div');
+            messageContainer.textContent = message; // Use textContent to prevent XSS
+            
+            container.appendChild(iconContainer);
+            container.appendChild(messageContainer);
+            notification.appendChild(container);
             notification.style.opacity = '0';
             notification.style.transform = 'translateX(20px)';
             
