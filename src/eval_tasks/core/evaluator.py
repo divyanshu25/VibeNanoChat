@@ -5,7 +5,9 @@ Integrates with the trainer to evaluate model on multiple tasks and log to wandb
 
 import os
 import time
+
 import torch
+
 import wandb
 from eval_tasks.core.data_loading import load_core_tasks
 from eval_tasks.core.eval_tasks import evaluate_task

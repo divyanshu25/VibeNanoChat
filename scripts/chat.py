@@ -8,9 +8,9 @@ Usage:
     python scripts/chat.py --checkpoint /path/to/checkpoint.pt
 """
 
-import sys
-import os
 import argparse
+import os
+import sys
 
 # Add gpt_2 to python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +20,9 @@ sys.path.append(src_dir)
 
 import torch
 import torch.nn.functional as F
-from gpt_2.gpt2_model import GPT, GPTConfig
+
+from gpt_2.config import GPTConfig
+from gpt_2.gpt2_model import GPT
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
 
 

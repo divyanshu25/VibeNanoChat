@@ -23,18 +23,19 @@ Usage:
     python data/task_mixture/prepare.py --output_dir /path/to/output
 """
 
-import os
-import sys
-import json
 import argparse
+import json
+import os
 import shutil
-from tqdm import tqdm
+import sys
+
 import numpy as np
-from datasets import load_dataset, concatenate_datasets
+from datasets import concatenate_datasets, load_dataset
+from tqdm import tqdm
 
 # Add src to path so we can import from gpt_2 module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-from gpt_2.utils import get_special_tokens, get_custom_tokenizer
+from gpt_2.utils import get_custom_tokenizer
 
 # Number of workers for parallel dataset processing (using HuggingFace datasets .map())
 NUM_PROC = 8
@@ -336,14 +337,14 @@ def tokenize_and_save(dataset, output_file, enc, special_tokens):
 
         # Decode tokens back to text to verify encoding is correct
         # The custom encoder can decode special tokens natively!
-        print(f"\n🔄 DECODED (tokens → text):")
+        print("\n🔄 DECODED (tokens → text):")
         decoded_text = enc.decode(display_tokens[:50])
         # Show special tokens in brackets for visibility
         for token_str in special_tokens.keys():
             decoded_text = decoded_text.replace(token_str, f"[{token_str}]")
         print(decoded_text)
         if len(display_tokens) > 50:
-            print(f"   ... (truncated)")
+            print("   ... (truncated)")
 
     print("\n" + "=" * 60)
     print("End of samples")
@@ -448,7 +449,7 @@ def main():
     # This allows us to use enc.encode(text, allowed_special="all") directly
     enc, special_tokens = get_custom_tokenizer()
 
-    print(f"\n📝 Tokenizer info:")
+    print("\n📝 Tokenizer info:")
     print(
         f"   Vocab size (with special tokens): {enc.n_vocab}"
     )  # 50262 (50257 base + 5 new)
@@ -518,7 +519,7 @@ def main():
         print(
             f"  - {info['file']}: {info['num_tokens']:,} tokens from {info['num_examples']:,} examples"
         )
-    print(f"  - metadata.json")
+    print("  - metadata.json")
     print(
         "\nTo use in training, update TaskMixtureDataloader to read from these .bin files."
     )

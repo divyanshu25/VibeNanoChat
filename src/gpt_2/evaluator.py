@@ -1,8 +1,10 @@
+import math
+import time
+
 import torch
 import torch.distributed as dist
+
 import wandb
-import time
-import math
 from gpt_2.gpt2_model import generate
 from gpt_2.utils import accumulate_bpb
 

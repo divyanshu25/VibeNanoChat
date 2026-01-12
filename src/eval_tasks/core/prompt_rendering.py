@@ -7,7 +7,7 @@ Handles the creation of prompts for different task types:
 - Language Modeling: Context with optional continuation
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 from jinja2 import Template
 

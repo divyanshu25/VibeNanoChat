@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NanoGPT Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        * {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        
+        /* Advanced Animations */
+        @keyframes pulse-dot {
+            0%, 100% { 
+                opacity: 0.4; 
+                transform: scale(0.9);
+            }
+            50% { 
+                opacity: 1; 
+                transform: scale(1.1);
+            }
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @keyframes slideInRight {
+            from {
+                opacity: 0;
+                transform: translateX(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        @keyframes shimmer {
+            0% {
+                background-position: -1000px 0;
+            }
+            100% {
+                background-position: 1000px 0;
+            }
+        }
+        
+        @keyframes glow {
+            0%, 100% {
+                box-shadow: 0 0 20px rgba(168, 85, 247, 0.4);
+            }
+            50% {
+                box-shadow: 0 0 30px rgba(168, 85, 247, 0.6);
+            }
+        }
+        
+        .pulse-dot {
+            animation: pulse-dot 1.4s ease-in-out infinite;
+        }
+        .pulse-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .pulse-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        
+        .fade-in-up {
+            animation: fadeInUp 0.5s ease-out;
+        }
+        
+        .slide-in-right {
+            animation: slideInRight 0.4s ease-out;
+        }
+        
+        /* Glassmorphism Effect */
+        .glass {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        
+        .glass-dark {
+            background: rgba(249, 250, 251, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+        
+        /* Premium Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #c4b5fd 0%, #a78bfa 100%);
+            border-radius: 10px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, #a78bfa 0%, #8b5cf6 100%);
+            background-clip: padding-box;
+        }
+        
+        /* Premium Button Effects */
+        .btn-primary {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .btn-primary:before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            transition: left 0.5s;
+        }
+        
+        .btn-primary:hover:not(:disabled):before {
+            left: 100%;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px -5px rgba(168, 85, 247, 0.5), 0 8px 10px -6px rgba(168, 85, 247, 0.5);
+        }
+        
+        .btn-primary:active:not(:disabled) {
+            transform: translateY(0);
+        }
+        
+        /* Card Hover Effects */
+        .card-hover {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .card-hover:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 24px -10px rgba(168, 85, 247, 0.3);
+        }
+        
+        /* Input Focus Ring */
+        .input-focus {
+            transition: all 0.2s ease;
+        }
+        
+        .input-focus:focus {
+            box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+        
+        /* Status Indicator Pulse */
+        .status-pulse {
+            animation: glow 2s ease-in-out infinite;
+        }
+        
+        /* Gradient Text */
+        .gradient-text {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        /* Range Slider Styling */
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent;
+            cursor: pointer;
+        }
+        
+        input[type="range"]::-webkit-slider-track {
+            background: linear-gradient(to right, #e9d5ff, #c4b5fd);
+            height: 6px;
+            border-radius: 3px;
+        }
+        
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(139, 92, 246, 0.4);
+            transition: all 0.2s ease;
+        }
+        
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.6);
+        }
+        
+        input[type="range"]::-moz-range-track {
+            background: linear-gradient(to right, #e9d5ff, #c4b5fd);
+            height: 6px;
+            border-radius: 3px;
+        }
+        
+        input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border: none;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(139, 92, 246, 0.4);
+        }
+        
+        /* Select Dropdown */
+        select {
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 0.5rem center;
+            background-repeat: no-repeat;
+            background-size: 1.5em 1.5em;
+            padding-right: 2.5rem;
+        }
+        
+        /* Message Bubble Animation */
+        .message-bubble {
+            animation: fadeInUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        /* Notification Animation */
+        .notification {
+            animation: slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        /* Background Patterns */
+        .bg-pattern {
+            background-color: #ffffff;
+            background-image: 
+                radial-gradient(at 40% 20%, rgba(168, 85, 247, 0.03) 0px, transparent 50%),
+                radial-gradient(at 80% 0%, rgba(167, 139, 250, 0.05) 0px, transparent 50%),
+                radial-gradient(at 0% 50%, rgba(196, 181, 253, 0.03) 0px, transparent 50%),
+                radial-gradient(at 80% 50%, rgba(233, 213, 255, 0.04) 0px, transparent 50%),
+                radial-gradient(at 0% 100%, rgba(168, 85, 247, 0.03) 0px, transparent 50%),
+                radial-gradient(at 80% 100%, rgba(167, 139, 250, 0.04) 0px, transparent 50%);
+        }
+        
+        /* Smooth transitions for all interactive elements */
+        button, input, select, details, .card-hover {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+    </style>
+</head>
+<body class="bg-pattern h-screen overflow-hidden antialiased">
+    <div class="flex h-screen">
+        <!-- Left Sidebar -->
+        <aside class="w-80 border-r border-purple-100/50 flex flex-col bg-white/60 backdrop-blur-xl shadow-xl shadow-purple-100/20">
+            <!-- Sidebar Header -->
+            <div class="p-6 border-b border-purple-100/50 bg-gradient-to-br from-white/80 to-purple-50/30">
+                <div class="flex items-center space-x-3 mb-2">
+                    <div class="w-12 h-12 bg-gradient-to-br from-purple-500 via-purple-600 to-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-purple-500/30 card-hover">
+                        <span class="text-xl font-bold text-white">N</span>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold bg-gradient-to-r from-purple-600 to-indigo-600 bg-clip-text text-transparent">NanoGPT</h1>
+                        <div class="flex items-center space-x-2 text-xs mt-0.5">
+                            <div class="w-2 h-2 rounded-full bg-gray-400" id="status-indicator"></div>
+                            <span class="text-gray-600 font-medium" id="device-text">—</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sidebar Content -->
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <!-- Status Card -->
+                <div class="bg-gradient-to-br from-purple-50 via-purple-50 to-indigo-50 rounded-2xl p-5 border border-purple-200/60 shadow-lg shadow-purple-100/50 card-hover">
+                    <div class="flex items-center gap-2 mb-2">
+                        <div class="w-2 h-2 rounded-full bg-purple-500 animate-pulse"></div>
+                        <div class="text-xs font-semibold text-purple-900 uppercase tracking-wide">Current Model</div>
+                    </div>
+                    <div class="text-sm text-purple-700 break-words font-medium leading-relaxed" id="status-text">No checkpoint loaded</div>
+                </div>
+
+                <!-- Checkpoint Selection -->
+                <div>
+                    <label for="checkpoint-select" class="block text-sm font-semibold text-gray-700 mb-3">
+                        📁 Select Checkpoint
+                    </label>
+                    <select id="checkpoint-select" 
+                            class="w-full px-4 py-3 text-sm border-2 border-purple-200/60 rounded-xl focus:outline-none input-focus bg-white shadow-sm hover:border-purple-300 font-medium appearance-none">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="space-y-3">
+                    <button id="load-btn" 
+                            class="btn-primary w-full px-5 py-3 text-sm font-semibold text-white bg-gradient-to-r from-purple-500 via-purple-600 to-indigo-600 rounded-xl shadow-lg shadow-purple-500/30 disabled:from-gray-300 disabled:to-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed disabled:shadow-none">
+                        <span class="flex items-center justify-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                            </svg>
+                            Load Checkpoint
+                        </span>
+                    </button>
+                    <button id="clear-btn" 
+                            class="btn-primary w-full px-5 py-3 text-sm font-semibold text-purple-700 bg-gradient-to-r from-purple-100 via-purple-100 to-indigo-100 rounded-xl border-2 border-purple-200/60 hover:border-purple-300 shadow-md disabled:opacity-50 disabled:cursor-not-allowed">
+                        <span class="flex items-center justify-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                            Clear Conversation
+                        </span>
+                    </button>
+                </div>
+
+                <!-- Advanced Settings -->
+                <details class="group">
+                    <summary class="cursor-pointer text-sm font-semibold text-gray-700 hover:text-purple-700 select-none flex items-center justify-between px-4 py-3 bg-gradient-to-r from-gray-50 to-purple-50/30 rounded-xl border-2 border-gray-200/60 hover:border-purple-300 shadow-sm">
+                        <span class="flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            </svg>
+                            Advanced Settings
+                        </span>
+                        <svg class="w-5 h-5 transition-transform duration-300 group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                    </summary>
+                    <div class="mt-4 space-y-3">
+                        <div class="bg-gradient-to-br from-purple-50 via-white to-purple-50/50 rounded-xl p-4 border-2 border-purple-200/60 shadow-md card-hover">
+                            <label class="flex justify-between items-center text-xs font-semibold text-gray-700 mb-3">
+                                <span class="flex items-center gap-1.5">
+                                    🌡️ Temperature
+                                </span>
+                                <span class="text-purple-600 text-base font-bold bg-purple-100 px-3 py-1 rounded-lg" id="temp-value">0.8</span>
+                            </label>
+                            <input type="range" id="temperature" min="0.1" max="2.0" step="0.1" value="0.8" 
+                                   class="w-full cursor-pointer">
+                            <div class="flex justify-between text-xs text-gray-500 mt-2 font-medium">
+                                <span>Precise</span>
+                                <span>Creative</span>
+                            </div>
+                        </div>
+                        <div class="bg-gradient-to-br from-indigo-50 via-white to-indigo-50/50 rounded-xl p-4 border-2 border-indigo-200/60 shadow-md card-hover">
+                            <label class="flex justify-between items-center text-xs font-semibold text-gray-700 mb-3">
+                                <span class="flex items-center gap-1.5">
+                                    🎯 Top-K
+                                </span>
+                                <span class="text-indigo-600 text-base font-bold bg-indigo-100 px-3 py-1 rounded-lg" id="topk-value">50</span>
+                            </label>
+                            <input type="range" id="top-k" min="1" max="100" step="1" value="50" 
+                                   class="w-full cursor-pointer">
+                            <div class="flex justify-between text-xs text-gray-500 mt-2 font-medium">
+                                <span>Focused</span>
+                                <span>Diverse</span>
+                            </div>
+                        </div>
+                        <div class="bg-gradient-to-br from-violet-50 via-white to-violet-50/50 rounded-xl p-4 border-2 border-violet-200/60 shadow-md card-hover">
+                            <label class="flex justify-between items-center text-xs font-semibold text-gray-700 mb-3">
+                                <span class="flex items-center gap-1.5">
+                                    📏 Max Tokens
+                                </span>
+                                <span class="text-violet-600 text-base font-bold bg-violet-100 px-3 py-1 rounded-lg" id="maxtoken-value">256</span>
+                            </label>
+                            <input type="range" id="max-tokens" min="50" max="500" step="50" value="256" 
+                                   class="w-full cursor-pointer">
+                            <div class="flex justify-between text-xs text-gray-500 mt-2 font-medium">
+                                <span>Short</span>
+                                <span>Long</span>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 via-white to-purple-50/30 relative">
+            <!-- Decorative Elements -->
+            <div class="absolute inset-0 overflow-hidden pointer-events-none">
+                <div class="absolute top-20 right-20 w-72 h-72 bg-purple-200 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-pulse"></div>
+                <div class="absolute bottom-20 left-20 w-72 h-72 bg-indigo-200 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-pulse" style="animation-delay: 1s;"></div>
+            </div>
+            
+            <!-- Chat Messages -->
+            <div id="chat-messages" class="flex-1 overflow-y-auto p-8 relative z-10">
+                <div class="max-w-3xl mx-auto h-full flex items-center justify-center text-center">
+                    <div class="fade-in-up">
+                        <div class="w-20 h-20 mx-auto mb-6 bg-gradient-to-br from-purple-500 via-purple-600 to-indigo-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-purple-500/40 card-hover">
+                            <span class="text-4xl">💬</span>
+                        </div>
+                        <h2 class="text-xl font-bold text-gray-800 mb-2">Ready to Chat</h2>
+                        <p class="text-sm text-gray-500 max-w-md mx-auto leading-relaxed">Select a checkpoint from the sidebar to start a conversation with NanoGPT</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="border-t border-purple-100/50 glass relative z-10">
+                <div class="max-w-3xl mx-auto p-6">
+                    <div class="flex gap-3">
+                        <div class="flex-1 relative">
+                            <input type="text" 
+                                   id="message-input" 
+                                   placeholder="Type your message here..." 
+                                   class="w-full px-5 py-4 text-sm border-2 border-purple-200/60 rounded-2xl focus:outline-none input-focus disabled:bg-gray-50 disabled:cursor-not-allowed shadow-lg bg-white font-medium placeholder:text-gray-400"
+                                   disabled>
+                            <div class="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400">
+                                <kbd class="hidden md:inline-block px-2 py-1 text-xs font-semibold bg-gray-100 border border-gray-200 rounded">Enter</kbd>
+                            </div>
+                        </div>
+                        <button id="send-btn" 
+                                class="btn-primary px-8 py-4 text-sm font-semibold text-white bg-gradient-to-r from-purple-500 via-purple-600 to-indigo-600 rounded-2xl shadow-lg shadow-purple-500/30 disabled:from-gray-300 disabled:to-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed disabled:shadow-none flex items-center gap-2"
+                                disabled>
+                            <span>Send</span>
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-3 text-center">NanoGPT may produce inaccurate information. Verify important details.</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // State
+        let modelLoaded = false;
+        let isGenerating = false;
+        let sessionId = null;  // Track current session
+
+        // DOM Elements
+        const checkpointSelect = document.getElementById('checkpoint-select');
+        const loadBtn = document.getElementById('load-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const chatMessages = document.getElementById('chat-messages');
+        const statusText = document.getElementById('status-text');
+        const statusIndicator = document.getElementById('status-indicator');
+        const deviceText = document.getElementById('device-text');
+        
+        // Settings
+        const temperatureInput = document.getElementById('temperature');
+        const topKInput = document.getElementById('top-k');
+        const maxTokensInput = document.getElementById('max-tokens');
+        const tempValue = document.getElementById('temp-value');
+        const topkValue = document.getElementById('topk-value');
+        const maxtokenValue = document.getElementById('maxtoken-value');
+
+        // Update setting displays
+        temperatureInput.addEventListener('input', (e) => {
+            tempValue.textContent = e.target.value;
+        });
+        topKInput.addEventListener('input', (e) => {
+            topkValue.textContent = e.target.value;
+        });
+        maxTokensInput.addEventListener('input', (e) => {
+            maxtokenValue.textContent = e.target.value;
+        });
+
+        // Initialize
+        async function init() {
+            await loadCheckpoints();
+            await updateStatus();
+        }
+
+        // Load available checkpoints
+        async function loadCheckpoints() {
+            try {
+                const response = await fetch('/api/checkpoints');
+                const data = await response.json();
+                
+                checkpointSelect.innerHTML = '';
+                
+                if (data.error) {
+                    checkpointSelect.innerHTML = `<option value="">Error: ${data.error}</option>`;
+                    return;
+                }
+                
+                if (data.checkpoints.length === 0) {
+                    checkpointSelect.innerHTML = '<option value="">No checkpoints found</option>';
+                    return;
+                }
+                
+                checkpointSelect.innerHTML = '<option value="">Select a checkpoint</option>';
+                data.checkpoints.forEach(checkpoint => {
+                    const option = document.createElement('option');
+                    option.value = checkpoint;
+                    option.textContent = checkpoint;
+                    if (data.current && checkpoint.includes(data.current)) {
+                        option.selected = true;
+                    }
+                    checkpointSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading checkpoints:', error);
+                checkpointSelect.innerHTML = '<option value="">Error loading checkpoints</option>';
+            }
+        }
+
+        // Update server status
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                modelLoaded = data.model_loaded;
+                
+                if (modelLoaded) {
+                    statusText.textContent = data.current_checkpoint || 'Model loaded';
+                    statusIndicator.className = 'w-2 h-2 rounded-full bg-green-500 shadow-lg shadow-green-500/50 status-pulse';
+                    deviceText.textContent = data.device || 'Unknown';
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                } else {
+                    statusText.textContent = 'No checkpoint loaded';
+                    statusIndicator.className = 'w-2 h-2 rounded-full bg-gray-400';
+                    deviceText.textContent = '—';
+                    messageInput.disabled = true;
+                    sendBtn.disabled = true;
+                }
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+
+        // Load checkpoint
+        loadBtn.addEventListener('click', async () => {
+            const checkpoint = checkpointSelect.value;
+            if (!checkpoint) {
+                showNotification('Please select a checkpoint', 'error');
+                return;
+            }
+            
+            loadBtn.disabled = true;
+            loadBtn.innerHTML = `
+                <span class="flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    Loading...
+                </span>
+            `;
+            
+            try {
+                const response = await fetch('/api/load_checkpoint', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ checkpoint }),
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    await updateStatus();
+                    showNotification('Checkpoint loaded successfully', 'success');
+                } else {
+                    showNotification(data.detail, 'error');
+                }
+            } catch (error) {
+                console.error('Error loading checkpoint:', error);
+                showNotification('Error loading checkpoint', 'error');
+            } finally {
+                loadBtn.disabled = false;
+                loadBtn.innerHTML = `
+                    <span class="flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        Load Checkpoint
+                    </span>
+                `;
+            }
+        });
+
+        // Clear conversation
+        clearBtn.addEventListener('click', async () => {
+            if (!modelLoaded) return;
+            
+            try {
+                // Only clear if we have a session
+                if (sessionId) {
+                    const response = await fetch(`/api/clear?session_id=${sessionId}`, { 
+                        method: 'POST' 
+                    });
+                    
+                    if (!response.ok) {
+                        const data = await response.json();
+                        showNotification(data.detail || 'Error clearing conversation', 'error');
+                        return;
+                    }
+                }
+                
+                // Reset session and UI
+                sessionId = null;
+                chatMessages.innerHTML = `
+                    <div class="max-w-3xl mx-auto h-full flex items-center justify-center text-center">
+                        <div class="fade-in-up">
+                            <div class="w-20 h-20 mx-auto mb-6 bg-gradient-to-br from-green-500 via-emerald-500 to-teal-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-green-500/40">
+                                <span class="text-4xl">✨</span>
+                            </div>
+                            <h2 class="text-xl font-bold text-gray-800 mb-2">Fresh Start!</h2>
+                            <p class="text-sm text-gray-500 max-w-md mx-auto leading-relaxed">Conversation cleared. Ready for a new chat!</p>
+                        </div>
+                    </div>
+                `;
+                showNotification('Conversation cleared successfully', 'success');
+            } catch (error) {
+                console.error('Error clearing conversation:', error);
+                showNotification('Error clearing conversation', 'error');
+            }
+        });
+
+        // Send message
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || isGenerating || !modelLoaded) return;
+            
+            // Clear input
+            messageInput.value = '';
+            
+            // Add user message and track its ID
+            const userMessageId = addMessage(message, 'user');
+            
+            // Show loading indicator
+            const loadingId = showLoadingMessage();
+            
+            isGenerating = true;
+            sendBtn.disabled = true;
+            messageInput.disabled = true;
+            
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message,
+                        session_id: sessionId,
+                        temperature: parseFloat(temperatureInput.value),
+                        top_k: parseInt(topKInput.value),
+                        max_tokens: parseInt(maxTokensInput.value),
+                    }),
+                });
+                
+                const data = await response.json();
+                
+                // Remove loading indicator
+                removeLoadingMessage(loadingId);
+                
+                if (response.ok) {
+                    // Store session_id for future requests
+                    sessionId = data.session_id;
+                    addMessage(data.response, 'assistant');
+                } else {
+                    // Remove user message on error and restore to input
+                    removeMessage(userMessageId);
+                    messageInput.value = message;
+                    showNotification(data.detail || 'Error processing message', 'error');
+                }
+            } catch (error) {
+                console.error('Error sending message:', error);
+                removeLoadingMessage(loadingId);
+                // Remove user message on error and restore to input
+                removeMessage(userMessageId);
+                messageInput.value = message;
+                showNotification('Error sending message', 'error');
+            } finally {
+                isGenerating = false;
+                sendBtn.disabled = false;
+                messageInput.disabled = false;
+                messageInput.focus();
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Add message to chat
+        function addMessage(content, role) {
+            // Remove welcome message if exists
+            const welcome = chatMessages.querySelector('.text-center');
+            if (welcome && welcome.closest('.h-full')) {
+                chatMessages.innerHTML = '<div class="max-w-3xl mx-auto space-y-5 py-4"></div>';
+            }
+            
+            const container = chatMessages.querySelector('.max-w-3xl') || chatMessages;
+            
+            // Generate unique ID for this message
+            const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.id = messageId;
+            messageDiv.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'} message-bubble`;
+            
+            const bubble = document.createElement('div');
+            bubble.className = `max-w-[85%] rounded-2xl px-6 py-4 shadow-lg ${
+                role === 'user' 
+                    ? 'bg-gradient-to-br from-purple-500 via-purple-600 to-indigo-600 text-white shadow-purple-500/30' 
+                    : 'bg-white text-gray-800 border-2 border-purple-100/80 shadow-purple-100/50'
+            }`;
+            
+            const labelContainer = document.createElement('div');
+            labelContainer.className = 'flex items-center gap-2 mb-2';
+            
+            const avatar = document.createElement('div');
+            avatar.className = `w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold ${
+                role === 'user' 
+                    ? 'bg-white/20 text-white' 
+                    : 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-md'
+            }`;
+            avatar.textContent = role === 'user' ? '👤' : '🤖';
+            
+            const label = document.createElement('div');
+            label.className = `text-xs font-semibold uppercase tracking-wide ${
+                role === 'user' ? 'text-purple-100' : 'text-purple-600'
+            }`;
+            label.textContent = role === 'user' ? 'You' : 'Assistant';
+            
+            labelContainer.appendChild(avatar);
+            labelContainer.appendChild(label);
+            
+            const text = document.createElement('div');
+            text.className = `text-sm whitespace-pre-wrap break-words leading-relaxed ${
+                role === 'user' ? 'text-white' : 'text-gray-700'
+            }`;
+            text.textContent = content;
+            
+            bubble.appendChild(labelContainer);
+            bubble.appendChild(text);
+            messageDiv.appendChild(bubble);
+            container.appendChild(messageDiv);
+            
+            // Scroll to bottom with smooth animation
+            chatMessages.scrollTo({
+                top: chatMessages.scrollHeight,
+                behavior: 'smooth'
+            });
+            
+            return messageId;
+        }
+        
+        // Remove message from chat
+        function removeMessage(messageId) {
+            const messageDiv = document.getElementById(messageId);
+            if (messageDiv) {
+                messageDiv.remove();
+            }
+        }
+
+        // Show loading message
+        function showLoadingMessage() {
+            const loadingId = 'loading-' + Date.now();
+            
+            const welcome = chatMessages.querySelector('.text-center');
+            if (welcome && welcome.closest('.h-full')) {
+                chatMessages.innerHTML = '<div class="max-w-3xl mx-auto space-y-5 py-4"></div>';
+            }
+            
+            const container = chatMessages.querySelector('.max-w-3xl') || chatMessages;
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.id = loadingId;
+            messageDiv.className = 'flex justify-start message-bubble';
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'bg-white text-gray-800 border-2 border-purple-100/80 rounded-2xl px-6 py-4 shadow-lg shadow-purple-100/50';
+            bubble.innerHTML = `
+                <div class="flex items-center gap-2 mb-2">
+                    <div class="w-6 h-6 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-xs shadow-md">
+                        🤖
+                    </div>
+                    <div class="text-xs font-semibold uppercase tracking-wide text-purple-600">Assistant</div>
+                </div>
+                <div class="flex gap-2 items-center">
+                    <div class="w-2.5 h-2.5 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full pulse-dot shadow-sm"></div>
+                    <div class="w-2.5 h-2.5 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full pulse-dot shadow-sm"></div>
+                    <div class="w-2.5 h-2.5 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full pulse-dot shadow-sm"></div>
+                </div>
+            `;
+            
+            messageDiv.appendChild(bubble);
+            container.appendChild(messageDiv);
+            chatMessages.scrollTo({
+                top: chatMessages.scrollHeight,
+                behavior: 'smooth'
+            });
+            
+            return loadingId;
+        }
+
+        // Remove loading message
+        function removeLoadingMessage(loadingId) {
+            const loadingDiv = document.getElementById(loadingId);
+            if (loadingDiv) {
+                loadingDiv.remove();
+            }
+        }
+
+        // Show notification
+        function showNotification(message, type) {
+            const notification = document.createElement('div');
+            notification.className = `notification fixed top-6 right-6 px-6 py-4 rounded-2xl shadow-2xl text-sm font-semibold transition-all duration-300 backdrop-blur-sm z-50 ${
+                type === 'success' 
+                    ? 'bg-gradient-to-r from-green-500 via-emerald-500 to-teal-600 text-white border-2 border-white/30' 
+                    : 'bg-gradient-to-r from-red-500 via-pink-500 to-rose-600 text-white border-2 border-white/30'
+            }`;
+            
+            const icon = type === 'success' 
+                ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>'
+                : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+            
+            // Create notification structure safely
+            const container = document.createElement('div');
+            container.className = 'flex items-center gap-3';
+            
+            const iconContainer = document.createElement('div');
+            iconContainer.className = 'flex-shrink-0';
+            iconContainer.innerHTML = icon;
+            
+            const messageContainer = document.createElement('div');
+            messageContainer.textContent = message; // Use textContent to prevent XSS
+            
+            container.appendChild(iconContainer);
+            container.appendChild(messageContainer);
+            notification.appendChild(container);
+            notification.style.opacity = '0';
+            notification.style.transform = 'translateX(20px)';
+            
+            document.body.appendChild(notification);
+            
+            // Fade in
+            setTimeout(() => {
+                notification.style.opacity = '1';
+                notification.style.transform = 'translateX(0)';
+            }, 10);
+            
+            // Fade out and remove
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                notification.style.transform = 'translateX(20px)';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

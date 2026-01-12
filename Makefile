@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel kill-gpu gpu-hot gpu-status ddp-train chat
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train chat-server
 
 
 dotenv: ## Initialize .env file
@@ -79,10 +79,19 @@ jupyter-kernel: venv ## Register environment as Jupyter kernel
 	@echo
 
 
-black-formatting:
-	@echo "🔄 Formatting code with Black..."
+format: ## Format code with Black and isort
+	@echo "🎨 Formatting code..."
 	@$(uv) tool run black .
-	@echo "✅ Code formatted with Black!"
+	@$(uv) tool run isort .
+	@echo "✅ Code formatted!"
+
+lint: ## Run linting with ruff
+	@echo "🔍 Linting with ruff..."
+	@$(uv) tool run ruff check .
+	@echo "✅ Linting complete!"
+
+check: format lint ## Run format + lint
+	@echo "✅ All checks passed!"
 
 
 kill-gpu: ## Kill all GPU processes
@@ -140,11 +149,20 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	eval $$CMD 2>&1 | tee $$LOG_FILE
 
 
-chat: ## Chat with a checkpoint. Usage: make chat CHECKPOINT=/path/to/checkpoint.pt
-	@if [ -z "$(CHECKPOINT)" ]; then \
-		echo "❌ Error: CHECKPOINT is required. Usage: make chat CHECKPOINT=/path/to/checkpoint.pt"; \
-		exit 1; \
+chat-server: ## Start the chat web UI server on port 8003
+	@echo "🔍 Checking if port 8003 is in use..."
+	@PORT_PID=$$(lsof -ti:8003); \
+	if [ -n "$$PORT_PID" ]; then \
+		echo "⚠️  Port 8003 is in use by PID $$PORT_PID. Killing process..."; \
+		kill -9 $$PORT_PID 2>/dev/null || true; \
+		sleep 1; \
+		echo "✅ Port 8003 cleared!"; \
+	else \
+		echo "✅ Port 8003 is available"; \
 	fi
-	@echo "🤖 Starting chat with checkpoint: $(CHECKPOINT)"
-	@$(uv) run python scripts/chat.py --checkpoint $(CHECKPOINT)
+	@echo "🚀 Starting NanoGPT Chat Web Server"
+	@echo "🌐 Access the UI at: http://localhost:8003"
+	@echo "📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+	@echo "👷 Workers: $${WORKERS:-1} (set WORKERS env var to change)"
+	@$(uv) run gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
 

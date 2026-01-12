@@ -21,9 +21,9 @@ Usage Examples:
     torchrun --nproc_per_node=4 ddp.py --mode all
 """
 
-import sys
-import os
 import argparse
+import os
+import sys
 
 # ---------------------------------------------------------------------------
 # Path Setup: Ensure parent directory is in sys.path for local imports
@@ -32,14 +32,13 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+import torch
 # ---------------------------------------------------------------------------
 # PyTorch Distributed Imports
 # ---------------------------------------------------------------------------
-import torch.distributed as dist
-import torch.multiprocessing as mp
+from torch.distributed import destroy_process_group, init_process_group
+
 from gpt_2.trainer import Trainer
-from torch.distributed import init_process_group, destroy_process_group
-import torch
 
 
 def setup_distributed():
@@ -261,7 +260,7 @@ def run_midtraining(
     trainer.train()
 
     if master_process:
-        print(f"\n✅ Mid-training complete!\n")
+        print("\n✅ Mid-training complete!\n")
 
 
 def run_trainer(args):
