@@ -10,8 +10,11 @@ Usage:
 
 import os
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from threading import Lock
+from typing import Dict, List, Optional
 
 # Add gpt_2 to python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,7 +40,13 @@ model = None
 tokenizer = None
 device = None
 current_checkpoint = None
-conversation_history = []
+
+# Session management
+sessions: Dict[str, Dict] = (
+    {}
+)  # session_id -> {conversation: [], last_accessed: datetime}
+sessions_lock = Lock()
+SESSION_TIMEOUT_MINUTES = 60  # Sessions expire after 1 hour of inactivity
 
 
 def get_device():
@@ -47,6 +56,79 @@ def get_device():
     elif torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def create_session() -> str:
+    """Create a new session and return the session ID."""
+    session_id = str(uuid.uuid4())
+    with sessions_lock:
+        sessions[session_id] = {
+            "conversation": [],
+            "last_accessed": datetime.now(),
+        }
+    return session_id
+
+
+def get_session(session_id: Optional[str]) -> tuple[str, List[dict]]:
+    """
+    Get or create a session. Returns (session_id, conversation_history).
+
+    If session_id is None or invalid, creates a new session.
+    Updates last_accessed timestamp.
+    """
+    with sessions_lock:
+        # Clean up expired sessions
+        cleanup_expired_sessions()
+
+        # If no session_id provided or session doesn't exist, create new one
+        if not session_id or session_id not in sessions:
+            session_id = str(uuid.uuid4())
+            sessions[session_id] = {
+                "conversation": [],
+                "last_accessed": datetime.now(),
+            }
+        else:
+            # Update last accessed time
+            sessions[session_id]["last_accessed"] = datetime.now()
+
+        return session_id, sessions[session_id]["conversation"]
+
+
+def update_session_conversation(session_id: str, conversation: List[dict]):
+    """Update the conversation history for a session."""
+    with sessions_lock:
+        if session_id in sessions:
+            sessions[session_id]["conversation"] = conversation
+            sessions[session_id]["last_accessed"] = datetime.now()
+
+
+def clear_session(session_id: Optional[str]) -> bool:
+    """Clear conversation history for a session. Returns True if session existed."""
+    if not session_id:
+        return False
+
+    with sessions_lock:
+        if session_id in sessions:
+            sessions[session_id]["conversation"] = []
+            sessions[session_id]["last_accessed"] = datetime.now()
+            return True
+    return False
+
+
+def cleanup_expired_sessions():
+    """Remove sessions that haven't been accessed in SESSION_TIMEOUT_MINUTES."""
+    current_time = datetime.now()
+    expired_sessions = [
+        sid
+        for sid, data in sessions.items()
+        if (current_time - data["last_accessed"]).total_seconds()
+        > SESSION_TIMEOUT_MINUTES * 60
+    ]
+    for sid in expired_sessions:
+        del sessions[sid]
+
+    if expired_sessions:
+        print(f"🧹 Cleaned up {len(expired_sessions)} expired session(s)")
 
 
 def load_model(checkpoint_path: str):
@@ -140,6 +222,7 @@ def generate_response(
 # API Models
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = None
     max_tokens: Optional[int] = 256
     temperature: Optional[float] = 0.8
     top_k: Optional[int] = 50
@@ -148,10 +231,16 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     conversation: List[dict]
+    session_id: str
 
 
 class CheckpointRequest(BaseModel):
     checkpoint: str
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    message: str
 
 
 # API Endpoints
@@ -239,8 +328,6 @@ async def load_checkpoint_endpoint(request: CheckpointRequest):
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     """Send a message and get a response."""
-    global conversation_history
-
     if model is None:
         raise HTTPException(
             status_code=400,
@@ -248,6 +335,9 @@ async def chat(request: ChatRequest):
         )
 
     try:
+        # Get or create session
+        session_id, conversation_history = get_session(request.session_id)
+
         # Create temporary conversation with user message for prompt generation
         temp_conversation = conversation_history + [
             {"role": "user", "content": request.message}
@@ -265,10 +355,15 @@ async def chat(request: ChatRequest):
         )
 
         # Only add to permanent history after successful generation
-        conversation_history.append({"role": "user", "content": request.message})
-        conversation_history.append({"role": "assistant", "content": response})
+        updated_conversation = conversation_history + [
+            {"role": "user", "content": request.message},
+            {"role": "assistant", "content": response},
+        ]
+        update_session_conversation(session_id, updated_conversation)
 
-        return ChatResponse(response=response, conversation=conversation_history)
+        return ChatResponse(
+            response=response, conversation=updated_conversation, session_id=session_id
+        )
 
     except Exception as e:
         # Conversation history remains unchanged if generation fails
@@ -276,16 +371,58 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/api/clear")
-async def clear_conversation():
-    """Clear the conversation history."""
-    global conversation_history
-    conversation_history = []
-    return JSONResponse(content={"success": True, "message": "Conversation cleared"})
+async def clear_conversation(session_id: Optional[str] = None):
+    """Clear the conversation history for a session."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    success = clear_session(session_id)
+    if not success:
+        raise HTTPException(
+            status_code=404, detail="Session not found or already expired"
+        )
+
+    return JSONResponse(
+        content={
+            "success": True,
+            "message": "Conversation cleared",
+            "session_id": session_id,
+        }
+    )
+
+
+@app.post("/api/session/new")
+async def new_session():
+    """Create a new session."""
+    session_id = create_session()
+    return SessionResponse(session_id=session_id, message="New session created")
+
+
+@app.get("/api/session/{session_id}")
+async def get_session_info(session_id: str):
+    """Get information about a specific session."""
+    with sessions_lock:
+        if session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session_data = sessions[session_id]
+        return JSONResponse(
+            content={
+                "session_id": session_id,
+                "conversation_length": len(session_data["conversation"]),
+                "last_accessed": session_data["last_accessed"].isoformat(),
+                "conversation": session_data["conversation"],
+            }
+        )
 
 
 @app.get("/api/status")
 async def status():
     """Get current server status."""
+    with sessions_lock:
+        active_sessions = len(sessions)
+        total_conversations = sum(len(s["conversation"]) for s in sessions.values())
+
     return JSONResponse(
         content={
             "model_loaded": model is not None,
@@ -293,7 +430,8 @@ async def status():
                 os.path.basename(current_checkpoint) if current_checkpoint else None
             ),
             "device": device,
-            "conversation_length": len(conversation_history),
+            "active_sessions": active_sessions,
+            "total_conversation_messages": total_conversations,
         }
     )
 

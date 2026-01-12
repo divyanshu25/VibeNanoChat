@@ -442,6 +442,7 @@
         // State
         let modelLoaded = false;
         let isGenerating = false;
+        let sessionId = null;  // Track current session
 
         // DOM Elements
         const checkpointSelect = document.getElementById('checkpoint-select');
@@ -581,7 +582,21 @@
             if (!modelLoaded) return;
             
             try {
-                await fetch('/api/clear', { method: 'POST' });
+                // Only clear if we have a session
+                if (sessionId) {
+                    const response = await fetch(`/api/clear?session_id=${sessionId}`, { 
+                        method: 'POST' 
+                    });
+                    
+                    if (!response.ok) {
+                        const data = await response.json();
+                        showNotification(data.detail || 'Error clearing conversation', 'error');
+                        return;
+                    }
+                }
+                
+                // Reset session and UI
+                sessionId = null;
                 chatMessages.innerHTML = `
                     <div class="max-w-3xl mx-auto h-full flex items-center justify-center text-center">
                         <div class="fade-in-up">
@@ -626,6 +641,7 @@
                     },
                     body: JSON.stringify({
                         message,
+                        session_id: sessionId,
                         temperature: parseFloat(temperatureInput.value),
                         top_k: parseInt(topKInput.value),
                         max_tokens: parseInt(maxTokensInput.value),
@@ -638,6 +654,8 @@
                 removeLoadingMessage(loadingId);
                 
                 if (response.ok) {
+                    // Store session_id for future requests
+                    sessionId = data.session_id;
                     addMessage(data.response, 'assistant');
                 } else {
                     showNotification(data.detail, 'error');
