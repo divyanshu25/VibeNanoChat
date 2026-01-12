@@ -14,9 +14,10 @@ class GPTConfig:
     # Model Architecture
     # ========================================================================
     block_size: int = 1024  # Maximum sequence length (context window)
-    # Vocab size: 50257 (GPT-2) + 5 special tokens for chat format
-    # Special tokens: <|bos|>, <|user_start|>, <|user_end|>, <|assistant_start|>, <|assistant_end|>
-    vocab_size: int = 50262  # Extended vocabulary (50257 base + 5 special tokens)
+    # Vocab size: 50257 (GPT-2) + 9 special tokens
+    # Chat tokens: <|bos|>, <|user_start|>, <|user_end|>, <|assistant_start|>, <|assistant_end|>
+    # Tool tokens: <|python|>, <|python_end|>, <|python_output|>, <|python_output_end|>
+    vocab_size: int = 50266  # Extended vocabulary (50257 base + 9 special tokens)
     n_layer: int = 12  # Number of transformer blocks in the model
     n_head: int = 12  # Number of attention heads per transformer block
     n_kv_head: int = 12  # Number of KV heads for GQA (None = MHA, uses n_head)

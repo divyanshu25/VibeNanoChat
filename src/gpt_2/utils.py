@@ -15,7 +15,7 @@ import torch
 
 def get_special_tokens():
     """
-    Define special tokens for chat format.
+    Define special tokens for chat format and tool calling.
 
     Token IDs start at 50257 (right after GPT-2's vocab which ends at 50256).
 
@@ -28,6 +28,11 @@ def get_special_tokens():
         "<|user_end|>": 50259,  # Marks end of user message
         "<|assistant_start|>": 50260,  # Marks start of assistant response
         "<|assistant_end|>": 50261,  # Marks end of assistant response
+        # Tool calling tokens (for GSM8K calculator calls)
+        "<|python|>": 50262,  # Marks start of Python/calculator expression
+        "<|python_end|>": 50263,  # Marks end of Python/calculator expression
+        "<|python_output|>": 50264,  # Marks start of calculator output
+        "<|python_output_end|>": 50265,  # Marks end of calculator output
     }
 
 
@@ -35,7 +40,7 @@ def get_custom_tokenizer():
     """
     Create a custom tiktoken encoder with our special tokens registered.
 
-    This extends the GPT-2 tokenizer by adding our 5 chat-format special tokens.
+    This extends the GPT-2 tokenizer by adding our chat-format and tool-calling special tokens.
     The custom encoder can then handle these tokens natively via encode/decode.
 
     Returns:
@@ -56,7 +61,7 @@ def get_custom_tokenizer():
         mergeable_ranks=base_enc._mergeable_ranks,  # Use same BPE merges
         special_tokens={
             **base_enc._special_tokens,  # Keep GPT-2's <|endoftext|> (id=50256)
-            **special_tokens,  # Add our 5 new special tokens
+            **special_tokens,  # Add our chat format + tool calling special tokens
         },
     )
 

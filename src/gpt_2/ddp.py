@@ -127,6 +127,7 @@ def run_pretraining(
     device,
     run_evals,
     run_core_evals=False,
+    run_chatcore_evals=False,
     checkpoint_path=None,
 ):
     """
@@ -173,6 +174,7 @@ def run_pretraining(
         device=device,
         run_evals=run_evals,
         run_core_evals=run_core_evals,
+        run_chatcore_evals=run_chatcore_evals,
         mid_training=False,  # Use pretraining configuration
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
@@ -201,6 +203,7 @@ def run_midtraining(
     device,
     run_evals,
     run_core_evals=False,
+    run_chatcore_evals=False,
     checkpoint_path=None,
 ):
     """
@@ -252,6 +255,7 @@ def run_midtraining(
         device=device,
         run_evals=run_evals,
         run_core_evals=run_core_evals,
+        run_chatcore_evals=run_chatcore_evals,
         mid_training=True,  # Use mid-training configuration
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
         checkpoint_dir=checkpoint_dir,
@@ -298,6 +302,7 @@ def run_trainer(args):
                 device,
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
+                run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,  # Optional: resume from checkpoint
             )
 
@@ -315,6 +320,7 @@ def run_trainer(args):
                 device,
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
+                run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
             )
 
@@ -339,6 +345,7 @@ def run_trainer(args):
                 device,
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
+                run_chatcore_evals=args.run_chatcore_evals,
             )
 
             # Transition message
@@ -359,6 +366,7 @@ def run_trainer(args):
                 device,
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
+                run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=checkpoint_path,
             )
 
@@ -421,6 +429,13 @@ if __name__ == "__main__":
         "--run-core-evals",
         action="store_true",
         help="Enable CORE benchmark evaluations during training (recommended for tracking model quality)",
+    )
+
+    # ChatCore evaluation toggle (default: disabled)
+    parser.add_argument(
+        "--run-chatcore-evals",
+        action="store_true",
+        help="Enable ChatCore evaluations during training",
     )
 
     # Parse and process arguments
