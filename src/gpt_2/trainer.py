@@ -254,7 +254,12 @@ class Trainer:
             )
 
             # Register evaluation tasks
-            setup_gsm8k_task(self.chatcore_evaluator, enc, split="test")
+            setup_gsm8k_task(
+                self.chatcore_evaluator,
+                enc,
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
             # Future: Add more tasks here
             # setup_mmlu_task(self.chatcore_evaluator, enc, split="test")
             # setup_arc_task(self.chatcore_evaluator, enc, split="test")

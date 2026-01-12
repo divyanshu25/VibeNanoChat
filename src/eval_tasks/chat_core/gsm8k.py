@@ -176,7 +176,9 @@ def evaluate_gsm8k(ground_truth_answer: str, predicted_text: str) -> bool:
 
 
 def load_gsm8k_from_hf(
-    split: str = "test", max_examples: Optional[int] = None
+    split: str = "test",
+    max_examples: Optional[int] = None,
+    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
 ) -> List[Dict]:
     """
     Load GSM8K dataset from HuggingFace.
@@ -184,6 +186,7 @@ def load_gsm8k_from_hf(
     Args:
         split: Dataset split to load ('train' or 'test')
         max_examples: Optional limit on number of examples to load
+        cache_dir: Directory to cache the downloaded dataset (default: /sensei-fs/users/divgoyal/nanochat_midtraining_data)
 
     Returns:
         List of examples, each with 'question', 'answer', 'conversation' keys
@@ -199,8 +202,8 @@ def load_gsm8k_from_hf(
             "Install with: pip install datasets"
         )
 
-    # Load from HuggingFace
-    dataset = load_dataset("openai/gsm8k", "main", split=split)
+    # Load from HuggingFace with specified cache directory
+    dataset = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
 
     # Limit examples if requested
     if max_examples is not None:

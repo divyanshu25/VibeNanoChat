@@ -88,3 +88,6 @@ class GPTConfig:
     chat_core_max_tokens: int = 512  # Maximum tokens per generation
     chat_core_temperature: float = 0.0  # Sampling temperature (0.0 = greedy decoding)
     chat_core_top_k: int = 50  # Top-k filtering for sampling
+    chat_core_hf_cache_dir: str = (
+        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # HuggingFace cache directory for datasets
+    )

@@ -7,7 +7,7 @@ Provides helper functions to:
 - Register tasks with the evaluator
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[int]:
@@ -95,7 +95,12 @@ def simple_render_conversation(conversation: Dict, tokenizer) -> List[int]:
     return []
 
 
-def setup_gsm8k_task(evaluator, tokenizer, split: str = "test"):
+def setup_gsm8k_task(
+    evaluator,
+    tokenizer,
+    split: str = "test",
+    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+):
     """
     Setup GSM8K task with the evaluator.
 
@@ -103,12 +108,15 @@ def setup_gsm8k_task(evaluator, tokenizer, split: str = "test"):
         evaluator: ChatCoreEvaluator instance
         tokenizer: Tokenizer to use for encoding
         split: Dataset split ('train' or 'test')
+        cache_dir: Directory to cache the downloaded HuggingFace dataset
     """
     from .gsm8k import evaluate_gsm8k, load_gsm8k_from_hf
 
     def load_fn(max_examples=None):
         """Load GSM8K data."""
-        return load_gsm8k_from_hf(split=split, max_examples=max_examples)
+        return load_gsm8k_from_hf(
+            split=split, max_examples=max_examples, cache_dir=cache_dir
+        )
 
     def eval_fn(example, generated_text):
         """Evaluate a GSM8K prediction."""
