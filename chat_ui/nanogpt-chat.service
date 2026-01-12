@@ -1,0 +1,34 @@
+[Unit]
+Description=NanoGPT Chat Server
+After=network.target
+
+[Service]
+Type=notify
+User=colligo
+Group=colligo
+WorkingDirectory=/mnt/localssd/NanoGPT
+Environment="PATH=/mnt/localssd/NanoGPT/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="LOG_LEVEL=info"
+Environment="CHAT_SERVER_PORT=8003"
+
+# Gunicorn with uvicorn workers for FastAPI/ASGI
+ExecStart=/mnt/localssd/NanoGPT/.venv/bin/gunicorn \
+    --config chat_ui/gunicorn_config.py \
+    chat_ui.asgi:application
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security and resource limits
+NoNewPrivileges=true
+LimitNOFILE=65536
+LimitNPROC=512
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nanogpt-chat
+
+[Install]
+WantedBy=multi-user.target

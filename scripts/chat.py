@@ -20,7 +20,8 @@ sys.path.append(src_dir)
 
 import torch
 import torch.nn.functional as F
-from gpt_2.gpt2_model import GPT, GPTConfig
+from gpt_2.gpt2_model import GPT
+from gpt_2.config import GPTConfig
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
 
 

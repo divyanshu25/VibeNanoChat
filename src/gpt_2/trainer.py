@@ -8,7 +8,8 @@ sys.path.append(parent_dir)
 
 import math
 import torch
-from gpt_2.gpt2_model import GPT, GPTConfig
+from gpt_2.gpt2_model import GPT
+from gpt_2.config import GPTConfig
 
 # from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
@@ -145,7 +146,7 @@ class Trainer:
 
         # Learning rate scheduling parameters
         if self.mid_training:
-            self.max_learning_rate = 1e-4
+            self.max_learning_rate = 6e-4
             self.min_learning_rate = self.max_learning_rate * 0.1
             self.warmup_steps = 80
             self.max_steps = 878
@@ -256,7 +257,7 @@ class Trainer:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
-                self.config.checkpoint_interval = 800
+                self.config.checkpoint_interval = 400
                 if self.master_process:
                     print(
                         "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"
