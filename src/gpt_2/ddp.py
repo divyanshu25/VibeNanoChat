@@ -184,8 +184,10 @@ def run_pretraining(
 
     # Construct path to the final checkpoint for potential mid-training continuation
     checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints"
+    # The actual filename format: model_checkpoint_global{global_step}_pretraining.pt
+    final_global_step = (trainer.max_steps * trainer.num_epochs) - 1
     final_checkpoint = os.path.join(
-        checkpoint_dir, f"model_checkpoint_{trainer.max_steps-1}_pretraining.pt"
+        checkpoint_dir, f"model_checkpoint_global{final_global_step}_pretraining.pt"
     )
 
     if master_process:
@@ -222,7 +224,12 @@ def run_midtraining(
         master_process (bool): Whether this is the main process
         device (str): Device to train on
         run_evals (bool): Whether to run evaluations during training
+        run_core_evals (bool): Whether to run CORE benchmark evaluations
+        run_chatcore_evals (bool): Whether to run ChatCORE evaluations
         checkpoint_path (str): Path to pretrained checkpoint to resume from
+
+    Returns:
+        str: Path to the final checkpoint saved after mid-training
 
     Raises:
         ValueError: If checkpoint_path is not provided
@@ -263,8 +270,17 @@ def run_midtraining(
     )
     trainer.train()
 
+    # Construct path to the final checkpoint
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+    final_global_step = (trainer.max_steps * trainer.num_epochs) - 1
+    final_checkpoint = os.path.join(
+        checkpoint_dir, f"model_checkpoint_global{final_global_step}_midtraining.pt"
+    )
+
     if master_process:
-        print("\n✅ Mid-training complete!\n")
+        print(f"\n✅ Mid-training complete! Final checkpoint: {final_checkpoint}\n")
+
+    return final_checkpoint
 
 
 def run_trainer(args):
