@@ -549,7 +549,14 @@
             }
             
             loadBtn.disabled = true;
-            loadBtn.textContent = 'Loading...';
+            loadBtn.innerHTML = `
+                <span class="flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    Loading...
+                </span>
+            `;
             
             try {
                 const response = await fetch('/api/load_checkpoint', {
@@ -573,7 +580,14 @@
                 showNotification('Error loading checkpoint', 'error');
             } finally {
                 loadBtn.disabled = false;
-                loadBtn.textContent = 'Load Checkpoint';
+                loadBtn.innerHTML = `
+                    <span class="flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        Load Checkpoint
+                    </span>
+                `;
             }
         });
 
@@ -623,8 +637,8 @@
             // Clear input
             messageInput.value = '';
             
-            // Add user message
-            addMessage(message, 'user');
+            // Add user message and track its ID
+            const userMessageId = addMessage(message, 'user');
             
             // Show loading indicator
             const loadingId = showLoadingMessage();
@@ -658,11 +672,17 @@
                     sessionId = data.session_id;
                     addMessage(data.response, 'assistant');
                 } else {
-                    showNotification(data.detail, 'error');
+                    // Remove user message on error and restore to input
+                    removeMessage(userMessageId);
+                    messageInput.value = message;
+                    showNotification(data.detail || 'Error processing message', 'error');
                 }
             } catch (error) {
                 console.error('Error sending message:', error);
                 removeLoadingMessage(loadingId);
+                // Remove user message on error and restore to input
+                removeMessage(userMessageId);
+                messageInput.value = message;
                 showNotification('Error sending message', 'error');
             } finally {
                 isGenerating = false;
@@ -690,7 +710,11 @@
             
             const container = chatMessages.querySelector('.max-w-3xl') || chatMessages;
             
+            // Generate unique ID for this message
+            const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            
             const messageDiv = document.createElement('div');
+            messageDiv.id = messageId;
             messageDiv.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'} message-bubble`;
             
             const bubble = document.createElement('div');
@@ -736,6 +760,16 @@
                 top: chatMessages.scrollHeight,
                 behavior: 'smooth'
             });
+            
+            return messageId;
+        }
+        
+        // Remove message from chat
+        function removeMessage(messageId) {
+            const messageDiv = document.getElementById(messageId);
+            if (messageDiv) {
+                messageDiv.remove();
+            }
         }
 
         // Show loading message

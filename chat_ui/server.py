@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
@@ -239,9 +239,9 @@ def generate_response(
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
-    max_tokens: Optional[int] = 256
-    temperature: Optional[float] = 0.8
-    top_k: Optional[int] = 50
+    max_tokens: Optional[int] = Field(default=256, ge=1, le=1024)
+    temperature: Optional[float] = Field(default=0.8, gt=0.0, le=2.0)
+    top_k: Optional[int] = Field(default=50, ge=1, le=1000)
 
 
 class ChatResponse(BaseModel):
