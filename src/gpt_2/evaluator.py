@@ -123,7 +123,7 @@ class Evaluators:
     def sample_from_model(
         self,
         num_sequences=4,
-        max_length=32,
+        max_length=255,
         context="Hello, I'm a language model,",
         step=None,
     ):
@@ -135,6 +135,9 @@ class Evaluators:
         sample_rng = torch.Generator(device=self.device)
         sample_rng.manual_seed(self.sample_seed + self.ddp_rank)
 
+        print(
+            f"Generating {num_sequences} sequences of length {max_length} with context: {context}"
+        )
         decoded = generate(
             num_sequences=num_sequences,
             max_length=max_length,

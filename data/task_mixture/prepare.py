@@ -141,7 +141,7 @@ def format_gsm8k(example):
     Output format:
         <|bos|><|user_start|>Janet has 3 apples...<|user_end|>
         <|assistant_start|>Janet has 3 apples. She buys 2 more
-        <|python|>12/60<|python_end|><|python_output|>0.2<|python_output_end|>
+        <|python|>12/60<|python_end|><|output_start|>0.2<|output_end|>
         ... #### 5<|assistant_end|>
 
     Note: Tool calls are wrapped in special tokens so the model learns the structure.
@@ -167,7 +167,7 @@ def format_gsm8k(example):
                 # Format as structured tool call with special tokens
                 formatted_answer_parts.append(
                     f"<|python|>{expr}<|python_end|>"
-                    f"<|python_output|>{result}<|python_output_end|>"
+                    f"<|output_start|>{result}<|output_end|>"
                 )
             else:
                 # No = sign, just add the expression

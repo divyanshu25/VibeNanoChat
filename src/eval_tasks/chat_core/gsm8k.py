@@ -74,7 +74,7 @@ def parse_gsm8k_answer(answer_text: str) -> List[Dict[str, str]]:
         List of parts, each a dict with 'type' and 'text' keys:
         - {'type': 'text', 'text': '...'} for regular text
         - {'type': 'python', 'text': 'expression'} for calculator input
-        - {'type': 'python_output', 'text': 'result'} for calculator output
+        - {'type': 'output_start', 'text': 'result'} for calculator output
 
     Example:
         >>> answer = "She earns 12/60 = $<<12/60=0.2>>0.2 per minute. #### 10"
@@ -84,7 +84,7 @@ def parse_gsm8k_answer(answer_text: str) -> List[Dict[str, str]]:
         >>> parts[1]
         {'type': 'python', 'text': '12/60'}
         >>> parts[2]
-        {'type': 'python_output', 'text': '0.2'}
+        {'type': 'output_start', 'text': '0.2'}
     """
     parts = []
 
@@ -110,7 +110,7 @@ def parse_gsm8k_answer(answer_text: str) -> List[Dict[str, str]]:
             parts.append({"type": "python", "text": expr})
             # Add result as python output
             if result:
-                parts.append({"type": "python_output", "text": result})
+                parts.append({"type": "output_start", "text": result})
         elif segment:
             # Regular text
             parts.append({"type": "text", "text": segment})

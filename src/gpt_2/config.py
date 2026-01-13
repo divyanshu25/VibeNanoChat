@@ -16,7 +16,7 @@ class GPTConfig:
     block_size: int = 1024  # Maximum sequence length (context window)
     # Vocab size: 50257 (GPT-2) + 9 special tokens
     # Chat tokens: <|bos|>, <|user_start|>, <|user_end|>, <|assistant_start|>, <|assistant_end|>
-    # Tool tokens: <|python|>, <|python_end|>, <|python_output|>, <|python_output_end|>
+    # Tool tokens: <|python|>, <|python_end|>, <|ouput_start|>, <|output_end|>
     vocab_size: int = 50266  # Extended vocabulary (50257 base + 9 special tokens)
     n_layer: int = 12  # Number of transformer blocks in the model
     n_head: int = 12  # Number of attention heads per transformer block
@@ -66,13 +66,15 @@ class GPTConfig:
     # Evaluation Schedule
     # ========================================================================
     eval_interval: int = 250  # Run evaluations every N global steps
-    val_loss_eval_batches: int = 39  # Number of batches for validation loss estimation
+    val_loss_eval_batches: int = (
+        37  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
+    )
 
     # ========================================================================
     # Generation Sampling (during evaluation)
     # ========================================================================
     generation_num_samples: int = 4  # Number of sequences to generate per evaluation
-    generation_max_length: int = 32  # Maximum tokens per generated sequence
+    generation_max_length: int = 256  # Maximum tokens per generated sequence
     generation_seed: int = 42  # Random seed for reproducible generation
 
     # ========================================================================

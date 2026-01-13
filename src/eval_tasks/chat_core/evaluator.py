@@ -8,6 +8,7 @@ This is more realistic for chat models but requires actual text generation.
 Supported tasks:
 - GSM8K: Math reasoning problems
 - (Future: MMLU, ARC, HumanEval, SpellingBee)
+
 """
 
 import time
@@ -17,6 +18,8 @@ import torch
 import torch.distributed as dist
 
 import wandb
+
+from .tools import use_calculator
 
 
 class ChatCoreEvaluator:
@@ -79,15 +82,40 @@ class ChatCoreEvaluator:
         # Task registry - will be populated when tasks are loaded
         self.tasks = {}
 
+        # Check if tokenizer supports tool use (python tags)
+        self.supports_tools = self._check_tool_support()
+
         if self.master_process:
             print(f"\n{'='*80}")
             print("💬 ChatCORE Evaluator initialized")
             print(f"   Samples per problem: {num_samples}")
             print(f"   Max tokens: {max_tokens}")
             print(f"   Temperature: {temperature}")
+            print(f"   Tool use enabled: {self.supports_tools}")
             if max_examples:
                 print(f"   Max examples per task: {max_examples}")
             print(f"{'='*80}\n")
+
+    def _check_tool_support(self) -> bool:
+        """Check if tokenizer has the special tokens needed for tool use."""
+        try:
+            # Check if tokenizer has encode_special method
+            if not hasattr(self.tokenizer, "encode_special"):
+                return False
+
+            # Try to get the required special tokens (NanoGPT format)
+            python_start = self.tokenizer.encode_special("<|python|>")
+            python_end = self.tokenizer.encode_special("<|python_end|>")
+            output_start = self.tokenizer.encode_special("<|output_start|>")
+            output_end = self.tokenizer.encode_special("<|output_end|>")
+
+            print(
+                f"python_start: {python_start}, python_end: {python_end}, output_start: {output_start}, output_end: {output_end} found"
+            )
+            # If we got here, all tokens exist
+            return True
+        except (AttributeError, KeyError, Exception):
+            return False
 
     def register_task(self, task_name: str, task_config: Dict):
         """
@@ -196,6 +224,211 @@ class ChatCoreEvaluator:
         return generated_text
 
     @torch.no_grad()
+    def generate_completion_with_tools(self, prompt_tokens: List[int]) -> str:
+        """
+        Generate a completion with calculator tool use support.
+
+        This implements a tool-use state machine that allows the model to execute
+        Python expressions during generation for accurate mathematical computation.
+
+        Flow:
+        1. Model generates text normally
+        2. When model emits <|python|>, enter "python mode"
+        3. Collect all tokens until <|python_end|> as a Python expression
+        4. Execute the expression with use_calculator()
+        5. Force the result back: <|output_start|>result<|output_end|>
+        6. Continue generation with the forced result in context
+
+        Example generation sequence:
+            Model: "She earns <|python|>12/60<|python_end|>"
+            → Calculator executes: 12/60 = 0.2
+            → Forced output: "<|output_start|>0.2<|output_end|>"
+            → Model continues: " per minute..."
+
+        Args:
+            prompt_tokens: List of token IDs for the prompt
+
+        Returns:
+            Generated text (decoded tokens)
+        """
+        # =====================================================================
+        # SETUP: Fallback and special token retrieval
+        # =====================================================================
+        if not self.supports_tools:
+            # Fall back to regular generation if tokenizer lacks tool tokens
+            return self.generate_completion(prompt_tokens)
+
+        # Get the special tokens that coordinate the tool-use state machine
+        python_start = self.tokenizer.encode_special("<|python|>")
+        python_end = self.tokenizer.encode_special("<|python_end|>")
+        output_start = self.tokenizer.encode_special("<|output_start|>")
+        output_end = self.tokenizer.encode_special("<|output_end|>")
+
+        # Get termination tokens (EOS and assistant_end if available)
+        if hasattr(self.tokenizer, "eos_token_id"):
+            eos_id = self.tokenizer.eos_token_id
+        elif hasattr(self.tokenizer, "get_bos_token_id"):
+            eos_id = self.tokenizer.get_bos_token_id()
+        else:
+            eos_id = 50256  # GPT-2 default
+
+        try:
+            assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        except Exception:
+            assistant_end = None
+
+        # =====================================================================
+        # STATE INITIALIZATION
+        # =====================================================================
+        generated_tokens = list(prompt_tokens)  # All tokens generated so far
+        in_python_block = False  # Are we currently inside <|python|>...<|python_end|>?
+        python_expr_tokens = []  # Tokens collected inside python block
+        forced_tokens = []  # Queue of tokens to force (calculator output)
+
+        # =====================================================================
+        # MAIN GENERATION LOOP
+        # =====================================================================
+        for _ in range(self.max_tokens):
+            # -----------------------------------------------------------------
+            # STEP 1: Check if we have forced tokens to inject
+            # -----------------------------------------------------------------
+            # When calculator returns a result, we force those tokens into
+            # generation instead of sampling. This ensures the model sees
+            # the actual computation result.
+            if forced_tokens:
+                # Add one forced token per iteration
+                generated_tokens.append(forced_tokens.pop(0))
+                # Skip to next iteration (no model forward pass needed)
+                continue
+
+            # -----------------------------------------------------------------
+            # STEP 2: Run model forward pass to get next token logits
+            # -----------------------------------------------------------------
+            prompt_tensor = torch.tensor(
+                [generated_tokens], dtype=torch.long, device=self.device
+            )
+
+            with torch.amp.autocast(
+                device_type=(
+                    self.device.type if hasattr(self.device, "type") else "cuda"
+                ),
+                dtype=torch.bfloat16,
+            ):
+                logits = self.model(prompt_tensor)
+
+            # Handle models that return (logits, loss) tuples
+            if isinstance(logits, tuple):
+                logits = logits[0]
+
+            # Extract logits for the last position (next token prediction)
+            next_token_logits = logits[0, -1, :]
+
+            # -----------------------------------------------------------------
+            # STEP 3: Sample next token from logits
+            # -----------------------------------------------------------------
+            if self.temperature > 0:
+                # Apply temperature scaling for diversity
+                next_token_logits = next_token_logits / self.temperature
+
+                # Apply top-k filtering (keep only top-k most likely tokens)
+                if self.top_k > 0:
+                    top_k_logits, top_k_indices = torch.topk(
+                        next_token_logits, self.top_k
+                    )
+                    next_token_logits = torch.full_like(
+                        next_token_logits, float("-inf")
+                    )
+                    next_token_logits.scatter_(0, top_k_indices, top_k_logits)
+
+                # Sample from the probability distribution
+                probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).item()
+            else:
+                # Greedy decoding (deterministic, pick most likely token)
+                next_token = next_token_logits.argmax().item()
+
+            # -----------------------------------------------------------------
+            # STEP 4: Check for termination tokens
+            # -----------------------------------------------------------------
+            if next_token == eos_id or (
+                assistant_end is not None and next_token == assistant_end
+            ):
+                break
+
+            # -----------------------------------------------------------------
+            # STEP 5: Tool-use state machine
+            # -----------------------------------------------------------------
+            # This is the core logic that enables calculator tool use.
+            # We track whether we're inside a python block and handle
+            # transitions between states.
+
+            if next_token == python_start:
+                # ENTERING PYTHON MODE
+                # Model wants to compute something. Start collecting tokens
+                # for the Python expression.
+                in_python_block = True
+                python_expr_tokens = []
+                generated_tokens.append(next_token)
+
+            elif next_token == python_end and in_python_block:
+                # EXITING PYTHON MODE
+                # Model finished the expression. Time to execute it!
+                in_python_block = False
+                generated_tokens.append(next_token)
+
+                # Execute the calculator tool
+                if python_expr_tokens:
+                    # Decode the collected tokens back to a string expression
+                    expr = self.tokenizer.decode(python_expr_tokens)
+
+                    # Execute the expression safely (with timeout, sandboxing)
+                    result = use_calculator(expr)
+
+                    if result is not None:
+                        # Calculator succeeded! Convert result to tokens
+                        result_str = str(result)
+                        result_tokens = self.tokenizer.encode(result_str)
+
+                        # Force these tokens into the generation stream
+                        # Format: <|output_start|>result<|output_end|>
+                        forced_tokens.append(output_start)
+                        forced_tokens.extend(result_tokens)
+                        forced_tokens.append(output_end)
+
+                # Clear the expression buffer
+                python_expr_tokens = []
+
+            elif in_python_block:
+                # INSIDE PYTHON MODE
+                # We're collecting tokens for the Python expression.
+                # Just accumulate them without executing yet.
+                python_expr_tokens.append(next_token)
+                generated_tokens.append(next_token)
+
+            else:
+                # NORMAL MODE
+                # Regular text generation, no tool use involved.
+                generated_tokens.append(next_token)
+
+            # -----------------------------------------------------------------
+            # STEP 6: Check sequence length limits
+            # -----------------------------------------------------------------
+            if (
+                hasattr(self.model, "max_seq_len")
+                and len(generated_tokens) >= self.model.max_seq_len
+            ):
+                break
+
+        # =====================================================================
+        # FINALIZATION: Decode and return generated text
+        # =====================================================================
+        # Extract only the newly generated tokens (exclude the prompt)
+        new_tokens = generated_tokens[len(prompt_tokens) :]
+        generated_text = self.tokenizer.decode(new_tokens)
+
+        return generated_text
+
+    @torch.no_grad()
     def evaluate_task(self, task_name: str) -> Dict[str, float]:
         """
         Evaluate model on a single task.
@@ -234,9 +467,12 @@ class ChatCoreEvaluator:
             # Render prompt from conversation
             prompt_tokens = render_fn(example)
 
-            # Generate completion
+            # Generate completion (with tool use if supported)
             try:
-                generated_text = self.generate_completion(prompt_tokens)
+                if self.supports_tools:
+                    generated_text = self.generate_completion_with_tools(prompt_tokens)
+                else:
+                    generated_text = self.generate_completion(prompt_tokens)
 
                 # Evaluate correctness
                 is_correct = eval_fn(example, generated_text)

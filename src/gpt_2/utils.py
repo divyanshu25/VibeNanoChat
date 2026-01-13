@@ -31,8 +31,8 @@ def get_special_tokens():
         # Tool calling tokens (for GSM8K calculator calls)
         "<|python|>": 50262,  # Marks start of Python/calculator expression
         "<|python_end|>": 50263,  # Marks end of Python/calculator expression
-        "<|python_output|>": 50264,  # Marks start of calculator output
-        "<|python_output_end|>": 50265,  # Marks end of calculator output
+        "<|output_start|>": 50264,  # Marks start of calculator output
+        "<|output_end|>": 50265,  # Marks end of calculator output
     }
 
 
@@ -140,8 +140,33 @@ def load_checkpoint(
     # (PyTorch 2.6+ defaults to weights_only=True for security)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
+    # Check for vocabulary size mismatch
+    checkpoint_state = checkpoint["model"]
+    checkpoint_vocab_size = checkpoint_state["transformer.wte.weight"].shape[0]
+    model_vocab_size = model.transformer.wte.weight.shape[0]
+
+    if checkpoint_vocab_size != model_vocab_size:
+        error_msg = (
+            f"\n{'='*80}\n"
+            f"❌ VOCABULARY SIZE MISMATCH ERROR\n"
+            f"{'='*80}\n"
+            f"Checkpoint vocab size: {checkpoint_vocab_size}\n"
+            f"Model vocab size:      {model_vocab_size}\n"
+            f"Difference:            {abs(model_vocab_size - checkpoint_vocab_size)} tokens\n"
+            f"\n"
+            f"The checkpoint was saved with a different vocabulary size than the\n"
+            f"current model configuration. This will cause index out of bounds errors.\n"
+            f"\n"
+            f"Possible solutions:\n"
+            f"1. Use a checkpoint with matching vocab_size={model_vocab_size}\n"
+            f"2. Modify your model config to use vocab_size={checkpoint_vocab_size}\n"
+            f"3. Retrain from scratch with the correct vocabulary size\n"
+            f"{'='*80}\n"
+        )
+        raise ValueError(error_msg)
+
     # Load model state
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(checkpoint_state)
 
     # Load optimizer state if provided and available
     if optimizer is not None and "optimizer" in checkpoint:

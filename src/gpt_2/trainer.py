@@ -288,9 +288,11 @@ class Trainer:
                 self.config = checkpoint_result["config"]
 
             if self.mid_training:
+                # LOADING from checkpoint will override configs in the config file so make sure to override them here, if you need to change them.
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
+                self.config.generation_max_length = 256
                 # Override checkpoint interval for mid-training
                 if self.master_process:
                     print(
@@ -478,7 +480,7 @@ class Trainer:
                         step=step, global_step=global_step
                     )
                     sample_context = (
-                        "<|bos|><|user_start|>Give me a random joke.<|user_end|>"
+                        "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
                         if self.mid_training
                         else "Hello, I'm a language model,"
                     )

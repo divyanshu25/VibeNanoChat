@@ -24,7 +24,9 @@ def main():
     special_token_ids = set(special_tokens.values())
     special_token_ids.add(50256)  # GPT-2's <|endoftext|>
 
-    vocab_size = 50262  # GPT-2 base (50257) + 5 special tokens
+    vocab_size = (
+        50266  # GPT-2 base (50257) + 9 special tokens (chat format + tool calling)
+    )
 
     token_bytes = []
     for token_id in range(vocab_size):
