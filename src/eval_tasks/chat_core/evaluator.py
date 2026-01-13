@@ -99,15 +99,15 @@ class ChatCoreEvaluator:
     def _check_tool_support(self) -> bool:
         """Check if tokenizer has the special tokens needed for tool use."""
         try:
-            # Check if tokenizer has encode_special method
-            if not hasattr(self.tokenizer, "encode_special"):
+            # Check if tokenizer has _special_tokens attribute
+            if not hasattr(self.tokenizer, "_special_tokens"):
                 return False
 
             # Try to get the required special tokens (NanoGPT format)
-            python_start = self.tokenizer.encode_special("<|python|>")
-            python_end = self.tokenizer.encode_special("<|python_end|>")
-            output_start = self.tokenizer.encode_special("<|output_start|>")
-            output_end = self.tokenizer.encode_special("<|output_end|>")
+            python_start = self.tokenizer._special_tokens["<|python|>"]
+            python_end = self.tokenizer._special_tokens["<|python_end|>"]
+            output_start = self.tokenizer._special_tokens["<|output_start|>"]
+            output_end = self.tokenizer._special_tokens["<|output_end|>"]
 
             print(
                 f"python_start: {python_start}, python_end: {python_end}, output_start: {output_start}, output_end: {output_end} found"
@@ -193,14 +193,15 @@ class ChatCoreEvaluator:
                 next_token = next_token_logits.argmax().item()
 
             # Check for end of sequence
-            # Common EOS token IDs: 50256 (GPT-2), 2 (Llama), etc.
-            # You may need to adapt this based on your tokenizer
-            if hasattr(self.tokenizer, "eos_token_id"):
-                eos_id = self.tokenizer.eos_token_id
-            else:
-                eos_id = 50256  # GPT-2 default
+            # For chat models, we should stop at <|assistant_end|> (50261)
+            # This is the token the model was trained to emit at end of responses
+            try:
+                assistant_end_id = self.tokenizer._special_tokens["<|assistant_end|>"]
+            except (AttributeError, KeyError, Exception):
+                # Fallback to GPT-2's <|endoftext|> if assistant_end not available
+                assistant_end_id = 50256
 
-            if next_token == eos_id:
+            if next_token == assistant_end_id:
                 break
 
             generated_tokens.append(next_token)
@@ -259,23 +260,18 @@ class ChatCoreEvaluator:
             return self.generate_completion(prompt_tokens)
 
         # Get the special tokens that coordinate the tool-use state machine
-        python_start = self.tokenizer.encode_special("<|python|>")
-        python_end = self.tokenizer.encode_special("<|python_end|>")
-        output_start = self.tokenizer.encode_special("<|output_start|>")
-        output_end = self.tokenizer.encode_special("<|output_end|>")
+        python_start = self.tokenizer._special_tokens["<|python|>"]
+        python_end = self.tokenizer._special_tokens["<|python_end|>"]
+        output_start = self.tokenizer._special_tokens["<|output_start|>"]
+        output_end = self.tokenizer._special_tokens["<|output_end|>"]
 
-        # Get termination tokens (EOS and assistant_end if available)
-        if hasattr(self.tokenizer, "eos_token_id"):
-            eos_id = self.tokenizer.eos_token_id
-        elif hasattr(self.tokenizer, "get_bos_token_id"):
-            eos_id = self.tokenizer.get_bos_token_id()
-        else:
-            eos_id = 50256  # GPT-2 default
-
+        # Get termination token: <|assistant_end|> (50261)
+        # This is the token the model was trained to emit at end of responses
         try:
-            assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
-        except Exception:
-            assistant_end = None
+            assistant_end_id = self.tokenizer._special_tokens["<|assistant_end|>"]
+        except (AttributeError, KeyError, Exception):
+            # Fallback to GPT-2's <|endoftext|> if assistant_end not available
+            assistant_end_id = 50256
 
         # =====================================================================
         # STATE INITIALIZATION
@@ -348,11 +344,9 @@ class ChatCoreEvaluator:
                 next_token = next_token_logits.argmax().item()
 
             # -----------------------------------------------------------------
-            # STEP 4: Check for termination tokens
+            # STEP 4: Check for termination token
             # -----------------------------------------------------------------
-            if next_token == eos_id or (
-                assistant_end is not None and next_token == assistant_end
-            ):
+            if next_token == assistant_end_id:
                 break
 
             # -----------------------------------------------------------------

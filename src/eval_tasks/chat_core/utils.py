@@ -12,15 +12,17 @@ from typing import Dict, List, Optional
 
 def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[int]:
     """
-    Render a conversation into tokens for completion.
+    Render a conversation into tokens for completion using special token format.
 
     Takes a conversation dict with messages and renders it into a prompt
-    that ends right before where the assistant should respond.
+    that ends right before where the assistant should respond, using the
+    special token format that matches training:
+    <|bos|><|user_start|>...<|user_end|><|assistant_start|>
 
     Args:
         conversation: Dict with 'messages' key containing list of messages.
                      Each message has 'role' and 'content' keys.
-        tokenizer: Tokenizer with encode method
+        tokenizer: Tokenizer with encode method (supports allowed_special="all")
 
     Returns:
         List of token IDs representing the prompt
@@ -33,66 +35,43 @@ def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[in
         ...     ]
         ... }
         >>> tokens = render_conversation_for_completion(conversation, tokenizer)
-        # Returns tokens for: "User: What is 2+2?\nAssistant:"
+        # Returns tokens for: "<|bos|><|user_start|>What is 2+2?<|user_end|><|assistant_start|>"
     """
-    # Simple chat template rendering
-    # You may need to adapt this based on your specific chat format
-
     messages = conversation["messages"]
-    prompt_text = ""
+    formatted_parts = ["<|bos|>"]  # Start with beginning-of-sequence token
 
     for i, msg in enumerate(messages):
-        role = msg["role"]
+        role = msg["role"].lower()
         content = msg["content"]
 
-        # For assistant messages with structured content, just skip
+        # Extract text content from structured or string format
+        if isinstance(content, str):
+            text_content = content
+        else:
+            # If content is structured (list of parts), extract text
+            text_parts = [p["text"] for p in content if p.get("type") == "text"]
+            text_content = "".join(text_parts)
+
+        # For assistant messages, add the start token but not the content
         # (we only want to render up to where assistant should respond)
         if role == "assistant":
-            # Add the role marker but not the content (model will generate)
-            prompt_text += "Assistant:"
+            formatted_parts.append("<|assistant_start|>")
             break
         elif role == "user":
-            # Add user message
-            if isinstance(content, str):
-                prompt_text += f"User: {content}\n"
-            else:
-                # If content is structured (list of parts), extract text
-                text_parts = [p["text"] for p in content if p.get("type") == "text"]
-                prompt_text += f"User: {''.join(text_parts)}\n"
+            # Add user message with special tokens
+            formatted_parts.append(f"<|user_start|>{text_content}<|user_end|>")
+        else:
+            # Handle other roles (system, etc.) as user for consistency with training
+            formatted_parts.append(f"<|user_start|>{text_content}<|user_end|>")
 
-    # Encode to tokens
-    tokens = tokenizer.encode(prompt_text)
+    # Combine into final prompt text
+    prompt_text = "".join(formatted_parts)
+
+    # Encode to tokens with special token support
+    # The allowed_special="all" parameter tells the tokenizer to recognize
+    # our custom special tokens (<|bos|>, <|user_start|>, etc.)
+    tokens = tokenizer.encode(prompt_text, allowed_special="all")
     return tokens
-
-
-def simple_render_conversation(conversation: Dict, tokenizer) -> List[int]:
-    """
-    Simple conversation rendering that just takes the user's last message.
-
-    This is a minimal approach that just uses the question as the prompt.
-
-    Args:
-        conversation: Conversation dict
-        tokenizer: Tokenizer
-
-    Returns:
-        List of token IDs
-    """
-    messages = conversation["messages"]
-
-    # Find the last user message
-    for msg in messages:
-        if msg["role"] == "user":
-            content = msg["content"]
-            if isinstance(content, str):
-                return tokenizer.encode(content)
-            else:
-                # Extract text from structured content
-                text_parts = [p["text"] for p in content if p.get("type") == "text"]
-                return tokenizer.encode("".join(text_parts))
-
-    # Fallback: empty prompt
-    return []
 
 
 def setup_gsm8k_task(
