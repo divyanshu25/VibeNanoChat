@@ -118,15 +118,17 @@ gpu-hot: ## Keep GPUs at ~90%+ utilization. Usage: make gpu-hot [GPUS=0,1,2] [DE
 gpu-status: ## Show current GPU utilization and memory usage
 	@nvidia-smi
 
-
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [NO_EVALS=true] [CORE_EVALS=true]
+# Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true
+# Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
 	@NGPUS=$${NGPUS:-2}; \
 	MODE=$${MODE:-pretraining}; \
 	CHECKPOINT=$${CHECKPOINT:-}; \
-	NO_EVALS=$${NO_EVALS:-false}; \
+	VAL_EVALS=$${VAL_EVALS:-true}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
+	CHATCORE_EVALS=$${CHATCORE_EVALS:-false}; \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
 	LOG_FILE="logs/ddp_train_$${TIMESTAMP}.log"; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
@@ -137,13 +139,19 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		echo "📂 Using checkpoint: $$CHECKPOINT"; \
 		CMD="$$CMD --checkpoint $$CHECKPOINT"; \
 	fi; \
-	if [ "$$NO_EVALS" = "true" ]; then \
-		echo "⏩ Evaluations disabled"; \
+	if [ "$$VAL_EVALS" = "false" ]; then \
+		echo "⏩ Validation evaluations disabled"; \
 		CMD="$$CMD --no-evals"; \
+	else \
+		echo "✅ Validation evaluations enabled"; \
 	fi; \
 	if [ "$$CORE_EVALS" = "true" ]; then \
 		echo "📊 CORE benchmark evaluations enabled"; \
 		CMD="$$CMD --run-core-evals"; \
+	fi; \
+	if [ "$$CHATCORE_EVALS" = "true" ]; then \
+		echo "💬 ChatCore evaluations enabled"; \
+		CMD="$$CMD --run-chatcore-evals"; \
 	fi; \
 	echo ""; \
 	eval $$CMD 2>&1 | tee $$LOG_FILE

@@ -26,6 +26,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -129,24 +130,59 @@ def format_mmlu(example):
 
 def format_gsm8k(example):
     """
-    Format GSM8K math problem to chat format.
+    Format GSM8K math problem to chat format with structured tool calls.
 
     GSM8K structure:
         {'question': 'Janet has 3 apples...', 'answer': 'Janet has 3 apples. She buys 2 more... #### 5'}
 
+    The answer contains calculator tool calls in <<expression=result>> format.
+    We parse these and format them as structured tool invocations.
+
     Output format:
         <|bos|><|user_start|>Janet has 3 apples...<|user_end|>
-        <|assistant_start|>Janet has 3 apples. She buys 2 more... #### 5<|assistant_end|>
+        <|assistant_start|>Janet has 3 apples. She buys 2 more
+        <|python|>12/60<|python_end|><|output_start|>0.2<|output_end|>
+        ... #### 5<|assistant_end|>
 
-    Note: GSM8K answers include step-by-step reasoning followed by #### and the final answer.
+    Note: Tool calls are wrapped in special tokens so the model learns the structure.
     """
     question = example["question"]
     answer = example["answer"]  # Contains reasoning + "#### final_answer"
 
+    # Parse tool calls from the answer
+    # GSM8K uses <<expression=result>> format for calculator calls
+    formatted_answer_parts = []
+
+    # Split on tool call markers: <<...>>
+    segments = re.split(r"(<<[^>]+>>)", answer)
+
+    for segment in segments:
+        if segment.startswith("<<") and segment.endswith(">>"):
+            # This is a calculator tool call
+            inner = segment[2:-2]  # Remove << >>
+
+            # Split on = to get expression and result
+            if "=" in inner:
+                expr, result = inner.rsplit("=", 1)
+                # Format as structured tool call with special tokens
+                formatted_answer_parts.append(
+                    f"<|python|>{expr}<|python_end|>"
+                    f"<|output_start|>{result}<|output_end|>"
+                )
+            else:
+                # No = sign, just add the expression
+                formatted_answer_parts.append(f"<|python|>{inner}<|python_end|>")
+        else:
+            # Regular text - add as is
+            formatted_answer_parts.append(segment)
+
+    # Combine into final answer text
+    formatted_answer = "".join(formatted_answer_parts)
+
     text = (
         f"<|bos|>"
         f"<|user_start|>{question}<|user_end|>"
-        f"<|assistant_start|>{answer}<|assistant_end|>"
+        f"<|assistant_start|>{formatted_answer}<|assistant_end|>"
     )
     return {"text": text}
 

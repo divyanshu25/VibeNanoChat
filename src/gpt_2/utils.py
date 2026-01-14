@@ -15,7 +15,7 @@ import torch
 
 def get_special_tokens():
     """
-    Define special tokens for chat format.
+    Define special tokens for chat format and tool calling.
 
     Token IDs start at 50257 (right after GPT-2's vocab which ends at 50256).
 
@@ -28,6 +28,11 @@ def get_special_tokens():
         "<|user_end|>": 50259,  # Marks end of user message
         "<|assistant_start|>": 50260,  # Marks start of assistant response
         "<|assistant_end|>": 50261,  # Marks end of assistant response
+        # Tool calling tokens (for GSM8K calculator calls)
+        "<|python|>": 50262,  # Marks start of Python/calculator expression
+        "<|python_end|>": 50263,  # Marks end of Python/calculator expression
+        "<|output_start|>": 50264,  # Marks start of calculator output
+        "<|output_end|>": 50265,  # Marks end of calculator output
     }
 
 
@@ -35,7 +40,7 @@ def get_custom_tokenizer():
     """
     Create a custom tiktoken encoder with our special tokens registered.
 
-    This extends the GPT-2 tokenizer by adding our 5 chat-format special tokens.
+    This extends the GPT-2 tokenizer by adding our chat-format and tool-calling special tokens.
     The custom encoder can then handle these tokens natively via encode/decode.
 
     Returns:
@@ -56,7 +61,7 @@ def get_custom_tokenizer():
         mergeable_ranks=base_enc._mergeable_ranks,  # Use same BPE merges
         special_tokens={
             **base_enc._special_tokens,  # Keep GPT-2's <|endoftext|> (id=50256)
-            **special_tokens,  # Add our 5 new special tokens
+            **special_tokens,  # Add our chat format + tool calling special tokens
         },
     )
 
@@ -135,8 +140,33 @@ def load_checkpoint(
     # (PyTorch 2.6+ defaults to weights_only=True for security)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
+    # Check for vocabulary size mismatch
+    checkpoint_state = checkpoint["model"]
+    checkpoint_vocab_size = checkpoint_state["transformer.wte.weight"].shape[0]
+    model_vocab_size = model.transformer.wte.weight.shape[0]
+
+    if checkpoint_vocab_size != model_vocab_size:
+        error_msg = (
+            f"\n{'='*80}\n"
+            f"❌ VOCABULARY SIZE MISMATCH ERROR\n"
+            f"{'='*80}\n"
+            f"Checkpoint vocab size: {checkpoint_vocab_size}\n"
+            f"Model vocab size:      {model_vocab_size}\n"
+            f"Difference:            {abs(model_vocab_size - checkpoint_vocab_size)} tokens\n"
+            f"\n"
+            f"The checkpoint was saved with a different vocabulary size than the\n"
+            f"current model configuration. This will cause index out of bounds errors.\n"
+            f"\n"
+            f"Possible solutions:\n"
+            f"1. Use a checkpoint with matching vocab_size={model_vocab_size}\n"
+            f"2. Modify your model config to use vocab_size={checkpoint_vocab_size}\n"
+            f"3. Retrain from scratch with the correct vocabulary size\n"
+            f"{'='*80}\n"
+        )
+        raise ValueError(error_msg)
+
     # Load model state
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(checkpoint_state)
 
     # Load optimizer state if provided and available
     if optimizer is not None and "optimizer" in checkpoint:

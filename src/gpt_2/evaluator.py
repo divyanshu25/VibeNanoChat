@@ -21,6 +21,8 @@ class Evaluators:
         ddp_world_size=1,
         generation_log_file=None,
         token_bytes_path=None,
+        val_loss_steps=39,
+        sample_seed=42,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -30,6 +32,8 @@ class Evaluators:
         self.ddp_rank = ddp_rank
         self.ddp_world_size = ddp_world_size
         self.generation_log_file = generation_log_file
+        self.val_loss_steps = val_loss_steps
+        self.sample_seed = sample_seed
 
         # Load pre-computed token_bytes tensor for BPB calculation
         if token_bytes_path is not None:
@@ -55,7 +59,7 @@ class Evaluators:
 
         self.model.eval()
         self.eval_dataloader.reset()
-        val_loss_steps = 39  # this number of eval tokens divided by batch size
+        val_loss_steps = self.val_loss_steps
 
         token_bytes = self._token_bytes
         # Accumulators for loss and BPB
@@ -119,7 +123,7 @@ class Evaluators:
     def sample_from_model(
         self,
         num_sequences=4,
-        max_length=32,
+        max_length=255,
         context="Hello, I'm a language model,",
         step=None,
     ):
@@ -129,8 +133,11 @@ class Evaluators:
         start_time = time.time()
 
         sample_rng = torch.Generator(device=self.device)
-        sample_rng.manual_seed(42 + self.ddp_rank)
+        sample_rng.manual_seed(self.sample_seed + self.ddp_rank)
 
+        print(
+            f"Generating {num_sequences} sequences of length {max_length} with context: {context}"
+        )
         decoded = generate(
             num_sequences=num_sequences,
             max_length=max_length,

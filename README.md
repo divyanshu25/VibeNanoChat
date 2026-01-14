@@ -1,359 +1,251 @@
-# 🚀 NanoGPT
+# NanoGPT
 
-> A production-ready implementation of GPT-2 (124M parameters) with comprehensive evaluation and multiple training modes. Train, evaluate, and chat with your own language model!
+The simplest, fastest repository for training/finetuning GPT-2 (124M). A rewrite of the original [nanoGPT](https://github.com/karpathy/nanoGPT) with modern datasets, distributed training support, and comprehensive evaluation.
 
-## ✨ What's Inside
-
-- **🧠 GPT-2 Architecture** (124M parameters): 12 layers, 12 attention heads, 768 dimensions of pure transformer magic
-- **⚡ Distributed Training**: Scale across multiple GPUs with PyTorch DDP
-- **📚 Multiple Datasets**: 
-  - FineWeb-Edu (~10B tokens of high-quality educational content) - Primary
-  - TaskMixture (SmolTalk + MMLU + GSM8K) - For mid-training/alignment
-  - OpenWebText (~9B tokens) - Legacy support
-- **🎯 Three Training Modes**: Pretraining, mid-training, and full pipeline
-- **📊 Comprehensive Evaluation**: 35+ benchmarks across 6 categories (Mosaic Eval Gauntlet)
-- **🤖 Chat Interface**: Interactive chat with trained models
-- **💡 Modern Training Stack**: Mixed precision (bfloat16), gradient clipping, cosine LR scheduling
-- **📈 Experiment Tracking**: Built-in Weights & Biases integration
-- **💾 Efficient Data Loading**: Memory-mapped binary files for lightning-fast I/O
-
-## ⚡ Quick Start
+## Install
 
 ```bash
-# 1. Setup environment
-make environment
+make environment  # installs uv and creates venv
+```
 
-# 2. Prepare dataset
+Dependencies: `pytorch`, `numpy`, `transformers` (for tokenization), `datasets` (for data loading), `wandb` (for logging), `tiktoken`.
+
+## Quick start
+
+If you are not a deep learning professional and you just want to feel the magic and get your feet wet, the fastest way to get started is to train a GPT on FineWeb-Edu:
+
+```bash
+# prepare data (~30-60 min download and tokenization)
 cd data/fineweb_edu && uv run python prepare.py
 
-# 3. Train with 8 GPUs
+# train (single GPU)
+make ddp-train NGPUS=1 MODE=pretraining
+
+# train (multi-GPU, e.g. 8 GPUs)
 make ddp-train NGPUS=8 MODE=pretraining
-
-# 4. Chat with your model
-make chat CHECKPOINT=/path/to/checkpoint.pt
 ```
 
-## 🎬 Getting Started
+Training with 8 GPUs takes approximately 4 days to reach 10B tokens (~19K steps). The model will be saved periodically to the `logs/` directory.
 
-### 1. Clone & Setup
+To chat with your trained model:
 
 ```bash
-git clone https://github.com/yourusername/NanoGPT.git
-cd NanoGPT
+uv run python scripts/chat.py --checkpoint /path/to/checkpoint.pt
 ```
 
-### 2. 🛠️ Install Dependencies
+## Reproducing GPT-2 (124M)
 
-We use [UV](https://github.com/astral-sh/uv) because it's blazingly fast:
+This implementation reproduces GPT-2 (124M parameters) with the following architecture:
 
-```bash
-# 🎯 One command to rule them all
-make environment
-
-# Or step by step if you're old school:
-make uv        # Install UV
-make uvlock    # Lock dependencies
-make venv      # Create virtual environment
+```
+- 12 layer transformer
+- 12 attention heads  
+- 768 embedding dimension
+- 1024 context length
+- 50257 vocabulary size (GPT-2 BPE)
 ```
 
-### 3. 📊 Prepare Training Datasets
+The model is trained with:
 
-#### Option A: FineWeb-Edu (Recommended for Pretraining)
+```
+- AdamW optimizer
+- learning rate 6e-4, cosine decay to 6e-5
+- 715 warmup steps
+- batch size 524,288 tokens (2^19)
+- weight decay 0.1
+- gradient clipping 1.0
+- bfloat16 mixed precision
+```
 
-High-quality educational content (~10B tokens):
+Training runs to 19,531 steps (10B tokens), which is roughly 1 epoch over FineWeb-Edu. With 8 A100 GPUs you can expect ~4 days of training.
+
+## Datasets
+
+The repository supports three datasets:
+
+**FineWeb-Edu** (~10B tokens) - Recommended for pretraining. High quality educational web content from Common Crawl, filtered and deduplicated by HuggingFace. This is the primary dataset used for pretraining.
+
+**TaskMixture** (~568K examples) - For mid-training/instruction tuning. Combines SmolTalk (conversational), MMLU (reasoning), and GSM8K (math). Formatted with chat special tokens.
+
+**OpenWebText** (~9B tokens) - Legacy support. The classic reproduction of OpenAI's WebText dataset used in GPT-2.
+
+All datasets are tokenized with GPT-2's BPE tokenizer and stored as binary `.bin` files (memory-mapped uint16 arrays) for fast loading.
+
+## Baselines
+
+FineWeb-Edu is a strong dataset. You should expect validation loss around 2.8-3.0 after full pretraining. Mid-training on TaskMixture further improves instruction following and reasoning capabilities.
+
+## Data prep
+
+Each dataset has its own preparation script. Run these from inside the dataset directories:
 
 ```bash
+# FineWeb-Edu (primary)
 cd data/fineweb_edu
 uv run python prepare.py
-```
 
-**What happens:**
-- 📥 Downloads FineWeb-Edu dataset from HuggingFace
-- 🔤 Tokenizes with GPT-2 BPE encoding + special tokens
-- 💾 Saves to your configured data directory (configurable in script)
-- ✅ Creates: `train.bin` and `val.bin` with billions of high-quality tokens
-
-☕ This takes ~30-60 minutes depending on your connection!
-
-#### Option B: TaskMixture (For Mid-Training/Alignment)
-
-Specialized datasets for instruction following and reasoning:
-
-```bash
-cd data/task_mixture
+# TaskMixture (for mid-training)
+cd data/task_mixture  
 uv run python prepare.py
-```
 
-**What happens:**
-- 📥 Loads three datasets:
-  - SmolTalk: Conversational data (~460K examples)
-  - MMLU: Multiple choice reasoning (~100K examples)
-  - GSM8K: Math word problems (~8K examples)
-- 🔤 Formats with special tokens for chat/instruction following
-- 💾 Saves to your configured data directory (configurable in script)
-- ✅ Creates: `train.bin`, `val.bin`, and `metadata.json`
-
-⏱️ Takes ~10-20 minutes to prepare
-
-#### Option C: OpenWebText (Legacy)
-
-Classic dataset for reproducibility (~9B tokens):
-
-```bash
+# OpenWebText (legacy)
 cd data/openwebtext
 uv run python prepare.py
 ```
 
-### 4. 🔥 Train the Model
+Data prep will download the dataset from HuggingFace, tokenize it with GPT-2's tokenizer (plus special tokens where applicable), and save train/val splits as `.bin` files.
 
-NanoGPT supports three training modes:
+Note: If you're on a network filesystem that doesn't support mmap (like NFS), the dataloader will fall back to regular file reads. For best performance, copy data to local SSD.
 
-#### Mode 1: Pretraining (Train from Scratch on FineWeb-Edu)
+## Training modes
 
+The trainer supports three modes:
+
+**pretraining** - Train from scratch on FineWeb-Edu
 ```bash
-# Multi-GPU training (recommended)
 make ddp-train NGPUS=8 MODE=pretraining
-
-# Or with torchrun:
-torchrun --standalone --nproc_per_node=8 src/gpt_2/ddp.py --mode pretraining
-
-# Single GPU
-python src/gpt_2/ddp.py --mode pretraining
 ```
 
-#### Mode 2: Mid-Training (Instruction/Reasoning from Checkpoint)
-
-Continue training from a pretrained checkpoint on TaskMixture:
-
+**mid-training** - Continue from a checkpoint on TaskMixture
 ```bash
 make ddp-train NGPUS=8 MODE=mid-training CHECKPOINT=/path/to/checkpoint.pt
-
-# Or with torchrun:
-torchrun --standalone --nproc_per_node=8 src/gpt_2/ddp.py --mode mid-training --checkpoint /path/to/checkpoint.pt
 ```
 
-#### Mode 3: Full Pipeline (Pretrain → Mid-Train)
-
-Run both stages automatically:
-
+**all** - Run pretraining followed by mid-training
 ```bash
 make ddp-train NGPUS=8 MODE=all
-
-# Or with torchrun:
-torchrun --standalone --nproc_per_node=8 src/gpt_2/ddp.py --mode all
 ```
 
-**⚙️ Training Configuration:**
-- 📦 Batch size per GPU: 64
-- 📏 Sequence length: 1024 tokens
-- 🎯 Total batch size: 524,288 tokens/step (2^19, perfectly balanced)
-- 🎓 Max learning rate: 6e-4 (pretraining), 3e-4 (mid-training)
-- 🏃 Warmup steps: 715 (pretraining), 100 (mid-training)
-- 💪 Optimizer: AdamW with weight decay 0.1
-- ✂️ Gradient clipping: 1.0
+Adjust `NGPUS` to match your GPU count. The system automatically calculates gradient accumulation steps to maintain the target batch size of 524,288 tokens.
 
-## 🎛️ Configuration Deep Dive
+## Sampling / inference
 
-### Model Config (GPT-2 124M)
-
-```python
-block_size: 1024      # Context window size
-vocab_size: 50257     # GPT-2 vocabulary (BPE)
-n_layer: 12           # Transformer blocks (the secret sauce)
-n_head: 12            # Attention heads (parallel thoughts)
-n_embed: 768          # Embedding dimension (the hidden state)
-```
-
-### Training Config
-
-```python
-max_learning_rate: 6e-4          # Peak LR (after warmup)
-min_learning_rate: 6e-5          # Final LR (10% of max)
-warmup_steps: 715                # Linear warmup phase
-total_batch_size: 524288         # Tokens per optimization step
-weight_decay: 0.10               # L2 regularization
-gradient_clip_norm: 1.0          # Gradient explosion prevention
-```
-
-## 🎯 Evaluation Framework
-
-NanoGPT includes comprehensive evaluation with **35+ benchmarks** organized into 6 categories:
-
-### Quick Evaluation
+Use the chat script for interactive generation:
 
 ```bash
-# Run CORE benchmark evaluations during training
-make ddp-train NGPUS=8 CORE_EVALS=true
-
-# Skip evaluations for faster training
-make ddp-train NGPUS=8 NO_EVALS=true
-```
-
-### Evaluation Categories
-
-1. **📖 Reading Comprehension** (SQuAD, BoolQ, CoQA, LSAT RC, SAT English)
-2. **🧠 Commonsense Reasoning** (StrategyQA, COPA, PIQA, SIQA, CommonsenseQA)
-3. **🌍 World Knowledge** (MMLU, Jeopardy, TriviaQA, ARC, WikiData)
-4. **🔢 Symbolic Problem Solving** (GSM8K, SVAMP, Elementary Math, Dyck Languages)
-5. **📝 Language Understanding** (LAMBADA, HellaSwag, Winograd, Winogrande)
-6. **🛡️ Safety** (Safety benchmarks for responsible AI)
-
-The evaluation framework automatically rescales scores above random baseline and reports aggregate scores per category. See `resources/eval_bundle/EVAL_GAUNTLET.md` for detailed benchmark descriptions.
-
-## 📈 Monitoring Your Training
-
-Training metrics auto-log to **Weights & Biases**:
-- 📉 Training loss (watch it go down!)
-- 📊 Evaluation scores across all benchmark categories
-- 📐 Learning rate schedule (that beautiful cosine decay)
-- ⚡ Tokens per second (throughput metrics)
-- 🎯 Gradient norms (stability indicators)
-
-👉 View your runs at: https://wandb.ai/
-
-## 🤖 Chat with Your Model
-
-After training, interact with your model in a chat interface:
-
-```bash
-make chat CHECKPOINT=/path/to/checkpoint.pt
-
-# Or directly:
 uv run python scripts/chat.py --checkpoint /path/to/checkpoint.pt
 ```
 
-The chat interface supports special tokens for system/user/assistant roles when using mid-trained models.
-
-## 🛠️ Handy Commands
+Or launch the web UI server:
 
 ```bash
-# 📊 Check GPU status
-make gpu-status
-
-# 🔪 Kill all GPU processes (nuclear option)
-make kill-gpu
-
-# 🔥 Keep GPUs warm for testing (useful before starting training)
-make gpu-hot GPUS=0,1,2
-
-# Or with delay (e.g., start in 2 hours)
-make gpu-hot GPUS=0,1,2 DELAY=2
+make chat-server  # starts server on http://localhost:8003
 ```
 
-## 📚 Dataset Details
+For mid-trained models, the chat interface supports special tokens for system/user/assistant formatting. For pretrained models, you get raw text continuation.
 
-### FineWeb-Edu (Primary - Pretraining)
-- 🔗 Source: [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-- 📦 Size: ~10 billion high-quality educational tokens
-- 🎓 Quality: Filtered for educational content from Common Crawl
-- 🔤 Processing: GPT-2 BPE tokenization with special tokens
-- 💾 Storage: Efficient binary format (uint16) with memory mapping
+The CLI script uses a simple sampling scheme with temperature 0.9 and top-k 200. You can modify these in the script.
 
-### TaskMixture (Mid-Training)
-- 🔗 Sources: 
-  - SmolTalk: ~460K conversational examples
-  - MMLU auxiliary: ~100K reasoning/knowledge examples  
-  - GSM8K: ~8K math reasoning examples
-- 📦 Total: ~568K specialized examples
-- 🎯 Purpose: Instruction following, reasoning, and alignment
-- 🔤 Processing: Formatted with chat special tokens (`<|im_start|>`, `<|im_end|>`)
-- 💾 Storage: Binary format with metadata for special token handling
+## Benchmarking
 
-### OpenWebText (Legacy)
-- 🔗 Source: [Skylion007/openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext)
-- 📦 Size: ~8 million documents, ~9 billion tokens
-- 🔤 Processing: GPT-2 BPE tokenization
-- 💾 Storage: Efficient binary format (uint16)
+The codebase includes comprehensive evaluation via the Mosaic Eval Gauntlet - 35+ benchmarks across reading comprehension, commonsense reasoning, world knowledge, math, language understanding, and safety.
 
-## 💡 Pro Tips
+Run with core evaluations enabled:
+```bash
+make ddp-train NGPUS=8 MODE=pretraining CORE_EVALS=true
+```
 
-1. **🎮 Memory Management**: With batch_size=64 and block_size=1024, budget ~40GB VRAM per GPU
-2. **🔄 Gradient Accumulation**: Auto-calculated based on GPU count and target batch size (we do the math for you!)
-3. **💾 Checkpointing**: Models saved periodically during training (no progress lost!)
-4. **⚡ Mixed Precision**: Uses bfloat16 for 2x speedup and 50% memory savings
-5. **📊 Smart Evaluation**: Use `CORE_EVALS=true` for comprehensive benchmarking, or `NO_EVALS=true` to skip evals and train faster
-6. **🎯 Two-Stage Training**: Start with FineWeb-Edu pretraining, then mid-train on TaskMixture for instruction-following
-7. **🔥 GPU Warmup**: Use `make gpu-hot` with `DELAY` to reserve GPUs hours before your training run
-8. **💬 Chat Ready**: Mid-trained models work great with the chat interface using special tokens
+Or disable all evaluations for faster training:
+```bash
+make ddp-train NGPUS=8 MODE=pretraining VAL_EVALS=false
+```
 
-## 🔧 Troubleshooting
+For mid-training with chat-focused evaluations:
+```bash
+make ddp-train NGPUS=8 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=/path/to/checkpoint.pt
+```
 
-**😱 Out of Memory Error?**
-- Turn down `batch_size` in `gpt2_model.py`
-- The system auto-adjusts gradient accumulation steps (smart!)
-- Try reducing evaluation batch size if OOM happens during evals
+Evaluations run only on rank 0 and report scores rescaled above random baseline. See `resources/eval_bundle/EVAL_GAUNTLET.md` for details.
 
-**🐌 Data Loading Slow?**
-- Network filesystems don't support mmap (it's okay, we have a fallback)
-- Pro tip: Copy data to local SSD for maximum zoom
-- Ensure you have enough disk space (~30-50GB for FineWeb-Edu)
+## Efficiency notes
 
-**🤔 Distributed Training Not Working?**
-- Check NCCL installation: `python -c "import torch; print(torch.cuda.nccl.version())"`
-- Verify GPUs visible: `nvidia-smi`
-- Make sure all GPUs are the same model (mixed GPU types = sadness)
+- Uses PyTorch's DDP for multi-GPU training
+- Mixed precision (bfloat16) for ~2x speedup and 50% memory reduction
+- Flash Attention where available (requires PyTorch 2.0+)
+- Memory-mapped data loading for zero-copy I/O
+- Gradient checkpointing not used (124M is small enough to fit)
 
-**📊 Evaluations Taking Too Long?**
-- Use `NO_EVALS=true` to skip evaluations during training
-- Or use `CORE_EVALS=true` for a focused subset of benchmarks
-- Evaluations only run on rank 0 to save compute
+With 8xA100 (40GB) you should see ~50K tokens/sec throughput with the default batch size of 64 per GPU.
 
-**🎯 Mid-Training Checkpoint Not Found?**
-- Ensure you've completed pretraining first or provide a valid checkpoint path
-- Checkpoints are saved in the logs directory with timestamps
+If you run out of memory, reduce the per-GPU batch size in the config. The system will automatically increase gradient accumulation steps to maintain the target total batch size.
 
-## 📊 About the Eval Gauntlet
+## Finetuning
 
-The **Mosaic Eval Gauntlet v0.3.0** is a comprehensive evaluation suite with 35+ benchmarks across 6 core competencies:
+For finetuning on your own data:
 
-### Why Multiple Benchmarks?
+1. Format your data as text files (one document per line, or use delimiters)
+2. Create a preparation script similar to `data/fineweb_edu/prepare.py`
+3. Tokenize and save as train.bin / val.bin
+4. Update the data path in your config or pass `--data_dir`
+5. Use mid-training mode with a pretrained checkpoint
 
-1. **Generalist Models Need Broad Evaluation**: LLMs can perform thousands of tasks - a handful of benchmarks can't capture their full capabilities
-2. **Reduced Variance**: Aggregating across many benchmarks gives more robust performance estimates
-3. **Category-Specific Insights**: Decomposed scores help understand model strengths/weaknesses for specific use cases
+The mid-training setup (TaskMixture) provides a good template for instruction-following datasets. Use special tokens `<|im_start|>` and `<|im_end|>` to mark role boundaries.
 
-### Scoring Methodology
+## Makefile helpers
 
-- Scores are **rescaled above random baseline** to ensure fairness
-- For example: 30% accuracy on a 25% baseline = (0.30 - 0.25)/(1 - 0.25) = **6.67% above chance**
-- This ensures all composite scores are normalized between 0 and 1
-- Category scores are averaged, then aggregated for an overall score
+```bash
+# Setup
+make environment                    # install uv and setup venv
+make jupyter-kernel                 # register as jupyter kernel
 
-See `resources/eval_bundle/EVAL_GAUNTLET.md` for complete benchmark descriptions.
+# Training
+make ddp-train NGPUS=8 MODE=pretraining                           # basic training
+make ddp-train NGPUS=8 MODE=mid-training CHECKPOINT=/path/to/pt  # mid-training
+make ddp-train NGPUS=8 MODE=pretraining CORE_EVALS=true          # with evals
 
-## 🎓 Learning Resources
+# GPU Management
+make gpu-status                     # check nvidia-smi
+make kill-gpu                       # kill all processes on GPUs
+make gpu-hot GPUS=0,1,2            # keep specific GPUs active
+make gpu-hot GPUS=0,1,2 DELAY=2    # start heating in 2 hours
 
-Want to understand what's happening under the hood?
+# Code Quality
+make format                         # format with black and isort
+make lint                           # lint with ruff
+make check                          # format + lint
+```
 
-- 📺 [Andrej Karpathy's GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY)
-- 📄 [Attention is All You Need](https://arxiv.org/abs/1706.03762) (the paper that started it all)
-- 📚 [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/)
-- 🔍 [FineWeb-Edu Dataset](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) (high-quality educational data)
+## Troubleshooting
 
-## 🙏 Acknowledgements
+**Out of memory**: Reduce batch size per GPU. The gradient accumulation will be auto-adjusted.
 
-Standing on the shoulders of giants:
+**Slow data loading**: Network filesystems often don't support mmap efficiently. Copy data to local disk.
 
-- Inspired by [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT) - the OG educational GPT
-- Based on OpenAI's GPT-2 architecture - thank you for open-sourcing!
-- Datasets:
-  - [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) by HuggingFace - high-quality educational content
-  - [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) - classic web scrape dataset
-  - [SmolTalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk) - conversational data
-  - [MMLU](https://huggingface.co/datasets/cais/mmlu) - reasoning benchmarks
-  - [GSM8K](https://huggingface.co/datasets/openai/gsm8k) - math reasoning
-- Evaluation: [Mosaic Eval Gauntlet](https://www.mosaicml.com) by MosaicML - comprehensive benchmark suite
+**NCCL errors**: Ensure all GPUs are visible (`make gpu-status`) and NCCL is compiled correctly (`python -c "import torch; print(torch.cuda.nccl.version())"`).
 
-## 📜 License
+**GPUs busy with zombie processes**: Use `make kill-gpu` to clear all GPU processes.
 
-MIT License - Go build something cool!
+**NaN loss**: Usually indicates learning rate too high or corrupted data. Try reducing LR or checking your dataset.
 
----
+## Todos
 
-<div align="center">
+Some future ideas:
 
-**Built with ❤️ for learning and experimentation**
+- [ ] Multi-node training support (currently single-node multi-GPU only)
+- [ ] Gradient checkpointing option for training larger models
+- [ ] Support for other tokenizers (e.g. Llama, GPT-NeoX)
+- [ ] Quantization-aware training
+- [ ] KV cache optimization for faster inference
+- [ ] Direct integration with more evaluation frameworks
 
-If this helped you understand transformers better, ⭐ star the repo!
+## References
 
-</div>
+This code is based on:
+
+- [nanoGPT](https://github.com/karpathy/nanoGPT) by Andrej Karpathy - the original simple GPT implementation
+- [Attention is All You Need](https://arxiv.org/abs/1706.03762) - Vaswani et al. 2017, the transformer paper
+- [Language Models are Unsupervised Multitask Learners](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) - Radford et al. 2019, GPT-2 paper
+
+Datasets:
+- [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) - HuggingFace filtered Common Crawl
+- [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) - GPT-2 training set reproduction
+- [SmolTalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk) - Conversational data
+- [MMLU](https://huggingface.co/datasets/cais/mmlu) - Measuring Massive Multitask Language Understanding
+- [GSM8K](https://huggingface.co/datasets/openai/gsm8k) - Grade School Math 8K
+
+Evaluation:
+- [Mosaic Eval Gauntlet](https://www.mosaicml.com/blog/llm-evaluation-for-icl) - Comprehensive benchmark suite
+
+## License
+
+MIT

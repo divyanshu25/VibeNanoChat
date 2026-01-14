@@ -39,6 +39,7 @@ class Trainer:
         device,
         run_evals=False,
         run_core_evals=False,
+        run_chatcore_evals=False,
         mid_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
@@ -56,6 +57,7 @@ class Trainer:
             device: Device to train on
             run_evals: Whether to run evaluations
             run_core_evals: Whether to run CORE benchmark evaluations
+            run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
             checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
@@ -70,6 +72,7 @@ class Trainer:
         self.master_process = master_process
         self.run_evals = run_evals
         self.run_core_evals = run_core_evals
+        self.run_chatcore_evals = run_chatcore_evals
         self.mid_training = mid_training
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
@@ -121,7 +124,7 @@ class Trainer:
 
     def _setup_hyperparameters(self):
         """Configure training hyperparameters based on training mode."""
-        self.num_epochs = 2
+        self.num_epochs = self.config.num_epochs
         self.run_evals_after = self.config.eval_interval
 
         # Batch size and gradient accumulation
@@ -140,30 +143,28 @@ class Trainer:
             print(f"Grad accumulation steps: {self.grad_accumulation_steps}")
 
         # Learning rate scheduling parameters
+        self.max_learning_rate = self.config.max_learning_rate
+        self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
         if self.mid_training:
-            self.max_learning_rate = 6e-4
-            self.min_learning_rate = self.max_learning_rate * 0.1
-            self.warmup_steps = 80
-            self.max_steps = 878
+            self.warmup_steps = self.config.lr_warmup_steps_midtrain
+            self.max_steps = self.config.steps_per_epoch_midtrain
         else:
-            self.max_learning_rate = 6e-4
-            self.min_learning_rate = self.max_learning_rate * 0.1
-            self.warmup_steps = 715
-            self.max_steps = 18977
+            self.warmup_steps = self.config.lr_warmup_steps_pretrain
+            self.max_steps = self.config.steps_per_epoch_pretrain
 
     def _setup_dataloaders(self):
         """Initialize train and eval dataloaders based on training mode."""
         # Select dataloader class and data directory based on training mode
         if self.mid_training:
             DataloaderClass = TaskMixtureDataloader
-            data_dir = "/sensei-fs/users/divgoyal/nanochat_midtraining_data"
+            data_dir = self.config.data_dir_midtrain
             if self.master_process:
                 print("\n" + "=" * 80)
                 print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
                 print("=" * 80 + "\n")
         else:
             DataloaderClass = FinewebEduDataloader
-            data_dir = "/sensei-fs/users/divgoyal/fineweb_edu"
+            data_dir = self.config.data_dir_pretrain
 
         self.train_dataloader = DataloaderClass(
             data_dir=data_dir,
@@ -195,6 +196,8 @@ class Trainer:
                 ddp_world_size=self.ddp_world_size,
                 generation_log_file=self.generation_log_file,
                 token_bytes_path=self.token_bytes_path,
+                val_loss_steps=self.config.val_loss_eval_batches,
+                sample_seed=self.config.generation_seed,
             )
         else:
             if self.master_process:
@@ -224,15 +227,51 @@ class Trainer:
                 ddp_world_size=self.ddp_world_size,
                 eval_bundle_path="/mnt/localssd/NanoGPT/resources/eval_bundle",
                 # tasks_to_run=core_tasks_subset,
-                max_examples_per_task=500,  # Limit examples for faster eval during training
+                max_examples_per_task=self.config.core_eval_max_examples,
             )
         else:
             self.core_evaluator = None
 
+        # Initialize ChatCORE evaluator if requested (for generative evaluation)
+        if self.run_chatcore_evals:
+            from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
+            from eval_tasks.chat_core.utils import setup_gsm8k_task
+
+            enc, _ = get_custom_tokenizer()
+            self.chatcore_evaluator = ChatCoreEvaluator(
+                model=self.raw_model,
+                tokenizer=enc,
+                device=self.device,
+                master_process=self.master_process,
+                ddp=self.ddp,
+                ddp_rank=self.ddp_rank,
+                ddp_world_size=self.ddp_world_size,
+                max_examples=None,  # Use full test set for final evaluation
+                num_samples=self.config.chat_core_num_samples,
+                max_tokens=self.config.chat_core_max_tokens,
+                temperature=self.config.chat_core_temperature,
+                top_k=self.config.chat_core_top_k,
+            )
+
+            # Register evaluation tasks
+            setup_gsm8k_task(
+                self.chatcore_evaluator,
+                enc,
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
+            # Future: Add more tasks here
+            # setup_mmlu_task(self.chatcore_evaluator, enc, split="test")
+            # setup_arc_task(self.chatcore_evaluator, enc, split="test")
+        else:
+            self.chatcore_evaluator = None
+
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
         self.optimizer = self.raw_model.configure_optimizers(
-            learning_rate=self.max_learning_rate, weight_decay=0.10, device=self.device
+            learning_rate=self.max_learning_rate,
+            weight_decay=self.config.weight_decay,
+            device=self.device,
         )
 
         if self.checkpoint_path:
@@ -249,10 +288,12 @@ class Trainer:
                 self.config = checkpoint_result["config"]
 
             if self.mid_training:
+                # LOADING from checkpoint will override configs in the config file so make sure to override them here, if you need to change them.
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
-                self.config.checkpoint_interval = 400
+                self.config.generation_max_length = 256
+                # Override checkpoint interval for mid-training
                 if self.master_process:
                     print(
                         "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"
@@ -287,10 +328,11 @@ class Trainer:
                     "warmup_steps": self.warmup_steps,
                     "max_steps": self.max_steps,
                     "num_epochs": self.num_epochs,
-                    "weight_decay": 0.10,
-                    "gradient_clip_norm": 1.0,
+                    "weight_decay": self.config.weight_decay,
+                    "gradient_clip_norm": self.config.gradient_clip_norm,
                     "run_evals": self.run_evals,
                     "run_core_evals": self.run_core_evals,
+                    "run_chatcore_evals": self.run_chatcore_evals,
                     "start_step": self.start_step,
                 },
             )
@@ -394,8 +436,8 @@ class Trainer:
                 # Gradient clipping to prevent exploding gradients
                 # This stabilizes training by limiting gradient magnitude
                 norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), 1.0
-                )  # Clip gradients to max norm of 1.0
+                    self.model.parameters(), self.config.gradient_clip_norm
+                )
 
                 # Update learning rate based on global step (continuous across epochs)
                 lr = get_lr(
@@ -438,13 +480,13 @@ class Trainer:
                         step=step, global_step=global_step
                     )
                     sample_context = (
-                        "<|bos|><|user_start|>Give me a random joke.<|user_end|>"
+                        "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
                         if self.mid_training
                         else "Hello, I'm a language model,"
                     )
                     self.evaluator.sample_from_model(
-                        num_sequences=4,
-                        max_length=32,
+                        num_sequences=self.config.generation_num_samples,
+                        max_length=self.config.generation_max_length,
                         context=sample_context,
                         step=step,
                     )
@@ -456,6 +498,11 @@ class Trainer:
                     )
 
                 # Save checkpoint at intervals or at end of training (independent of evals)
+                checkpoint_interval = (
+                    self.config.checkpoint_interval_midtrain
+                    if self.mid_training
+                    else self.config.checkpoint_interval_pretrain
+                )
                 save_checkpoint(
                     model=self.model,
                     optimizer=self.optimizer,
@@ -465,7 +512,7 @@ class Trainer:
                     val_loss=val_loss,
                     checkpoint_dir=self.checkpoint_dir,
                     ddp=self.ddp,
-                    checkpoint_interval=self.config.checkpoint_interval,
+                    checkpoint_interval=checkpoint_interval,
                     max_steps=self.max_steps,
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
@@ -509,6 +556,27 @@ class Trainer:
 
                 # Increment global step counter
                 global_step += 1
+
+        # Run ChatCORE evaluation after training completes
+        if self.run_chatcore_evals:
+            if self.master_process:
+                print("\n" + "=" * 80)
+                print("🎯 Running ChatCORE evaluation on final model...")
+                print("=" * 80 + "\n")
+
+            chatcore_results = self.chatcore_evaluator.evaluate_all_tasks(
+                step=global_step, global_step=global_step
+            )
+
+            if self.master_process:
+                print("\n" + "=" * 80)
+                print("📊 FINAL ChatCORE RESULTS:")
+                for task_name, results in chatcore_results.items():
+                    accuracy = results["accuracy"]
+                    correct = results["correct"]
+                    total = results["total"]
+                    print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
+                print("=" * 80 + "\n")
 
         # Training complete
         if self.master_process:
