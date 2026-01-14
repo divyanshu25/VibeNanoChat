@@ -109,9 +109,10 @@ class ChatCoreEvaluator:
             output_start = self.tokenizer._special_tokens["<|output_start|>"]
             output_end = self.tokenizer._special_tokens["<|output_end|>"]
 
-            print(
-                f"python_start: {python_start}, python_end: {python_end}, output_start: {output_start}, output_end: {output_end} found"
-            )
+            if self.master_process:
+                print(
+                    f"python_start: {python_start}, python_end: {python_end}, output_start: {output_start}, output_end: {output_end} found"
+                )
             # If we got here, all tokens exist
             return True
         except (AttributeError, KeyError, Exception):
