@@ -47,7 +47,8 @@ class GPT(nn.Module):
                 # Position embeddings: add positional information to tokens
                 wpe=nn.Embedding(config.block_size, config.n_embed),
                 # Stack of transformer blocks (the core of the model)
-                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                # Each block gets a layer_idx for KV cache coordination
+                h=nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
                 # Final layer normalization before output
                 ln_f=nn.LayerNorm(config.n_embed),
             )
@@ -140,13 +141,14 @@ class GPT(nn.Module):
         )
         return optimizer
 
-    def forward(self, idx, targets=None, loss_reduction="mean"):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction="mean"):
         """
-        Forward pass through the GPT model.
+        Forward pass through the GPT model with optional KV caching.
 
         Args:
             idx (torch.Tensor): Input token indices of shape (batch_size, sequence_length)
             targets (torch.Tensor, optional): Target tokens for loss computation
+            kv_cache: Optional KVCache object for efficient autoregressive generation
             loss_reduction (str): Loss reduction mode - 'mean', 'sum', or 'none'
 
         Returns:
@@ -162,8 +164,19 @@ class GPT(nn.Module):
             T <= self.config.block_size
         ), f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
 
-        # Create position indices for the sequence
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # Shape (T,)
+        # =====================================================================
+        # POSITION EMBEDDINGS with KV Cache Support
+        # =====================================================================
+        # When using KV cache, we need to offset positions by the cache position
+        # Example: If cache has 10 tokens, new token gets position 10 (not 0)
+        if kv_cache is not None:
+            # Get current cache position (how many tokens already processed)
+            cache_pos = kv_cache.get_pos()
+            # Create position indices offset by cache position
+            pos = torch.arange(cache_pos, cache_pos + T, dtype=torch.long, device=idx.device)
+        else:
+            # No cache: normal position indices starting from 0
+            pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
 
         # Get token embeddings: convert token indices to dense vectors
         tok_emb = self.transformer.wte(idx)  # Shape: (B, T, n_embed) # type: ignore
@@ -174,9 +187,13 @@ class GPT(nn.Module):
         # Combine token and position embeddings
         x = tok_emb + pos_emb  # Shape: (B, T, n_embed)
 
-        # Pass through all transformer blocks
+        # =====================================================================
+        # TRANSFORMER BLOCKS with KV Cache
+        # =====================================================================
+        # Pass through all transformer blocks, propagating the KV cache
+        # Each block will insert its K,V into the cache and retrieve full history
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, kv_cache=kv_cache)
 
         # Apply final layer normalization
         x = self.transformer.ln_f(x)

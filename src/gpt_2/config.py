@@ -26,7 +26,7 @@ class GPTConfig:
     # ========================================================================
     # Training Configuration
     # ========================================================================
-    num_epochs: int = 2  # Number of training epochs
+    num_epochs: int = 3  # Number of training epochs
     batch_size: int = 64  # Batch size per GPU
     total_batch_size: int = 524288  # Total tokens per gradient update (2^19)
     weight_decay: float = 0.10  # L2 regularization weight decay

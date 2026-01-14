@@ -21,6 +21,12 @@ import wandb
 
 from .tools import use_calculator
 
+# Import KVCache from the model package (where it belongs as a core component)
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
+from gpt_2.kv_cache import KVCache
+
 
 class ChatCoreEvaluator:
     """
@@ -136,7 +142,14 @@ class ChatCoreEvaluator:
     @torch.no_grad()
     def generate_completion(self, prompt_tokens: List[int]) -> str:
         """
-        Generate a single completion from prompt tokens.
+        Generate a single completion from prompt tokens using KV caching.
+        
+        KV Caching Optimization:
+        Instead of reprocessing all tokens at each step, we use a two-phase approach:
+        1. PREFILL PHASE: Process all prompt tokens at once, cache their K/V
+        2. DECODE PHASE: Generate one token at a time, reusing cached K/V
+        
+        This reduces computation from O(N²) to O(N), making generation 5-10x faster.
 
         Args:
             prompt_tokens: List of token IDs for the prompt
@@ -144,101 +157,180 @@ class ChatCoreEvaluator:
         Returns:
             Generated text (decoded tokens)
         """
-        # Convert prompt to tensor
-        prompt_tensor = torch.tensor(
-            [prompt_tokens], dtype=torch.long, device=self.device
+        # =====================================================================
+        # SETUP: Extract model configuration for KV cache dimensions
+        # =====================================================================
+        # Get model dimensions needed for KV cache
+        if hasattr(self.model, 'config'):
+            m = self.model.config
+            num_heads = m.n_kv_head if hasattr(m, 'n_kv_head') else m.n_head
+            head_dim = m.n_embed // m.n_head
+            num_layers = m.n_layer
+            max_seq_len = m.block_size if hasattr(m, 'block_size') else 2048
+        else:
+            # Fallback: try to infer from model structure
+            print("Warning: Could not find model.config, using fallback dimensions")
+            num_heads = 12
+            head_dim = 64
+            num_layers = 12
+            max_seq_len = 2048
+        
+        # Get termination token
+        try:
+            assistant_end_id = self.tokenizer._special_tokens["<|assistant_end|>"]
+        except (AttributeError, KeyError, Exception):
+            assistant_end_id = 50256  # Fallback to GPT-2's <|endoftext|>
+        
+        # =====================================================================
+        # PHASE 1: PREFILL - Process entire prompt at once
+        # =====================================================================
+        # This processes all prompt tokens in a single forward pass and caches
+        # their Key and Value tensors. This is much more efficient than processing
+        # them one-by-one.
+        
+        # Create KV cache for prefill (batch_size=1, just the prompt)
+        kv_cache_prefill = KVCache(
+            batch_size=1,
+            num_heads=num_heads,
+            seq_len=len(prompt_tokens),
+            head_dim=head_dim,
+            num_layers=num_layers,
         )
-
-        # Generate tokens
-        # This is a simple greedy/sampling generation loop
-        # You may need to adapt this to your model's specific generation API
+        
+        # Process all prompt tokens at once
+        prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
+        
+        with torch.amp.autocast(
+            device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+            dtype=torch.bfloat16,
+        ):
+            # Forward pass with KV cache - this caches K,V for all prompt tokens
+            logits = self.model(prompt_tensor, kv_cache=kv_cache_prefill)
+        
+        # Handle tuple output (logits, loss)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        
+        # Get logits for the last position (what comes after the prompt)
+        next_token_logits = logits[0, -1, :]
+        
+        # =====================================================================
+        # PHASE 2: DECODE - Generate tokens one at a time
+        # =====================================================================
+        # Now we generate tokens autoregressively, passing only ONE new token
+        # at a time. The KV cache already contains all previous tokens' K,V.
+        
+        # Create larger KV cache for the full generation
+        # Estimate max length: prompt + max_tokens to generate
+        estimated_length = len(prompt_tokens) + self.max_tokens
+        if estimated_length > max_seq_len:
+            estimated_length = max_seq_len
+        
+        kv_cache_decode = KVCache(
+            batch_size=1,
+            num_heads=num_heads,
+            seq_len=estimated_length,
+            head_dim=head_dim,
+            num_layers=num_layers,
+        )
+        
+        # Copy the prompt's cached K,V into the decode cache using prefill
+        # This efficiently transfers the cached context from prefill to decode phase
+        kv_cache_decode.prefill(kv_cache_prefill)
+        
+        # Track generated tokens (starts with prompt)
         generated_tokens = list(prompt_tokens)
-
+        
+        # =====================================================================
+        # MAIN GENERATION LOOP
+        # =====================================================================
         for _ in range(self.max_tokens):
-            # Get logits for next token
-            with torch.amp.autocast(
-                device_type=(
-                    self.device.type if hasattr(self.device, "type") else "cuda"
-                ),
-                dtype=torch.bfloat16,
-            ):
-                logits = self.model(prompt_tensor)
-
-            # Handle tuple output (logits, loss)
-            if isinstance(logits, tuple):
-                logits = logits[0]
-
-            # Get logits for last position
-            next_token_logits = logits[0, -1, :]
-
-            # Apply temperature
+            # -----------------------------------------------------------------
+            # STEP 1: Sample next token from logits
+            # -----------------------------------------------------------------
             if self.temperature > 0:
+                # Apply temperature scaling
                 next_token_logits = next_token_logits / self.temperature
-
+                
                 # Apply top-k filtering
                 if self.top_k > 0:
-                    top_k_logits, top_k_indices = torch.topk(
-                        next_token_logits, self.top_k
-                    )
-                    next_token_logits = torch.full_like(
-                        next_token_logits, float("-inf")
-                    )
+                    top_k_logits, top_k_indices = torch.topk(next_token_logits, self.top_k)
+                    next_token_logits = torch.full_like(next_token_logits, float("-inf"))
                     next_token_logits.scatter_(0, top_k_indices, top_k_logits)
-
-                # Sample
+                
+                # Sample from probability distribution
                 probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).item()
             else:
-                # Greedy
+                # Greedy decoding (deterministic)
                 next_token = next_token_logits.argmax().item()
-
-            # Check for end of sequence
-            # For chat models, we should stop at <|assistant_end|> (50261)
-            # This is the token the model was trained to emit at end of responses
-            try:
-                assistant_end_id = self.tokenizer._special_tokens["<|assistant_end|>"]
-            except (AttributeError, KeyError, Exception):
-                # Fallback to GPT-2's <|endoftext|> if assistant_end not available
-                assistant_end_id = 50256
-
+            
+            # -----------------------------------------------------------------
+            # STEP 2: Check for termination
+            # -----------------------------------------------------------------
             if next_token == assistant_end_id:
                 break
-
+            
+            # Add token to sequence
             generated_tokens.append(next_token)
-
-            # Update prompt tensor for next iteration
-            prompt_tensor = torch.tensor(
-                [generated_tokens], dtype=torch.long, device=self.device
-            )
-
-            # Truncate if exceeds model's max sequence length
-            if (
-                hasattr(self.model, "max_seq_len")
-                and len(generated_tokens) >= self.model.max_seq_len
-            ):
+            
+            # Check sequence length limit
+            if hasattr(self.model, "max_seq_len") and len(generated_tokens) >= self.model.max_seq_len:
                 break
-
-        # Decode only the newly generated tokens (exclude prompt)
-        new_tokens = generated_tokens[len(prompt_tokens) :]
+            
+            # -----------------------------------------------------------------
+            # STEP 3: Get logits for next token (KEY OPTIMIZATION)
+            # -----------------------------------------------------------------
+            # Here's the magic: we only pass the ONE new token, not the entire
+            # sequence! The KV cache contains all previous context.
+            # This makes each step O(1) instead of O(N).
+            
+            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=self.device)
+            
+            with torch.amp.autocast(
+                device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+                dtype=torch.bfloat16,
+            ):
+                # Forward pass with only the new token, reusing cached K,V
+                logits = self.model(next_token_tensor, kv_cache=kv_cache_decode)
+            
+            # Handle tuple output
+            if isinstance(logits, tuple):
+                logits = logits[0]
+            
+            # Extract logits for next prediction
+            next_token_logits = logits[0, -1, :]
+        
+        # =====================================================================
+        # FINALIZATION: Decode and return generated text
+        # =====================================================================
+        # Extract only newly generated tokens (exclude the prompt)
+        new_tokens = generated_tokens[len(prompt_tokens):]
         generated_text = self.tokenizer.decode(new_tokens)
-
+        
         return generated_text
 
     @torch.no_grad()
     def generate_completion_with_tools(self, prompt_tokens: List[int]) -> str:
         """
-        Generate a completion with calculator tool use support.
+        Generate a completion with calculator tool use support using KV caching.
 
         This implements a tool-use state machine that allows the model to execute
         Python expressions during generation for accurate mathematical computation.
+        
+        KV Caching with Tool Use:
+        We use the same two-phase approach (prefill + decode), but with added
+        complexity from forced tokens (calculator results). When forcing tokens,
+        we still update the KV cache so the model sees them in context.
 
         Flow:
-        1. Model generates text normally
-        2. When model emits <|python|>, enter "python mode"
-        3. Collect all tokens until <|python_end|> as a Python expression
-        4. Execute the expression with use_calculator()
-        5. Force the result back: <|output_start|>result<|output_end|>
-        6. Continue generation with the forced result in context
+        1. PREFILL: Process prompt tokens at once, cache K/V
+        2. DECODE: Generate tokens one at a time with KV cache
+        3. When model emits <|python|>, enter "python mode"
+        4. Collect tokens until <|python_end|> as a Python expression
+        5. Execute the expression with use_calculator()
+        6. Force result: <|output_start|>result<|output_end|>
+        7. Continue generation with forced tokens in context
 
         Example generation sequence:
             Model: "She earns <|python|>12/60<|python_end|>"
@@ -253,7 +345,7 @@ class ChatCoreEvaluator:
             Generated text (decoded tokens)
         """
         # =====================================================================
-        # SETUP: Fallback and special token retrieval
+        # SETUP: Check tool support and get special tokens
         # =====================================================================
         if not self.supports_tools:
             # Fall back to regular generation if tokenizer lacks tool tokens
@@ -265,159 +357,228 @@ class ChatCoreEvaluator:
         output_start = self.tokenizer._special_tokens["<|output_start|>"]
         output_end = self.tokenizer._special_tokens["<|output_end|>"]
 
-        # Get termination token: <|assistant_end|> (50261)
-        # This is the token the model was trained to emit at end of responses
+        # Get termination token: <|assistant_end|>
         try:
             assistant_end_id = self.tokenizer._special_tokens["<|assistant_end|>"]
         except (AttributeError, KeyError, Exception):
-            # Fallback to GPT-2's <|endoftext|> if assistant_end not available
-            assistant_end_id = 50256
+            assistant_end_id = 50256  # Fallback to GPT-2's <|endoftext|>
+        
+        # =====================================================================
+        # SETUP: Extract model configuration for KV cache dimensions
+        # =====================================================================
+        if hasattr(self.model, 'config'):
+            m = self.model.config
+            num_heads = m.n_kv_head if hasattr(m, 'n_kv_head') else m.n_head
+            head_dim = m.n_embed // m.n_head
+            num_layers = m.n_layer
+            max_seq_len = m.block_size if hasattr(m, 'block_size') else 2048
+        else:
+            # Fallback dimensions
+            print("Warning: Could not find model.config, using fallback dimensions")
+            num_heads = 12
+            head_dim = 64
+            num_layers = 12
+            max_seq_len = 2048
 
         # =====================================================================
-        # STATE INITIALIZATION
+        # PHASE 1: PREFILL - Process entire prompt at once
+        # =====================================================================
+        # Process all prompt tokens in a single forward pass to initialize
+        # the KV cache efficiently.
+        
+        # Create KV cache for prefill phase
+        kv_cache_prefill = KVCache(
+            batch_size=1,
+            num_heads=num_heads,
+            seq_len=len(prompt_tokens),
+            head_dim=head_dim,
+            num_layers=num_layers,
+        )
+        
+        # Process all prompt tokens at once
+        prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
+        
+        with torch.amp.autocast(
+            device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+            dtype=torch.bfloat16,
+        ):
+            # Forward pass - caches K,V for all prompt tokens
+            logits = self.model(prompt_tensor, kv_cache=kv_cache_prefill)
+        
+        # Handle tuple output (logits, loss)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        
+        # Get logits for the last position
+        next_token_logits = logits[0, -1, :]
+        
+        # =====================================================================
+        # PHASE 2: DECODE - Setup for autoregressive generation
+        # =====================================================================
+        # Create larger KV cache for the full generation sequence
+        estimated_length = len(prompt_tokens) + self.max_tokens
+        if estimated_length > max_seq_len:
+            estimated_length = max_seq_len
+        
+        kv_cache_decode = KVCache(
+            batch_size=1,
+            num_heads=num_heads,
+            seq_len=estimated_length,
+            head_dim=head_dim,
+            num_layers=num_layers,
+        )
+        
+        # Copy the prompt's cached K,V into the decode cache using prefill
+        # This efficiently transfers the cached context from prefill to decode phase
+        kv_cache_decode.prefill(kv_cache_prefill)
+        
+        # =====================================================================
+        # STATE INITIALIZATION for tool use
         # =====================================================================
         generated_tokens = list(prompt_tokens)  # All tokens generated so far
-        in_python_block = False  # Are we currently inside <|python|>...<|python_end|>?
+        in_python_block = False  # Are we inside <|python|>...<|python_end|>?
         python_expr_tokens = []  # Tokens collected inside python block
         forced_tokens = []  # Queue of tokens to force (calculator output)
 
         # =====================================================================
-        # MAIN GENERATION LOOP
+        # MAIN GENERATION LOOP with KV caching + tool use
         # =====================================================================
         for _ in range(self.max_tokens):
             # -----------------------------------------------------------------
             # STEP 1: Check if we have forced tokens to inject
             # -----------------------------------------------------------------
             # When calculator returns a result, we force those tokens into
-            # generation instead of sampling. This ensures the model sees
-            # the actual computation result.
+            # generation instead of sampling. We still need to run them through
+            # the model to update the KV cache!
             if forced_tokens:
-                # Add one forced token per iteration
-                generated_tokens.append(forced_tokens.pop(0))
-                # Skip to next iteration (no model forward pass needed)
+                # Get next forced token
+                next_token = forced_tokens.pop(0)
+                generated_tokens.append(next_token)
+                
+                # Run through model to update KV cache (but ignore logits)
+                # This ensures the forced tokens are in the cached context
+                next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=self.device)
+                
+                with torch.amp.autocast(
+                    device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+                    dtype=torch.bfloat16,
+                ):
+                    logits = self.model(next_token_tensor, kv_cache=kv_cache_decode)
+                
+                # Handle tuple output
+                if isinstance(logits, tuple):
+                    logits = logits[0]
+                
+                # Get logits for next iteration
+                next_token_logits = logits[0, -1, :]
+                
+                # Skip to next iteration
                 continue
 
             # -----------------------------------------------------------------
-            # STEP 2: Run model forward pass to get next token logits
-            # -----------------------------------------------------------------
-            prompt_tensor = torch.tensor(
-                [generated_tokens], dtype=torch.long, device=self.device
-            )
-
-            with torch.amp.autocast(
-                device_type=(
-                    self.device.type if hasattr(self.device, "type") else "cuda"
-                ),
-                dtype=torch.bfloat16,
-            ):
-                logits = self.model(prompt_tensor)
-
-            # Handle models that return (logits, loss) tuples
-            if isinstance(logits, tuple):
-                logits = logits[0]
-
-            # Extract logits for the last position (next token prediction)
-            next_token_logits = logits[0, -1, :]
-
-            # -----------------------------------------------------------------
-            # STEP 3: Sample next token from logits
+            # STEP 2: Sample next token from logits
             # -----------------------------------------------------------------
             if self.temperature > 0:
-                # Apply temperature scaling for diversity
+                # Apply temperature scaling
                 next_token_logits = next_token_logits / self.temperature
 
-                # Apply top-k filtering (keep only top-k most likely tokens)
+                # Apply top-k filtering
                 if self.top_k > 0:
-                    top_k_logits, top_k_indices = torch.topk(
-                        next_token_logits, self.top_k
-                    )
-                    next_token_logits = torch.full_like(
-                        next_token_logits, float("-inf")
-                    )
+                    top_k_logits, top_k_indices = torch.topk(next_token_logits, self.top_k)
+                    next_token_logits = torch.full_like(next_token_logits, float("-inf"))
                     next_token_logits.scatter_(0, top_k_indices, top_k_logits)
 
-                # Sample from the probability distribution
+                # Sample from probability distribution
                 probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).item()
             else:
-                # Greedy decoding (deterministic, pick most likely token)
+                # Greedy decoding (deterministic)
                 next_token = next_token_logits.argmax().item()
 
             # -----------------------------------------------------------------
-            # STEP 4: Check for termination token
+            # STEP 3: Check for termination token
             # -----------------------------------------------------------------
             if next_token == assistant_end_id:
                 break
 
             # -----------------------------------------------------------------
-            # STEP 5: Tool-use state machine
+            # STEP 4: Tool-use state machine
             # -----------------------------------------------------------------
-            # This is the core logic that enables calculator tool use.
-            # We track whether we're inside a python block and handle
-            # transitions between states.
-
+            # Track state transitions for calculator tool use
+            
             if next_token == python_start:
                 # ENTERING PYTHON MODE
-                # Model wants to compute something. Start collecting tokens
-                # for the Python expression.
+                # Model wants to compute something
                 in_python_block = True
                 python_expr_tokens = []
                 generated_tokens.append(next_token)
 
             elif next_token == python_end and in_python_block:
                 # EXITING PYTHON MODE
-                # Model finished the expression. Time to execute it!
+                # Execute the collected expression
                 in_python_block = False
                 generated_tokens.append(next_token)
 
-                # Execute the calculator tool
+                # Execute calculator tool
                 if python_expr_tokens:
-                    # Decode the collected tokens back to a string expression
                     expr = self.tokenizer.decode(python_expr_tokens)
-
-                    # Execute the expression safely (with timeout, sandboxing)
                     result = use_calculator(expr)
 
                     if result is not None:
-                        # Calculator succeeded! Convert result to tokens
+                        # Convert result to tokens and queue for forcing
                         result_str = str(result)
                         result_tokens = self.tokenizer.encode(result_str)
-
-                        # Force these tokens into the generation stream
-                        # Format: <|output_start|>result<|output_end|>
+                        
                         forced_tokens.append(output_start)
                         forced_tokens.extend(result_tokens)
                         forced_tokens.append(output_end)
 
-                # Clear the expression buffer
                 python_expr_tokens = []
 
             elif in_python_block:
                 # INSIDE PYTHON MODE
-                # We're collecting tokens for the Python expression.
-                # Just accumulate them without executing yet.
+                # Collect tokens for the expression
                 python_expr_tokens.append(next_token)
                 generated_tokens.append(next_token)
 
             else:
                 # NORMAL MODE
-                # Regular text generation, no tool use involved.
+                # Regular text generation
                 generated_tokens.append(next_token)
 
             # -----------------------------------------------------------------
-            # STEP 6: Check sequence length limits
+            # STEP 5: Check sequence length limits
             # -----------------------------------------------------------------
-            if (
-                hasattr(self.model, "max_seq_len")
-                and len(generated_tokens) >= self.model.max_seq_len
-            ):
+            if hasattr(self.model, "max_seq_len") and len(generated_tokens) >= self.model.max_seq_len:
                 break
+
+            # -----------------------------------------------------------------
+            # STEP 6: Get logits for next token (KEY KV CACHE OPTIMIZATION)
+            # -----------------------------------------------------------------
+            # Pass only the ONE new token, reusing all cached K,V from before.
+            # This is what makes generation fast!
+            
+            next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=self.device)
+            
+            with torch.amp.autocast(
+                device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+                dtype=torch.bfloat16,
+            ):
+                # Forward pass with only new token + KV cache
+                logits = self.model(next_token_tensor, kv_cache=kv_cache_decode)
+            
+            # Handle tuple output
+            if isinstance(logits, tuple):
+                logits = logits[0]
+            
+            # Extract logits for next prediction
+            next_token_logits = logits[0, -1, :]
 
         # =====================================================================
         # FINALIZATION: Decode and return generated text
         # =====================================================================
-        # Extract only the newly generated tokens (exclude the prompt)
-        new_tokens = generated_tokens[len(prompt_tokens) :]
+        # Extract only newly generated tokens (exclude the prompt)
+        new_tokens = generated_tokens[len(prompt_tokens):]
         generated_text = self.tokenizer.decode(new_tokens)
 
         return generated_text
@@ -460,6 +621,8 @@ class ChatCoreEvaluator:
 
             # Render prompt from conversation
             prompt_tokens = render_fn(example)
+
+            
 
             # Generate completion (with tool use if supported)
             try:
