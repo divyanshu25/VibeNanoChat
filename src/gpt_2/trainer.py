@@ -252,6 +252,7 @@ class Trainer:
                 max_tokens=self.config.chat_core_max_tokens,
                 temperature=self.config.chat_core_temperature,
                 top_k=self.config.chat_core_top_k,
+                use_kv_cache=self.config.use_kv_cache,
             )
 
             # Register evaluation tasks
