@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -7,14 +6,14 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
         """
         Initialize Causal Self-Attention layer.
-        
+
         Args:
             config: Model configuration with attention parameters
             layer_idx: Index of this layer in the transformer (needed for KV caching)
         """
         super().__init__()
         assert config.n_embed % config.n_head == 0
-        
+
         # Store layer index for KV cache coordination
         self.layer_idx = layer_idx
 
@@ -45,20 +44,20 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x, kv_cache=None):
         """
         Forward pass with optional KV caching for efficient generation.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, n_embed)
             kv_cache: Optional KVCache object for efficient autoregressive generation
-            
+
         Returns:
             Output tensor of shape (batch_size, seq_len, n_embed)
         """
         B, T, C = x.size()  # batch size, sequence length, embedding dimension
-        
+
         # =====================================================================
         # STEP 1: Project input to Query, Key, Value
         # =====================================================================
-        # Calculate query, key, values for all heads in batch and move head 
+        # Calculate query, key, values for all heads in batch and move head
         # forward to be the batch dim
         # nh is number of heads, hs is head size and C is embedding dimension = nh * hs
         # e.g in GPT-2 (124M) n_head = 12 and hs = 64, so nh*hs = 768 channels
@@ -89,7 +88,7 @@ class CausalSelfAttention(nn.Module):
         # then reuse all previously computed K,V from the cache
         if kv_cache is not None:
             k, v = kv_cache.insert_kv(self.layer_idx, k, v)
-        
+
         # Now k, v contain all tokens (cached + current)
         Tq = q.size(2)  # Number of query positions (current forward pass)
         Tk = k.size(2)  # Number of key/value positions (cache + current)
@@ -102,7 +101,7 @@ class CausalSelfAttention(nn.Module):
         # 2. Prefill (Tq == Tk): Processing prompt, use causal attention
         # 3. Single token generation (Tq == 1): Attend to all cached tokens
         # 4. Multi-token generation (Tq > 1, Tq < Tk): Mixed attention
-        
+
         if kv_cache is None or Tq == Tk:
             # CASE 1: No KV cache (training) OR prefill phase (Tq == Tk)
             # Use standard causal attention: each position can only attend to
@@ -124,17 +123,18 @@ class CausalSelfAttention(nn.Module):
             # - Each query can attend to ALL cached tokens (prefix)
             # - Each query can only attend causally within the new tokens
             import torch
+
             attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)
             prefix_len = Tk - Tq
-            
+
             # Allow attention to all prefix (cached) tokens
             attn_mask[:, :prefix_len] = True
-            
+
             # Causal attention within the current chunk
             attn_mask[:, prefix_len:] = torch.tril(
                 torch.ones((Tq, Tq), dtype=torch.bool, device=q.device)
             )
-            
+
             y = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask, enable_gqa=(self.n_kv_head < self.n_head)
             )
@@ -149,7 +149,7 @@ class CausalSelfAttention(nn.Module):
 
         # Re-assemble all head outputs side by side
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        
+
         # Final output projection
         y = self.c_proj(y)
         return y

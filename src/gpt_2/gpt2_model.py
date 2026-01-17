@@ -48,7 +48,9 @@ class GPT(nn.Module):
                 wpe=nn.Embedding(config.block_size, config.n_embed),
                 # Stack of transformer blocks (the core of the model)
                 # Each block gets a layer_idx for KV cache coordination
-                h=nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
+                h=nn.ModuleList(
+                    [Block(config, layer_idx=i) for i in range(config.n_layer)]
+                ),
                 # Final layer normalization before output
                 ln_f=nn.LayerNorm(config.n_embed),
             )
@@ -173,7 +175,9 @@ class GPT(nn.Module):
             # Get current cache position (how many tokens already processed)
             cache_pos = kv_cache.get_pos()
             # Create position indices offset by cache position
-            pos = torch.arange(cache_pos, cache_pos + T, dtype=torch.long, device=idx.device)
+            pos = torch.arange(
+                cache_pos, cache_pos + T, dtype=torch.long, device=idx.device
+            )
         else:
             # No cache: normal position indices starting from 0
             pos = torch.arange(0, T, dtype=torch.long, device=idx.device)

@@ -15,7 +15,7 @@ from gpt_2.mlp import MLP
 class Block(nn.Module):
     """
     A single transformer block with optional KV caching support.
-    
+
     This contains the self-attention and the feed-forward network.
     They are both preceded by a layer normalization.
     The output of the self attention is fed into the feed-forward network.
@@ -24,7 +24,7 @@ class Block(nn.Module):
     def __init__(self, config, layer_idx=None):
         """
         Initialize a transformer block.
-        
+
         Args:
             config: Model configuration
             layer_idx: Index of this block in the transformer (needed for KV caching)
@@ -50,16 +50,16 @@ class Block(nn.Module):
     def forward(self, x, kv_cache=None):
         """
         Forward pass through transformer block with optional KV caching.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, n_embed)
             kv_cache: Optional KVCache object for efficient generation
-            
+
         Returns:
             Output tensor of shape (batch_size, seq_len, n_embed)
         """
         # First residual connection: x + attention(norm(x))
-        # Apply layer norm, then self-attention (with optional caching), 
+        # Apply layer norm, then self-attention (with optional caching),
         # then add residual connection
         # The residual connection helps with gradient flow and training stability
         x = x + self.attn(self.ln_1(x), kv_cache=kv_cache)  # shape: (B, T, n_embed)
