@@ -300,13 +300,24 @@ class GPT(nn.Module):
 
 
 def generate(
-    num_sequences, max_length, model, context, device, random_number_generator
+    num_sequences,
+    max_length,
+    model,
+    context,
+    device,
+    random_number_generator,
+    use_kv_cache=True,
 ):
     """
-    Generate text sequences using the trained GPT model.
+    Generate text sequences using the trained GPT model with optional KV caching.
 
     This function performs autoregressive text generation using top-k sampling
     to produce diverse and coherent text continuations.
+
+    KV Caching: When enabled (default), uses a two-phase approach:
+    1. PREFILL: Process all context tokens at once, cache their K/V
+    2. DECODE: Generate one token at a time, reusing cached K/V
+    This reduces computation from O(N²) to O(N), making generation 3-10x faster.
 
     Args:
         num_sequences (int): Number of sequences to generate
@@ -314,7 +325,14 @@ def generate(
         model (GPT): The trained GPT model
         context (str): Initial text context to start generation from
         device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
+        random_number_generator: PyTorch random generator for sampling
+        use_kv_cache (bool): Whether to use KV caching (default: True)
+
+    Returns:
+        list: List of decoded text sequences
     """
+    from gpt_2.kv_cache import KVCache
+
     # Initialize the custom tokenizer with special tokens for chat format
     enc, _ = get_custom_tokenizer()
 
@@ -331,36 +349,118 @@ def generate(
     if device == "cuda":
         torch.cuda.manual_seed(42)
 
+    # =========================================================================
+    # SETUP: Create KV cache if enabled
+    # =========================================================================
+    kv_cache = None
+    if use_kv_cache:
+        # Extract model dimensions for KV cache
+        config = model.config
+        num_heads = config.n_kv_head if hasattr(config, "n_kv_head") else config.n_head
+        head_dim = config.n_embed // config.n_head
+        num_layers = config.n_layer
+
+        # =====================================================================
+        # OPTIMIZATION: Use prefill pattern for batch generation
+        # =====================================================================
+        # For batch generation from the same prompt, we can:
+        # 1. Process prompt ONCE with batch_size=1 (efficient single forward pass)
+        # 2. Copy cached K/V to batch_size=num_sequences (cheap memory copy)
+        # 3. Generate multiple sequences in parallel
+        # This avoids recomputing the same prompt num_sequences times!
+
+        if num_sequences > 1:
+            # Step 1: Create single-batch cache and process prompt once
+            single_cache = KVCache(
+                batch_size=1,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+
+            # Process prompt once with batch_size=1
+            prompt_tensor = x[0:1, :]  # Take first sequence (they're all identical)
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits_single, _ = model(prompt_tensor, kv_cache=single_cache)
+
+            # Step 2: Create batch cache and prefill from single cache
+            kv_cache = KVCache(
+                batch_size=num_sequences,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+            kv_cache.prefill(single_cache)  # Copy cached K/V to all batch positions
+
+            # Replicate logits for all sequences
+            logits = logits_single.repeat(num_sequences, 1, 1)  # (B, T, vocab_size)
+        else:
+            # Single sequence: no need for prefill optimization
+            kv_cache = KVCache(
+                batch_size=num_sequences,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+
+            # Process prompt tokens
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, _ = model(x, kv_cache=kv_cache)  # Shape: (B, T, vocab_size)
+    else:
+        # =====================================================================
+        # NO KV CACHE: Process entire sequence each time (O(N²))
+        # =====================================================================
+        with torch.no_grad():
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                logits, _ = model(x, kv_cache=None)  # Shape: (B, T, vocab_size)
+
+    # Only use the last token's predictions for next token
+    logits = logits[:, -1, :]  # Shape: (B, vocab_size)
+
+    # =========================================================================
+    # PHASE 2: DECODE - Generate tokens one at a time
+    # =========================================================================
     # Generate tokens autoregressively until max_length is reached
     while x.size(1) < max_length:
+        # Convert logits to probabilities
+        probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
+
+        # Apply top-k sampling (k=50) for diverse generation
+        # This helps avoid repetitive text by sampling from top-k most likely tokens
+        topk_probs, topk_indices = torch.topk(
+            probs, 50, dim=-1
+        )  # topk_probs: (B, 50), topk_indices: (B, 50)
+
+        # Sample from the top-k distribution
+        ix = torch.multinomial(
+            topk_probs, num_samples=1, generator=random_number_generator
+        )  # ix: (B, 1)
+
+        # Get the actual token indices from the top-k indices
+        xcol = torch.gather(topk_indices, -1, ix)  # Shape: (B, 1)
+
+        # Append the new token to the sequence
+        x = torch.cat((x, xcol), dim=1)
+
+        # Get next token's logits
         with torch.no_grad():
-            # Get model predictions for next token
-            logits, _ = model(x)  # Shape: (B, T, vocab_size)
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                if use_kv_cache:
+                    # WITH CACHE: Only pass the new token (O(1) per step)
+                    logits, _ = model(xcol, kv_cache=kv_cache)
+                else:
+                    # WITHOUT CACHE: Pass entire sequence (O(N) per step)
+                    logits, _ = model(x, kv_cache=None)
 
-            # Only use the last token's predictions for next token
-            logits = logits[:, -1, :]  # Shape: (B, vocab_size)
+        # Extract logits for next prediction
+        logits = logits[:, -1, :]  # Shape: (B, vocab_size)
 
-            # Convert logits to probabilities
-            probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
-
-            # Apply top-k sampling (k=50) for diverse generation
-            # This helps avoid repetitive text by sampling from top-k most likely tokens
-            topk_probs, topk_indices = torch.topk(
-                probs, 50, dim=-1
-            )  # topk_probs: (B, 50), topk_indices: (B, 50)
-
-            # Sample from the top-k distribution
-            ix = torch.multinomial(
-                topk_probs, num_samples=1, generator=random_number_generator
-            )  # ix: (B, 1)
-
-            # Get the actual token indices from the top-k indices
-            xcol = torch.gather(topk_indices, -1, ix)  # Shape: (B, 1)
-
-            # Append the new token to the sequence
-            x = torch.cat((x, xcol), dim=1)
-
-    # Decode and print all generated sequences
+    # Decode and return all generated sequences
     all_decoded = []
     for i in range(num_sequences):
         tokens = x[i, :max_length].tolist()
@@ -410,93 +510,3 @@ if __name__ == "__main__":
         device = "cpu"  # CPU fallback
 
     print(f"Using device: {device}")
-
-    # # Create and initialize the model
-
-    # torch.manual_seed(1337)
-    # if device == "cuda":
-    #     torch.cuda.manual_seed(1337)
-
-    # total_batch_size = 524288
-    # B = 32
-    # T = 1024
-
-    # assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B * T"
-    # grad_accumulation_steps = total_batch_size // (B * T)
-
-    # print(f"Total batch size: {total_batch_size}")
-    # print(f"Batch size: {B}")
-    # print(f"Sequence length: {T}")
-    # print(f"Grad accumulation steps: {grad_accumulation_steps}")
-
-    # train_loader = DataLoaderLite(B, T)
-
-    # torch.set_float32_matmul_precision("high")
-
-    # model = GPT(GPTConfig(vocab_size=50304))
-    # print("Model loaded")
-    # model.eval()  # Set to evaluation mode (disables dropout, etc.)
-    # model.to(device)
-    # model = torch.compile(model)
-
-    # max_lr = 6e-4
-    # min_lr = 0.1 * max_lr
-    # warmup_steps = 10
-    # max_steps = 50
-
-    # import math
-    # def get_lr(step):
-    #     if step < warmup_steps:
-    #         return max_lr * ((step+1)/warmup_steps)
-    #     elif step > max_steps:
-    #         return min_lr
-    #     else:
-    #         decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
-    #         assert 0 <= decay_ratio <= 1
-    #         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    #         return min_lr + coeff * (max_lr - min_lr)
-
-    # # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    # optimizer = model.configure_optimizers(learning_rate=max_lr, weight_decay=0.1, device=device)
-
-    # import time
-
-    # for step in range(max_steps):
-    #     t0 = time.time()
-    #     optimizer.zero_grad()
-    #     loss_accumulator = torch.tensor(0.0, device=device)
-    #     for micro_step in range(grad_accumulation_steps):
-    #         x, y = train_loader.next_batch()
-    #         x = x.to(device)
-    #         y = y.to(device)
-
-    #         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-    #             logits, loss = model(x, y)
-    #         loss = loss / grad_accumulation_steps
-    #         loss_accumulator += loss
-    #         loss.backward()
-
-    #     norm =torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)# clip gradients to max norm of 1.0
-    #     lr = get_lr(step)
-    #     for param_group in optimizer.param_groups:
-    #         param_group["lr"] = lr
-    #     optimizer.step()
-    #     torch.cuda.synchronize()
-    #     t1 = time.time()
-    #     dt = (t1 - t0)
-    #     tokens_per_sec = (train_loader.B * train_loader.T * grad_accumulation_steps) / dt
-    #     print(f"Step {step} | Loss: {loss_accumulator.item()} | Learning Rate: {lr : .4e} | Gradient Norm: {norm: .4f} | Time: {dt*1000:.2f} ms | tokens/sec: {tokens_per_sec}")
-
-    # context = "Hello, I'm a language model,"
-    # start_time = time.time()
-    # decoded = generate(
-    #     num_sequences=3,  # Generate 3 different sequences
-    #     max_length=50,  # Each sequence up to 30 tokens
-    #     model=model,
-    #     context=context,
-    #     device=device,
-    # )
-    # for decoded_seq in decoded:
-    #     print(">", decoded_seq)
-    # end_time = time.time()
-    # print(f"Time taken: {end_time - start_time} seconds")

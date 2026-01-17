@@ -23,6 +23,7 @@ class Evaluators:
         token_bytes_path=None,
         val_loss_steps=39,
         sample_seed=42,
+        use_kv_cache=True,
     ):
         self.model = model
         self.eval_dataloader = eval_dataloader
@@ -34,6 +35,7 @@ class Evaluators:
         self.generation_log_file = generation_log_file
         self.val_loss_steps = val_loss_steps
         self.sample_seed = sample_seed
+        self.use_kv_cache = use_kv_cache
 
         # Load pre-computed token_bytes tensor for BPB calculation
         if token_bytes_path is not None:
@@ -135,8 +137,9 @@ class Evaluators:
         sample_rng = torch.Generator(device=self.device)
         sample_rng.manual_seed(self.sample_seed + self.ddp_rank)
 
+        cache_status = "with KV cache" if self.use_kv_cache else "without KV cache"
         print(
-            f"Generating {num_sequences} sequences of length {max_length} with context: {context}"
+            f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
         )
         decoded = generate(
             num_sequences=num_sequences,
@@ -145,6 +148,7 @@ class Evaluators:
             context=context,
             device=self.device,
             random_number_generator=sample_rng,
+            use_kv_cache=self.use_kv_cache,
         )
 
         elapsed_time = time.time() - start_time

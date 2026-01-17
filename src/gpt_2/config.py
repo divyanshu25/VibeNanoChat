@@ -76,6 +76,7 @@ class GPTConfig:
     generation_num_samples: int = 4  # Number of sequences to generate per evaluation
     generation_max_length: int = 256  # Maximum tokens per generated sequence
     generation_seed: int = 42  # Random seed for reproducible generation
+    use_kv_cache: bool = True  # Enable KV caching for faster generation (3-10x speedup)
 
     # ========================================================================
     # CORE Benchmark Evaluation (multiple choice tasks)

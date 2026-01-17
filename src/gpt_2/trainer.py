@@ -198,6 +198,7 @@ class Trainer:
                 token_bytes_path=self.token_bytes_path,
                 val_loss_steps=self.config.val_loss_eval_batches,
                 sample_seed=self.config.generation_seed,
+                use_kv_cache=self.config.use_kv_cache,
             )
         else:
             if self.master_process:
