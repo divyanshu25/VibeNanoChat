@@ -16,8 +16,8 @@ import wandb
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
 from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
 from eval_tasks import CoreEvaluator
+from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
-from gpt_2.evaluator import Evaluators
 from gpt_2.gpt2_model import GPT
 from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
                          save_checkpoint)
@@ -186,7 +186,7 @@ class Trainer:
                 split="val",
                 master_process=self.master_process,
             )
-            self.evaluator = Evaluators(
+            self.evaluator = TrainingEvaluator(
                 model=self.model,
                 eval_dataloader=self.eval_dataloader,
                 device=self.device,

@@ -20,7 +20,8 @@ import torch
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
-from gpt_2.gpt2_model import GPT, generate
+from eval_tasks.training import generate
+from gpt_2.gpt2_model import GPT
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
 
 
