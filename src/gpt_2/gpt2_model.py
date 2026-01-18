@@ -344,6 +344,14 @@ def generate(
     tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
     x = tokens.to(device)
 
+    print(f"\n{'='*60}")
+    print("Starting generation:")
+    print(f"  - Number of sequences: {num_sequences}")
+    print(f"  - Context length: {x.size(1)} tokens")
+    print(f"  - Target max length: {max_length} tokens")
+    print(f"  - KV cache enabled: {use_kv_cache}")
+    print(f"{'='*60}\n")
+
     # Set random seed for reproducible generation
     torch.manual_seed(42)
     if device == "cuda":
@@ -397,6 +405,7 @@ def generate(
 
             # Replicate logits for all sequences
             logits = logits_single.repeat(num_sequences, 1, 1)  # (B, T, vocab_size)
+            print(f"✓ Prefill complete: Processed {x.size(1)} context tokens")
         else:
             # Single sequence: no need for prefill optimization
             kv_cache = KVCache(
@@ -411,6 +420,7 @@ def generate(
             with torch.no_grad():
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits, _ = model(x, kv_cache=kv_cache)  # Shape: (B, T, vocab_size)
+            print(f"✓ Prefill complete: Processed {x.size(1)} context tokens")
     else:
         # =====================================================================
         # NO KV CACHE: Process entire sequence each time (O(N²))
@@ -426,6 +436,8 @@ def generate(
     # PHASE 2: DECODE - Generate tokens one at a time
     # =========================================================================
     # Generate tokens autoregressively until max_length is reached
+    print("Starting token generation (decode phase)...\n")
+    tokens_to_generate = max_length - x.size(1)
     while x.size(1) < max_length:
         # Convert logits to probabilities
         probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
@@ -447,6 +459,15 @@ def generate(
         # Append the new token to the sequence
         x = torch.cat((x, xcol), dim=1)
 
+        # Progress monitoring
+        current_len = x.size(1)
+        tokens_generated = current_len - (max_length - tokens_to_generate)
+        if tokens_generated % 10 == 0 or current_len == max_length:
+            progress_pct = (tokens_generated / tokens_to_generate) * 100
+            print(
+                f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
+            )
+
         # Get next token's logits
         with torch.no_grad():
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
@@ -461,41 +482,18 @@ def generate(
         logits = logits[:, -1, :]  # Shape: (B, vocab_size)
 
     # Decode and return all generated sequences
+    print(f"\n{'='*60}")
+    print("Generation complete!")
+    print(f"  - Generated {num_sequences} sequence(s)")
+    print(f"  - Final length: {x.size(1)} tokens")
+    print(f"{'='*60}\n")
+
     all_decoded = []
     for i in range(num_sequences):
         tokens = x[i, :max_length].tolist()
         decoded = enc.decode(tokens)
         all_decoded.append(decoded)
     return all_decoded
-
-
-# class DataLoaderLite:
-#     def __init__(self, B, T):
-
-#         with open("data/input.txt", "r") as f:
-#             text = f.read()
-
-#         import tiktoken
-
-#         self.enc = tiktoken.get_encoding("gpt2")
-#         self.tokens = self.enc.encode(text)
-#         self.tokens = torch.tensor(self.tokens, dtype=torch.long)
-#         self.current_position = 0
-#         self.B = B
-#         self.T = T
-#         print(f"Loaded {len(self.tokens)} tokens")
-#         print(f"1 epoch has {len(self.tokens) // (self.B * self.T)} batches")
-
-#     def next_batch(self):
-#         buf = self.tokens[
-#             self.current_position : self.current_position + self.B * self.T + 1
-#         ]
-#         x = buf[:-1].view(self.B, self.T)
-#         y = buf[1:].view(self.B, self.T)
-#         self.current_position += self.B * self.T
-#         if self.current_position + (self.B * self.T + 1) > len(self.tokens):
-#             self.current_position = 0
-#         return x, y
 
 
 # Test the model when script is run directly

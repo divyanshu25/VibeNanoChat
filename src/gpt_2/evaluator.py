@@ -141,10 +141,14 @@ class Evaluators:
         print(
             f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
         )
+
+        # Unwrap model from DDP if needed (generation only happens on master process)
+        raw_model = self.model.module if self.ddp else self.model
+
         decoded = generate(
             num_sequences=num_sequences,
             max_length=max_length,
-            model=self.model,
+            model=raw_model,
             context=context,
             device=self.device,
             random_number_generator=sample_rng,
