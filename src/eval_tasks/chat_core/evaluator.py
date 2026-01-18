@@ -459,6 +459,13 @@ class ChatCoreEvaluator:
                 next_token = forced_tokens.pop(0)
                 generated_tokens.append(next_token)
 
+                # Check sequence length limit before running model
+                if (
+                    hasattr(self.model, "max_seq_len")
+                    and len(generated_tokens) >= self.model.max_seq_len
+                ):
+                    break
+
                 # Run through model to update KV cache (but ignore logits)
                 # This ensures the forced tokens are in the cached context
                 next_token_tensor = torch.tensor(
