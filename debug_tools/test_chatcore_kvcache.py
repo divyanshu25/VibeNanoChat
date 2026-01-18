@@ -46,7 +46,7 @@ import time
 import torch
 
 # Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
 from eval_tasks.chat_core.utils import setup_gsm8k_task

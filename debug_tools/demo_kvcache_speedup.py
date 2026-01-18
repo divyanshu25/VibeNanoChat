@@ -787,8 +787,7 @@ def main():
     print("\n" + "=" * 80)
     print("💡 KEY LEARNINGS - Understanding KV Cache")
     print("=" * 80)
-    print(
-        """
+    print("""
 ================================================================================
 1. WITHOUT KV Cache - The O(N²) Problem
 ================================================================================
@@ -881,8 +880,7 @@ Smaller models show less speedup because they're memory-bandwidth limited,
 not compute-limited. The cache helps most when computation is the bottleneck!
 
 ================================================================================
-"""
-    )
+""")
 
     # =========================================================================
     # FURTHER EXPLORATION
@@ -890,8 +888,7 @@ not compute-limited. The cache helps most when computation is the bottleneck!
     print("=" * 80)
     print("🔬 FURTHER EXPLORATION - Try These Experiments!")
     print("=" * 80)
-    print(
-        """
+    print("""
 Want to learn more? Try these experiments:
 
 1. Test with even longer sequences:
@@ -929,8 +926,7 @@ Related files to explore:
   - src/gpt_2/attention.py: How cache is used in attention
   - debug_tools/test_kvcache_correctness.py: Verify cache correctness
   - debug_tools/test_chatcore_kvcache.py: Real evaluation with cache
-"""
-    )
+""")
     print("=" * 80 + "\n")
 
 

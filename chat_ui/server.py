@@ -225,10 +225,10 @@ async def new_session():
 @app.get("/api/session/{session_id}")
 async def get_session_info(session_id: str):
     """Get information about a specific session."""
-    if not session_manager.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
     session_data = session_manager.get_session_data(session_id)
+
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     return JSONResponse(
         content={

@@ -468,9 +468,17 @@ class ChatCoreEvaluator:
 
                 # Run through model to update KV cache (but ignore logits)
                 # This ensures the forced tokens are in the cached context
-                next_token_tensor = torch.tensor(
-                    [[next_token]], dtype=torch.long, device=self.device
-                )
+                # When KV cache is disabled, we need to pass the entire sequence
+                if self.use_kv_cache:
+                    # KV cache enabled: pass only new token
+                    next_token_tensor = torch.tensor(
+                        [[next_token]], dtype=torch.long, device=self.device
+                    )
+                else:
+                    # No KV cache: pass entire sequence
+                    next_token_tensor = torch.tensor(
+                        [generated_tokens], dtype=torch.long, device=self.device
+                    )
 
                 with torch.amp.autocast(
                     device_type=(
