@@ -26,7 +26,7 @@ class GPTConfig:
     # ========================================================================
     # Training Configuration
     # ========================================================================
-    num_epochs: int = 2  # Number of training epochs
+    num_epochs: int = 3  # Number of training epochs
     batch_size: int = 64  # Batch size per GPU
     total_batch_size: int = 524288  # Total tokens per gradient update (2^19)
     weight_decay: float = 0.10  # L2 regularization weight decay
@@ -76,6 +76,7 @@ class GPTConfig:
     generation_num_samples: int = 4  # Number of sequences to generate per evaluation
     generation_max_length: int = 256  # Maximum tokens per generated sequence
     generation_seed: int = 42  # Random seed for reproducible generation
+    use_kv_cache: bool = True  # Enable KV caching for faster generation (3-10x speedup)
 
     # ========================================================================
     # CORE Benchmark Evaluation (multiple choice tasks)

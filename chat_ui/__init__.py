@@ -1,7 +1,28 @@
 """
 NanoGPT Chat UI Package
 
-A web interface for chatting with NanoGPT model checkpoints.
+A modular chat server for interacting with trained NanoGPT models.
+
+Main components:
+- ChatConfig: Configuration settings
+- ModelManager: Model loading and inference
+- SessionManager: Session and conversation management
+- format_chat_prompt: Utility for formatting prompts
 """
 
-__version__ = "0.1.0"
+from .config import ChatConfig
+from .model_manager import ModelManager
+from .prompt_utils import (format_chat_prompt, validate_conversation,
+                           validate_message)
+from .session_manager import SessionManager
+
+__all__ = [
+    "ChatConfig",
+    "ModelManager",
+    "SessionManager",
+    "format_chat_prompt",
+    "validate_message",
+    "validate_conversation",
+]
+
+__version__ = "1.0.0"

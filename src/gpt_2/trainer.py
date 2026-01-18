@@ -16,8 +16,8 @@ import wandb
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
 from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
 from eval_tasks import CoreEvaluator
+from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
-from gpt_2.evaluator import Evaluators
 from gpt_2.gpt2_model import GPT
 from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
                          save_checkpoint)
@@ -186,7 +186,7 @@ class Trainer:
                 split="val",
                 master_process=self.master_process,
             )
-            self.evaluator = Evaluators(
+            self.evaluator = TrainingEvaluator(
                 model=self.model,
                 eval_dataloader=self.eval_dataloader,
                 device=self.device,
@@ -198,6 +198,7 @@ class Trainer:
                 token_bytes_path=self.token_bytes_path,
                 val_loss_steps=self.config.val_loss_eval_batches,
                 sample_seed=self.config.generation_seed,
+                use_kv_cache=self.config.use_kv_cache,
             )
         else:
             if self.master_process:
@@ -251,6 +252,7 @@ class Trainer:
                 max_tokens=self.config.chat_core_max_tokens,
                 temperature=self.config.chat_core_temperature,
                 top_k=self.config.chat_core_top_k,
+                use_kv_cache=self.config.use_kv_cache,
             )
 
             # Register evaluation tasks
