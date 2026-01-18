@@ -5,6 +5,15 @@ Provides helper functions to:
 - Render prompts from conversations
 - Setup evaluators with common configurations
 - Register tasks with the evaluator
+
+Performance Note:
+==================
+The ChatCORE evaluator uses KV (Key-Value) caching for efficient generation:
+- Without KV cache: Each token requires reprocessing all previous tokens → O(N²)
+- With KV cache: Each token reuses cached attention keys/values → O(N)
+- Result: 5-10x faster generation with ~2x memory usage
+
+This is implemented transparently in the evaluator's generate methods.
 """
 
 from typing import Dict, List, Optional
