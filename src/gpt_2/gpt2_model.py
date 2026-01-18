@@ -173,6 +173,10 @@ class GPT(nn.Module):
         if kv_cache is not None:
             # Get current cache position (how many tokens already processed)
             cache_pos = kv_cache.get_pos()
+            # Ensure the final position doesn't exceed the position embedding bounds
+            assert (
+                cache_pos + T <= self.config.block_size
+            ), f"Position overflow: cache_pos ({cache_pos}) + sequence_length ({T}) = {cache_pos + T} exceeds block_size ({self.config.block_size})"
             # Create position indices offset by cache position
             pos = torch.arange(
                 cache_pos, cache_pos + T, dtype=torch.long, device=idx.device

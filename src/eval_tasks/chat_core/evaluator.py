@@ -217,7 +217,9 @@ class ChatCoreEvaluator:
         )
 
         with torch.amp.autocast(
-            device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+            device_type=(
+                self.device.type if hasattr(self.device, "type") else str(self.device)
+            ),
             dtype=torch.bfloat16,
         ):
             # Forward pass with KV cache - this caches K,V for all prompt tokens
@@ -301,7 +303,9 @@ class ChatCoreEvaluator:
 
             with torch.amp.autocast(
                 device_type=(
-                    self.device.type if hasattr(self.device, "type") else "cuda"
+                    self.device.type
+                    if hasattr(self.device, "type")
+                    else str(self.device)
                 ),
                 dtype=torch.bfloat16,
             ):
@@ -422,7 +426,9 @@ class ChatCoreEvaluator:
         )
 
         with torch.amp.autocast(
-            device_type=(self.device.type if hasattr(self.device, "type") else "cuda"),
+            device_type=(
+                self.device.type if hasattr(self.device, "type") else str(self.device)
+            ),
             dtype=torch.bfloat16,
         ):
             # Forward pass - caches K,V for all prompt tokens
@@ -482,7 +488,9 @@ class ChatCoreEvaluator:
 
                 with torch.amp.autocast(
                     device_type=(
-                        self.device.type if hasattr(self.device, "type") else "cuda"
+                        self.device.type
+                        if hasattr(self.device, "type")
+                        else str(self.device)
                     ),
                     dtype=torch.bfloat16,
                 ):
@@ -599,7 +607,9 @@ class ChatCoreEvaluator:
 
             with torch.amp.autocast(
                 device_type=(
-                    self.device.type if hasattr(self.device, "type") else "cuda"
+                    self.device.type
+                    if hasattr(self.device, "type")
+                    else str(self.device)
                 ),
                 dtype=torch.bfloat16,
             ):
