@@ -236,7 +236,7 @@ class Trainer:
         # Initialize ChatCORE evaluator if requested (for generative evaluation)
         if self.run_chatcore_evals:
             from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
-            from eval_tasks.chat_core.utils import setup_gsm8k_task
+            from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
 
             enc, _ = get_custom_tokenizer()
             self.chatcore_evaluator = ChatCoreEvaluator(

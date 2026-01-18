@@ -16,7 +16,7 @@ The ChatCORE evaluator uses KV (Key-Value) caching for efficient generation:
 This is implemented transparently in the evaluator's generate methods.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[int]:
@@ -81,47 +81,3 @@ def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[in
     # our custom special tokens (<|bos|>, <|user_start|>, etc.)
     tokens = tokenizer.encode(prompt_text, allowed_special="all")
     return tokens
-
-
-def setup_gsm8k_task(
-    evaluator,
-    tokenizer,
-    split: str = "test",
-    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
-):
-    """
-    Setup GSM8K task with the evaluator.
-
-    Args:
-        evaluator: ChatCoreEvaluator instance
-        tokenizer: Tokenizer to use for encoding
-        split: Dataset split ('train' or 'test')
-        cache_dir: Directory to cache the downloaded HuggingFace dataset
-    """
-    from .gsm8k import evaluate_gsm8k, load_gsm8k_from_hf
-
-    def load_fn(max_examples=None):
-        """Load GSM8K data."""
-        return load_gsm8k_from_hf(
-            split=split, max_examples=max_examples, cache_dir=cache_dir
-        )
-
-    def eval_fn(example, generated_text):
-        """Evaluate a GSM8K prediction."""
-        ground_truth_answer = example["answer"]
-        return evaluate_gsm8k(ground_truth_answer, generated_text)
-
-    def render_fn(example):
-        """Render GSM8K conversation to prompt tokens."""
-        conversation = example["conversation"]
-        return render_conversation_for_completion(conversation, tokenizer)
-
-    # Register with evaluator
-    evaluator.register_task(
-        "GSM8K",
-        {
-            "load_fn": load_fn,
-            "eval_fn": eval_fn,
-            "render_fn": render_fn,
-        },
-    )

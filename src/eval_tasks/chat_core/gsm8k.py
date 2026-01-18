@@ -128,6 +128,13 @@ def format_gsm8k_conversation(question: str, answer: str) -> Dict:
 
     Returns:
         Conversation dict with 'messages' key containing user and assistant messages
+        Example:
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": [{"type": "text", "text": "The answer is "}, {"type": "python", "text": "2+2"}, {"type": "output_start", "text": "4"}]},
+            ]
+        }
     """
     # Parse the answer into structured parts
     answer_parts = parse_gsm8k_answer(answer)
@@ -262,3 +269,47 @@ def load_gsm8k_from_jsonl(
             )
 
     return examples
+
+
+def setup_gsm8k_task(
+    evaluator,
+    tokenizer,
+    split: str = "test",
+    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+):
+    """
+    Setup GSM8K task with the evaluator.
+
+    Args:
+        evaluator: ChatCoreEvaluator instance
+        tokenizer: Tokenizer to use for encoding
+        split: Dataset split ('train' or 'test')
+        cache_dir: Directory to cache the downloaded HuggingFace dataset
+    """
+    from .utils import render_conversation_for_completion
+
+    def load_fn(max_examples=None):
+        """Load GSM8K data."""
+        return load_gsm8k_from_hf(
+            split=split, max_examples=max_examples, cache_dir=cache_dir
+        )
+
+    def eval_fn(example, generated_text):
+        """Evaluate a GSM8K prediction."""
+        ground_truth_answer = example["answer"]
+        return evaluate_gsm8k(ground_truth_answer, generated_text)
+
+    def render_fn(example):
+        """Render GSM8K conversation to prompt tokens."""
+        conversation = example["conversation"]
+        return render_conversation_for_completion(conversation, tokenizer)
+
+    # Register with evaluator
+    evaluator.register_task(
+        "GSM8K",
+        {
+            "load_fn": load_fn,
+            "eval_fn": eval_fn,
+            "render_fn": render_fn,
+        },
+    )

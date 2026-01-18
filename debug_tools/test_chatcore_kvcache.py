@@ -49,7 +49,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
-from eval_tasks.chat_core.utils import setup_gsm8k_task
+from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
