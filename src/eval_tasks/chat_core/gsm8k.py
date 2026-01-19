@@ -294,10 +294,29 @@ def setup_gsm8k_task(
             split=split, max_examples=max_examples, cache_dir=cache_dir
         )
 
-    def eval_fn(example, generated_text):
+    def eval_fn(example, generated_text, return_details=False):
         """Evaluate a GSM8K prediction."""
         ground_truth_answer = example["answer"]
-        return evaluate_gsm8k(ground_truth_answer, generated_text)
+        is_correct = evaluate_gsm8k(ground_truth_answer, generated_text)
+        # if is_correct:
+        #     print(f"{'='*80}")
+        #     print(f"Reference answer: {ground_truth_answer}")
+        #     print(f"{'-'*80}")
+        #     print(f"Predicted answer: {generated_text}")
+        #     print(f"{'='*80}")
+
+        if return_details:
+            # Extract answers for comparison
+            ref_answer = extract_answer(ground_truth_answer)
+            pred_answer = extract_answer(generated_text)
+
+            return {
+                "success": is_correct,
+                "reference_answer": ref_answer,
+                "predicted_answer": pred_answer,
+            }
+
+        return is_correct
 
     def render_fn(example):
         """Render GSM8K conversation to prompt tokens."""

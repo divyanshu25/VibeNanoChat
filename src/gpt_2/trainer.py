@@ -235,8 +235,12 @@ class Trainer:
 
         # Initialize ChatCORE evaluator if requested (for generative evaluation)
         if self.run_chatcore_evals:
+            from eval_tasks.chat_core.arc_challenge import \
+                setup_arc_challenge_task
+            from eval_tasks.chat_core.arc_easy import setup_arc_task
             from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
             from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
+            from eval_tasks.chat_core.humaneval import setup_humaneval_task
 
             enc, _ = get_custom_tokenizer()
             self.chatcore_evaluator = ChatCoreEvaluator(
@@ -262,9 +266,29 @@ class Trainer:
                 split="test",
                 cache_dir=self.config.chat_core_hf_cache_dir,
             )
+            setup_humaneval_task(
+                self.chatcore_evaluator,
+                enc,
+                cache_dir=self.config.chat_core_hf_cache_dir,
+                shuffle_seed=42,
+            )
+            setup_arc_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="ARC-Easy",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
+            setup_arc_challenge_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="ARC-Challenge",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
             # Future: Add more tasks here
             # setup_mmlu_task(self.chatcore_evaluator, enc, split="test")
-            # setup_arc_task(self.chatcore_evaluator, enc, split="test")
+            # For ARC-Challenge: setup_arc_task(self.chatcore_evaluator, enc, subset="ARC-Challenge", split="test")
         else:
             self.chatcore_evaluator = None
 

@@ -48,8 +48,11 @@ import torch
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
+from eval_tasks.chat_core.arc_challenge import setup_arc_challenge_task
+from eval_tasks.chat_core.arc_easy import setup_arc_task
 from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
 from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
+from eval_tasks.chat_core.humaneval import setup_humaneval_task
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
@@ -92,7 +95,7 @@ def main():
     # Evaluation settings
     max_examples = args.max_examples
     max_tokens = args.max_tokens
-    temperature = 0.0  # Greedy decoding for consistency
+    temperature = 0.2  # Greedy decoding for consistency
 
     print("\n" + "=" * 80)
     print("🧪 ChatCORE KV Cache Test Script")
@@ -211,16 +214,66 @@ def main():
         return
 
     # =========================================================================
-    # STEP 6: Run evaluation 3 times and compute averages
+    # STEP 6: Register HumanEval task
     # =========================================================================
+    print("\n📋 Registering HumanEval task...")
+    try:
+        setup_humaneval_task(
+            evaluator=evaluator,
+            tokenizer=tokenizer,
+            cache_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+        )
+        print("✅ HumanEval task registered")
+    except Exception as e:
+        print(f"❌ Failed to register HumanEval: {e}")
+        return
+
+    # =========================================================================
+    # STEP 6.5: Register ARC-Easy task
+    # =========================================================================
+    print("\n📋 Registering ARC-Easy task...")
+    try:
+        setup_arc_task(
+            evaluator=evaluator,
+            tokenizer=tokenizer,
+            subset="ARC-Easy",
+            split="test",
+            cache_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+        )
+        print("✅ ARC-Easy task registered")
+    except Exception as e:
+        print(f"❌ Failed to register ARC-Easy: {e}")
+        return
+
+    # =========================================================================
+    # STEP 6.6: Register ARC-Challenge task
+    # =========================================================================
+    print("\n📋 Registering ARC-Challenge task...")
+    try:
+        setup_arc_challenge_task(
+            evaluator=evaluator,
+            tokenizer=tokenizer,
+            subset="ARC-Challenge",
+            split="test",
+            cache_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+        )
+        print("✅ ARC-Challenge task registered")
+    except Exception as e:
+        print(f"❌ Failed to register ARC-Challenge: {e}")
+        return
+
+    # =========================================================================
+    # STEP 7: Run evaluation 3 times and compute averages
+    # =========================================================================
+    num_runs = 1
+
     print("\n" + "=" * 80)
     if use_kv_cache:
-        print("🚀 Running ChatCORE evaluation with KV caching (3 runs)...")
+        print(f"🚀 Running ChatCORE evaluation with KV caching ({num_runs} runs)...")
     else:
-        print("🚀 Running ChatCORE evaluation without KV caching (3 runs)...")
+        print(f"🚀 Running ChatCORE evaluation without KV caching ({num_runs} runs)...")
     print("=" * 80 + "\n")
 
-    num_runs = 3
     all_run_results = []
     all_run_times = []
 
@@ -254,7 +307,7 @@ def main():
         # STEP 7: Compute and display average results across all runs
         # =====================================================================
         print("\n" + "=" * 80)
-        print("📊 AVERAGE RESULTS ACROSS 3 RUNS")
+        print(f"📊 AVERAGE RESULTS ACROSS {num_runs} RUNS")
         print("=" * 80)
 
         # Calculate average accuracy per task
