@@ -186,6 +186,7 @@ def load_gsm8k_from_hf(
     split: str = "test",
     max_examples: Optional[int] = None,
     cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+    shuffle_seed: int = 42,
 ) -> List[Dict]:
     """
     Load GSM8K dataset from HuggingFace.
@@ -212,9 +213,7 @@ def load_gsm8k_from_hf(
     # Load from HuggingFace with specified cache directory
     dataset = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
 
-    # Limit examples if requested
-    if max_examples is not None:
-        dataset = dataset.select(range(min(max_examples, len(dataset))))
+    dataset = dataset.shuffle(seed=shuffle_seed)
 
     # Convert to our format
     examples = []

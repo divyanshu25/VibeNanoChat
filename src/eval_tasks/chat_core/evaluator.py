@@ -348,7 +348,7 @@ class ChatCoreEvaluator:
     ):
         """Print detailed output for a single evaluation example."""
         print(f"\n{'='*80}")
-        print(f"📝 Example {total_count}/{num_examples}")
+        print(f"📝 Example {total_count}/{num_examples//self.ddp_world_size}")
         print(f"{'='*80}")
 
         # Show decoded prompt tokens if available
@@ -745,6 +745,16 @@ class ChatCoreEvaluator:
                     print(
                         f"  {task_name}: {results['accuracy']:.4f} ({task_time:.1f}s)"
                     )
+                    # Log individual task results with chatcore/ prefix
+                    try:
+                        log_dict = {
+                            f"chatcore/{task_name}": results["accuracy"],
+                            "step": global_step if global_step is not None else step,
+                        }
+                        wandb.log(log_dict)
+                    except Exception:
+                        # wandb not initialized, skip logging
+                        pass
 
             except Exception as e:
                 if self.master_process:
@@ -774,18 +784,8 @@ class ChatCoreEvaluator:
             try:
                 log_dict = {
                     "chatcore_score": chatcore_score,
+                    "step": global_step if global_step is not None else step,
                 }
-
-                # Log individual task results with chatcore/ prefix
-                for task_name, results in all_results.items():
-                    log_dict[f"chatcore/{task_name}"] = results["accuracy"]
-
-                # Add step information
-                if global_step is not None:
-                    log_dict["step"] = global_step
-                elif step is not None:
-                    log_dict["step"] = step
-
                 wandb.log(log_dict)
             except Exception:
                 # wandb not initialized, skip logging

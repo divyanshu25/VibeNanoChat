@@ -252,7 +252,7 @@ class Trainer:
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
                 ddp_world_size=self.ddp_world_size,
-                max_examples=None,  # Use full test set for final evaluation
+                max_examples=self.config.chat_core_max_examples,  # Use full test set for final evaluation
                 num_samples=self.config.chat_core_num_samples,
                 max_tokens=self.config.chat_core_max_tokens,
                 temperature=self.config.chat_core_temperature,
@@ -588,26 +588,28 @@ class Trainer:
                 # Increment global step counter
                 global_step += 1
 
-        # Run ChatCORE evaluation after training completes
-        if self.run_chatcore_evals:
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("🎯 Running ChatCORE evaluation on final model...")
-                print("=" * 80 + "\n")
+            # Run ChatCORE evaluation after each epoch
+            if self.run_chatcore_evals:
+                if self.master_process:
+                    print("\n" + "=" * 80)
+                    print(
+                        f"🎯 Running ChatCORE evaluation after Epoch {epoch+1}/{self.num_epochs}..."
+                    )
+                    print("=" * 80 + "\n")
 
-            chatcore_results = self.chatcore_evaluator.evaluate_all_tasks(
-                step=global_step, global_step=global_step
-            )
+                chatcore_results = self.chatcore_evaluator.evaluate_all_tasks(
+                    step=step, global_step=global_step
+                )
 
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("📊 FINAL ChatCORE RESULTS:")
-                for task_name, results in chatcore_results.items():
-                    accuracy = results["accuracy"]
-                    correct = results["correct"]
-                    total = results["total"]
-                    print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
-                print("=" * 80 + "\n")
+                if self.master_process:
+                    print("\n" + "=" * 80)
+                    print(f"📊 ChatCORE RESULTS (Epoch {epoch+1}/{self.num_epochs}):")
+                    for task_name, results in chatcore_results.items():
+                        accuracy = results["accuracy"]
+                        correct = results["correct"]
+                        total = results["total"]
+                        print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
+                    print("=" * 80 + "\n")
 
         # Training complete
         if self.master_process:
