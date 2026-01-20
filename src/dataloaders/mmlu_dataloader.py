@@ -119,7 +119,7 @@ class MMLUDataLoader:
                    - "test" for the test set (most common)
                    - "validation" for validation set
                    - "dev" for development set (5 examples per subject)
-                   - "train" for training set (only with auxiliary_train subset)
+                   - "train" for training set (only with subset="auxiliary_train")
             cache_dir: Directory to cache the downloaded dataset
             shuffle_seed: Random seed for shuffling (default: 42 for reproducibility)
 
@@ -136,11 +136,10 @@ class MMLUDataLoader:
             assert split == "train", "auxiliary_train subset only has 'train' split"
         else:
             assert split in [
-                "train",
                 "validation",
                 "dev",
                 "test",
-            ], f"MMLU split must be 'train', 'validation', 'dev', or 'test', got: {split}"
+            ], f"MMLU split must be 'validation', 'dev', or 'test' (train only available with subset='auxiliary_train'), got: {split}"
 
         self.subset = subset
         self.split = split

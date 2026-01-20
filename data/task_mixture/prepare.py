@@ -278,14 +278,18 @@ def load_and_format_datasets(split, cache_dir=None):
 
     print(f"\n📚 Loading MMLU auxiliary_train ({split})...")
     try:
-        # MMLU splits: test, validation, dev, auxiliary_train
-        # We use auxiliary_train for training (99,842 examples)
-        # For validation, we use the validation split (1,531 examples)
-        mmlu_split = "auxiliary_train" if split == "train" else "validation"
+        # MMLU has subset="auxiliary_train" with split="train" for training (99,842 examples)
+        # For validation, we use subset="all" with split="validation" (1,531 examples)
+        if split == "train":
+            mmlu_subset = "auxiliary_train"
+            mmlu_split = "train"
+        else:
+            mmlu_subset = "all"
+            mmlu_split = "validation"
 
         # Use MMLUDataLoader for consistent loading
         mmlu_loader = MMLUDataLoader(
-            subset="all", split=mmlu_split, cache_dir=cache_dir, shuffle_seed=42
+            subset=mmlu_subset, split=mmlu_split, cache_dir=cache_dir, shuffle_seed=42
         )
 
         # Load data using the dataloader (returns list of dicts)
