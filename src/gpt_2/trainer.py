@@ -306,33 +306,64 @@ class Trainer:
         )
 
         if self.checkpoint_path:
-            # For mid-training: only load model weights (fresh optimizer)
-            # For resuming pretraining: load both model and optimizer state
+            # Determine checkpoint source
+            is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
+            is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
+
+            # Define training scenario flags
+            is_rollover = self.mid_training and is_pretrain_ckpt
+            is_resume_pretrain = not self.mid_training and is_pretrain_ckpt
+            is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+
+            # Load optimizer only when resuming (not when rolling over)
+            should_load_optimizer = not is_rollover
+
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
                 model=self.raw_model,
                 device=self.device,
-                optimizer=None if self.mid_training else self.optimizer,
+                optimizer=self.optimizer if should_load_optimizer else None,
                 master_process=self.master_process,
             )
             if checkpoint_result["config"]:
                 self.config = checkpoint_result["config"]
 
-            if self.mid_training:
-                # LOADING from checkpoint will override configs in the config file so make sure to override them here, if you need to change them.
+            # Reset training counters only when rolling over
+            if is_rollover:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
-                self.config.generation_max_length = 256
-                # Override checkpoint interval for mid-training
                 if self.master_process:
                     print(
-                        "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"
+                        "🔄 Rollover: Pretraining → Mid-training "
+                        "(weights loaded, fresh optimizer, counters reset)"
                     )
-            else:
+            # Keep checkpoint counters when resuming
+            elif is_resume_pretrain or is_resume_midtrain:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
+
+                if self.master_process:
+                    mode = "pretraining" if is_resume_pretrain else "mid-training"
+                    print(
+                        f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
+                        f"step {self.start_step}, global_step {self.start_global_step} "
+                        "(weights + optimizer loaded)"
+                    )
+            else:
+                # Abort if checkpoint scenario is not recognized
+                raise ValueError(
+                    f"Unrecognized checkpoint scenario!\n"
+                    f"  Checkpoint path: {self.checkpoint_path}\n"
+                    f"  mid_training flag: {self.mid_training}\n"
+                    f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
+                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n\n"
+                    f"Expected checkpoint path patterns:\n"
+                    f"  - For rollover: mid_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: mid_training=False + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path"
+                )
 
             # Handle epoch boundary for resumed checkpoints
             if self.start_step >= self.max_steps:

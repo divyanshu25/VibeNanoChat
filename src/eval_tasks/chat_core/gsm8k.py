@@ -217,7 +217,10 @@ def load_gsm8k_from_hf(
 
     # Convert to our format
     examples = []
-    for item in dataset:
+    for i, item in enumerate(dataset):
+        if max_examples is not None and i >= max_examples:
+            break
+
         question = item["question"]
         answer = item["answer"]
 
@@ -228,44 +231,6 @@ def load_gsm8k_from_hf(
                 "conversation": format_gsm8k_conversation(question, answer),
             }
         )
-
-    return examples
-
-
-def load_gsm8k_from_jsonl(
-    filepath: str, max_examples: Optional[int] = None
-) -> List[Dict]:
-    """
-    Load GSM8K dataset from a JSONL file.
-
-    Expected format: Each line is a JSON object with 'question' and 'answer' keys.
-
-    Args:
-        filepath: Path to JSONL file
-        max_examples: Optional limit on number of examples to load
-
-    Returns:
-        List of examples, each with 'question', 'answer', 'conversation' keys
-    """
-    import json
-
-    examples = []
-    with open(filepath, "r") as f:
-        for i, line in enumerate(f):
-            if max_examples is not None and i >= max_examples:
-                break
-
-            item = json.loads(line)
-            question = item["question"]
-            answer = item["answer"]
-
-            examples.append(
-                {
-                    "question": question,
-                    "answer": answer,
-                    "conversation": format_gsm8k_conversation(question, answer),
-                }
-            )
 
     return examples
 
