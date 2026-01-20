@@ -128,6 +128,13 @@ def format_gsm8k_conversation(question: str, answer: str) -> Dict:
 
     Returns:
         Conversation dict with 'messages' key containing user and assistant messages
+        Example:
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": [{"type": "text", "text": "The answer is "}, {"type": "python", "text": "2+2"}, {"type": "output_start", "text": "4"}]},
+            ]
+        }
     """
     # Parse the answer into structured parts
     answer_parts = parse_gsm8k_answer(answer)
@@ -179,6 +186,7 @@ def load_gsm8k_from_hf(
     split: str = "test",
     max_examples: Optional[int] = None,
     cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+    shuffle_seed: int = 42,
 ) -> List[Dict]:
     """
     Load GSM8K dataset from HuggingFace.
@@ -205,13 +213,14 @@ def load_gsm8k_from_hf(
     # Load from HuggingFace with specified cache directory
     dataset = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
 
-    # Limit examples if requested
-    if max_examples is not None:
-        dataset = dataset.select(range(min(max_examples, len(dataset))))
+    dataset = dataset.shuffle(seed=shuffle_seed)
 
     # Convert to our format
     examples = []
-    for item in dataset:
+    for i, item in enumerate(dataset):
+        if max_examples is not None and i >= max_examples:
+            break
+
         question = item["question"]
         answer = item["answer"]
 
@@ -226,39 +235,64 @@ def load_gsm8k_from_hf(
     return examples
 
 
-def load_gsm8k_from_jsonl(
-    filepath: str, max_examples: Optional[int] = None
-) -> List[Dict]:
+def setup_gsm8k_task(
+    evaluator,
+    tokenizer,
+    split: str = "test",
+    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+):
     """
-    Load GSM8K dataset from a JSONL file.
-
-    Expected format: Each line is a JSON object with 'question' and 'answer' keys.
+    Setup GSM8K task with the evaluator.
 
     Args:
-        filepath: Path to JSONL file
-        max_examples: Optional limit on number of examples to load
-
-    Returns:
-        List of examples, each with 'question', 'answer', 'conversation' keys
+        evaluator: ChatCoreEvaluator instance
+        tokenizer: Tokenizer to use for encoding
+        split: Dataset split ('train' or 'test')
+        cache_dir: Directory to cache the downloaded HuggingFace dataset
     """
-    import json
+    from .utils import render_conversation_for_completion
 
-    examples = []
-    with open(filepath, "r") as f:
-        for i, line in enumerate(f):
-            if max_examples is not None and i >= max_examples:
-                break
+    def load_fn(max_examples=None):
+        """Load GSM8K data."""
+        return load_gsm8k_from_hf(
+            split=split, max_examples=max_examples, cache_dir=cache_dir
+        )
 
-            item = json.loads(line)
-            question = item["question"]
-            answer = item["answer"]
+    def eval_fn(example, generated_text, return_details=False):
+        """Evaluate a GSM8K prediction."""
+        ground_truth_answer = example["answer"]
+        is_correct = evaluate_gsm8k(ground_truth_answer, generated_text)
+        # if is_correct:
+        #     print(f"{'='*80}")
+        #     print(f"Reference answer: {ground_truth_answer}")
+        #     print(f"{'-'*80}")
+        #     print(f"Predicted answer: {generated_text}")
+        #     print(f"{'='*80}")
 
-            examples.append(
-                {
-                    "question": question,
-                    "answer": answer,
-                    "conversation": format_gsm8k_conversation(question, answer),
-                }
-            )
+        if return_details:
+            # Extract answers for comparison
+            ref_answer = extract_answer(ground_truth_answer)
+            pred_answer = extract_answer(generated_text)
 
-    return examples
+            return {
+                "success": is_correct,
+                "reference_answer": ref_answer,
+                "predicted_answer": pred_answer,
+            }
+
+        return is_correct
+
+    def render_fn(example):
+        """Render GSM8K conversation to prompt tokens."""
+        conversation = example["conversation"]
+        return render_conversation_for_completion(conversation, tokenizer)
+
+    # Register with evaluator
+    evaluator.register_task(
+        "GSM8K",
+        {
+            "load_fn": load_fn,
+            "eval_fn": eval_fn,
+            "render_fn": render_fn,
+        },
+    )

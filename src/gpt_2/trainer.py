@@ -235,8 +235,13 @@ class Trainer:
 
         # Initialize ChatCORE evaluator if requested (for generative evaluation)
         if self.run_chatcore_evals:
+            from eval_tasks.chat_core.arc_challenge import \
+                setup_arc_challenge_task
+            from eval_tasks.chat_core.arc_easy import setup_arc_task
             from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
-            from eval_tasks.chat_core.utils import setup_gsm8k_task
+            from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
+            from eval_tasks.chat_core.humaneval import setup_humaneval_task
+            from eval_tasks.chat_core.mmlu import setup_mmlu_task
 
             enc, _ = get_custom_tokenizer()
             self.chatcore_evaluator = ChatCoreEvaluator(
@@ -247,7 +252,7 @@ class Trainer:
                 ddp=self.ddp,
                 ddp_rank=self.ddp_rank,
                 ddp_world_size=self.ddp_world_size,
-                max_examples=None,  # Use full test set for final evaluation
+                max_examples=self.config.chat_core_max_examples,  # Use full test set for final evaluation
                 num_samples=self.config.chat_core_num_samples,
                 max_tokens=self.config.chat_core_max_tokens,
                 temperature=self.config.chat_core_temperature,
@@ -262,9 +267,33 @@ class Trainer:
                 split="test",
                 cache_dir=self.config.chat_core_hf_cache_dir,
             )
-            # Future: Add more tasks here
-            # setup_mmlu_task(self.chatcore_evaluator, enc, split="test")
-            # setup_arc_task(self.chatcore_evaluator, enc, split="test")
+            setup_humaneval_task(
+                self.chatcore_evaluator,
+                enc,
+                cache_dir=self.config.chat_core_hf_cache_dir,
+                shuffle_seed=42,
+            )
+            setup_arc_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="ARC-Easy",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
+            setup_arc_challenge_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="ARC-Challenge",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
+            setup_mmlu_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="all",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
         else:
             self.chatcore_evaluator = None
 
@@ -277,33 +306,64 @@ class Trainer:
         )
 
         if self.checkpoint_path:
-            # For mid-training: only load model weights (fresh optimizer)
-            # For resuming pretraining: load both model and optimizer state
+            # Determine checkpoint source
+            is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
+            is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
+
+            # Define training scenario flags
+            is_rollover = self.mid_training and is_pretrain_ckpt
+            is_resume_pretrain = not self.mid_training and is_pretrain_ckpt
+            is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+
+            # Load optimizer only when resuming (not when rolling over)
+            should_load_optimizer = not is_rollover
+
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
                 model=self.raw_model,
                 device=self.device,
-                optimizer=None if self.mid_training else self.optimizer,
+                optimizer=self.optimizer if should_load_optimizer else None,
                 master_process=self.master_process,
             )
             if checkpoint_result["config"]:
                 self.config = checkpoint_result["config"]
 
-            if self.mid_training:
-                # LOADING from checkpoint will override configs in the config file so make sure to override them here, if you need to change them.
+            # Reset training counters only when rolling over
+            if is_rollover:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
-                self.config.generation_max_length = 256
-                # Override checkpoint interval for mid-training
                 if self.master_process:
                     print(
-                        "🔄 Mid-training mode: Starting from step 0 (weights loaded, fresh optimizer)"
+                        "🔄 Rollover: Pretraining → Mid-training "
+                        "(weights loaded, fresh optimizer, counters reset)"
                     )
-            else:
+            # Keep checkpoint counters when resuming
+            elif is_resume_pretrain or is_resume_midtrain:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
+
+                if self.master_process:
+                    mode = "pretraining" if is_resume_pretrain else "mid-training"
+                    print(
+                        f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
+                        f"step {self.start_step}, global_step {self.start_global_step} "
+                        "(weights + optimizer loaded)"
+                    )
+            else:
+                # Abort if checkpoint scenario is not recognized
+                raise ValueError(
+                    f"Unrecognized checkpoint scenario!\n"
+                    f"  Checkpoint path: {self.checkpoint_path}\n"
+                    f"  mid_training flag: {self.mid_training}\n"
+                    f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
+                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n\n"
+                    f"Expected checkpoint path patterns:\n"
+                    f"  - For rollover: mid_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: mid_training=False + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path"
+                )
 
             # Handle epoch boundary for resumed checkpoints
             if self.start_step >= self.max_steps:
@@ -559,26 +619,28 @@ class Trainer:
                 # Increment global step counter
                 global_step += 1
 
-        # Run ChatCORE evaluation after training completes
-        if self.run_chatcore_evals:
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("🎯 Running ChatCORE evaluation on final model...")
-                print("=" * 80 + "\n")
+            # Run ChatCORE evaluation after each epoch
+            if self.run_chatcore_evals:
+                if self.master_process:
+                    print("\n" + "=" * 80)
+                    print(
+                        f"🎯 Running ChatCORE evaluation after Epoch {epoch+1}/{self.num_epochs}..."
+                    )
+                    print("=" * 80 + "\n")
 
-            chatcore_results = self.chatcore_evaluator.evaluate_all_tasks(
-                step=global_step, global_step=global_step
-            )
+                chatcore_results = self.chatcore_evaluator.evaluate_all_tasks(
+                    step=step, global_step=global_step
+                )
 
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("📊 FINAL ChatCORE RESULTS:")
-                for task_name, results in chatcore_results.items():
-                    accuracy = results["accuracy"]
-                    correct = results["correct"]
-                    total = results["total"]
-                    print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
-                print("=" * 80 + "\n")
+                if self.master_process:
+                    print("\n" + "=" * 80)
+                    print(f"📊 ChatCORE RESULTS (Epoch {epoch+1}/{self.num_epochs}):")
+                    for task_name, results in chatcore_results.items():
+                        accuracy = results["accuracy"]
+                        correct = results["correct"]
+                        total = results["total"]
+                        print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
+                    print("=" * 80 + "\n")
 
         # Training complete
         if self.master_process:

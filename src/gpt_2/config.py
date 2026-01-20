@@ -89,6 +89,9 @@ class GPTConfig:
     # ChatCORE Evaluation (generative tasks like GSM8K)
     # ========================================================================
     chat_core_num_samples: int = 1  # Samples to generate per problem (for pass@k)
+    chat_core_max_examples: int = (
+        500  # Max examples per task (for faster evals during training)
+    )
     chat_core_max_tokens: int = 512  # Maximum tokens per generation
     chat_core_temperature: float = 0.0  # Sampling temperature (0.0 = greedy decoding)
     chat_core_top_k: int = 50  # Top-k filtering for sampling
