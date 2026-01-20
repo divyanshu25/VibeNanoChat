@@ -83,45 +83,189 @@ def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[in
     return tokens
 
 
-def setup_gsm8k_task(
-    evaluator,
-    tokenizer,
-    split: str = "test",
-    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
-):
+def render_mc(question: str, letters: List[str], choices: List[str]) -> str:
     """
-    Setup GSM8K task with the evaluator.
+    Render a multiple-choice question in a standardized format.
+
+    This follows the same format used in nanochat. Key design decisions:
+    1. Letter appears AFTER the choice text for better token binding in small models
+    2. No whitespace between delimiter (=) and letter to ensure correct tokenization
 
     Args:
-        evaluator: ChatCoreEvaluator instance
-        tokenizer: Tokenizer to use for encoding
-        split: Dataset split ('train' or 'test')
-        cache_dir: Directory to cache the downloaded HuggingFace dataset
-    """
-    from .gsm8k import evaluate_gsm8k, load_gsm8k_from_hf
+        question: The question text
+        letters: List of answer letters (e.g., ["A", "B", "C", "D"])
+        choices: List of choice texts corresponding to each letter
 
-    def load_fn(max_examples=None):
-        """Load GSM8K data."""
-        return load_gsm8k_from_hf(
-            split=split, max_examples=max_examples, cache_dir=cache_dir
+    Returns:
+        Formatted multiple-choice question string
+
+    Example:
+        >>> render_mc("What color is the sky?", ["A", "B"], ["Blue", "Red"])
+        'Multiple Choice question: What color is the sky?\\n- Blue=A\\n- Red=B\\n\\nRespond only with the letter of the correct answer.'
+    """
+    query = f"Multiple Choice question: {question}\n"
+    query += "".join(
+        [f"{letter}. {choice}\n" for letter, choice in zip(letters, choices)]
+    )
+    query += "\nOnly one choice is correct. Start your response with the letter of the correct answer."
+    return query
+
+
+def format_arc_conversation(
+    question: str, choices_text: List[str], choices_labels: List[str], answer_key: str
+) -> Dict:
+    """
+    Format an ARC example as a conversation.
+
+    Args:
+        question: The question text
+        choices_text: List of choice texts
+        choices_labels: List of choice labels (e.g., ["A", "B", "C", "D"])
+        answer_key: The correct answer letter (e.g., "A")
+
+    Returns:
+        Conversation dict with 'messages' and 'letters' keys
+        Example:
+        {
+            "messages": [
+                {"role": "user", "content": "Multiple Choice question: ..."},
+                {"role": "assistant", "content": "A"}
+            ],
+            "letters": ["A", "B", "C", "D"]
+        }
+    """
+    # Render the question in multiple-choice format
+    user_message = render_mc(question, choices_labels, choices_text)
+
+    messages = [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": answer_key},
+    ]
+
+    conversation = {
+        "messages": messages,
+        "letters": choices_labels,  # Useful for evaluation and letter constraint
+    }
+    return conversation
+
+
+def evaluate_arc(ground_truth_letter: str, predicted_text: str) -> bool:
+    """
+    Evaluate an ARC prediction against the ground truth.
+
+    Extracts the first letter from the predicted text and compares it to
+    the ground truth answer letter. This is more lenient than requiring
+    an exact match, as it handles cases where the model may generate
+    additional text.
+
+    Args:
+        ground_truth_letter: The correct answer letter (e.g., "A")
+        predicted_text: The model's generated response text
+
+    Returns:
+        True if the predicted answer matches ground truth, False otherwise
+
+    Examples:
+        >>> evaluate_arc("A", "A")
+        True
+        >>> evaluate_arc("B", "B is the correct answer")
+        True
+        >>> evaluate_arc("C", "The answer is D")
+        False
+        >>> evaluate_arc("A", "")
+        False
+    """
+    if not predicted_text:
+        return False
+
+    # Extract the first character (should be the letter)
+    # Strip whitespace and take the first character
+    predicted_text = predicted_text.strip()
+    if not predicted_text:
+        return False
+
+    predicted_letter = predicted_text[0].upper()
+
+    return predicted_letter == ground_truth_letter.upper()
+
+
+def load_arc_from_hf(
+    subset: str = "ARC-Easy",
+    split: str = "test",
+    max_examples: Optional[int] = None,
+    cache_dir: Optional[str] = "/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+    shuffle_seed: int = 42,
+) -> List[Dict]:
+    """
+    Load ARC dataset from HuggingFace.
+
+    Args:
+        subset: Dataset subset ('ARC-Easy' or 'ARC-Challenge')
+        split: Dataset split to load ('train', 'validation', or 'test')
+        max_examples: Optional limit on number of examples to load
+        cache_dir: Directory to cache the downloaded dataset
+        shuffle_seed: Random seed for shuffling (default: 42 for reproducibility)
+
+    Returns:
+        List of examples, each with 'question', 'answer', 'choices', 'conversation' keys
+
+    Note:
+        Requires 'datasets' package: pip install datasets
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError(
+            "Loading ARC requires the 'datasets' package. "
+            "Install with: pip install datasets"
         )
 
-    def eval_fn(example, generated_text):
-        """Evaluate a GSM8K prediction."""
-        ground_truth_answer = example["answer"]
-        return evaluate_gsm8k(ground_truth_answer, generated_text)
+    # Validate inputs
+    assert subset in [
+        "ARC-Easy",
+        "ARC-Challenge",
+    ], f"ARC subset must be 'ARC-Easy' or 'ARC-Challenge', got: {subset}"
+    assert split in [
+        "train",
+        "validation",
+        "test",
+    ], f"ARC split must be 'train', 'validation', or 'test', got: {split}"
 
-    def render_fn(example):
-        """Render GSM8K conversation to prompt tokens."""
-        conversation = example["conversation"]
-        return render_conversation_for_completion(conversation, tokenizer)
+    # Load from HuggingFace with specified cache directory
+    dataset = load_dataset("allenai/ai2_arc", subset, split=split, cache_dir=cache_dir)
 
-    # Register with evaluator
-    evaluator.register_task(
-        "GSM8K",
-        {
-            "load_fn": load_fn,
-            "eval_fn": eval_fn,
-            "render_fn": render_fn,
-        },
-    )
+    # Shuffle for variety (deterministic with seed)
+    dataset = dataset.shuffle(seed=shuffle_seed)
+
+    # Limit examples if requested
+    if max_examples is not None:
+        dataset = dataset.select(range(min(max_examples, len(dataset))))
+
+    # Convert to our format
+    examples = []
+    for item in dataset:
+        question = item["question"]
+        choices_text = item["choices"]["text"]
+        choices_labels = item["choices"]["label"]
+        answer_key = item["answerKey"]
+
+        # Sanity check
+        assert (
+            answer_key in choices_labels
+        ), f"ARC answer {answer_key} must be one of {choices_labels}"
+
+        examples.append(
+            {
+                "question": question,
+                "answer": answer_key,
+                "choices": {
+                    "text": choices_text,
+                    "label": choices_labels,
+                },
+                "conversation": format_arc_conversation(
+                    question, choices_text, choices_labels, answer_key
+                ),
+            }
+        )
+
+    return examples
