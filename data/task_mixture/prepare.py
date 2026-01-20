@@ -16,6 +16,11 @@ Output:
 - val.bin: Concatenated tokenized data for validation
 - metadata.json: Token statistics and special token mapping
 
+Note:
+    This script uses the reusable dataloaders from src/dataloaders/ (SmolTalkDataLoader,
+    MMLUDataLoader, and GSM8KDataLoader) to ensure consistency with evaluation code and
+    enable dataset reuse across different parts of the codebase.
+
 Usage:
     python data/task_mixture/prepare.py
 
@@ -31,11 +36,14 @@ import shutil
 import sys
 
 import numpy as np
-from datasets import concatenate_datasets, load_dataset
+from datasets import concatenate_datasets
 from tqdm import tqdm
 
 # Add src to path so we can import from gpt_2 module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+from dataloaders.gsm8k_dataloader import GSM8KDataLoader
+from dataloaders.mmlu_dataloader import MMLUDataLoader
+from dataloaders.smoltalk_dataloader import SmolTalkDataLoader
 from gpt_2.utils import get_custom_tokenizer
 
 # Number of workers for parallel dataset processing (using HuggingFace datasets .map())
@@ -86,8 +94,8 @@ def format_mmlu(example):
     """
     Format MMLU multiple-choice question to chat format.
 
-    MMLU structure:
-        {'question': '...', 'choices': ['A', 'B', 'C', 'D'], 'answer': 0, 'subject': 'physics'}
+    Uses the MMLUDataLoader formatting logic but adapted for training format
+    (includes both question and answer, unlike evaluation format).
 
     Output format:
         <|bos|><|user_start|>Subject: physics
@@ -132,11 +140,8 @@ def format_gsm8k(example):
     """
     Format GSM8K math problem to chat format with structured tool calls.
 
-    GSM8K structure:
-        {'question': 'Janet has 3 apples...', 'answer': 'Janet has 3 apples. She buys 2 more... #### 5'}
-
-    The answer contains calculator tool calls in <<expression=result>> format.
-    We parse these and format them as structured tool invocations.
+    Uses the GSM8KDataLoader parsing logic but adapted for training format
+    (includes both question and full answer with tool calls).
 
     Output format:
         <|bos|><|user_start|>Janet has 3 apples...<|user_end|>
@@ -149,8 +154,8 @@ def format_gsm8k(example):
     question = example["question"]
     answer = example["answer"]  # Contains reasoning + "#### final_answer"
 
-    # Parse tool calls from the answer
-    # GSM8K uses <<expression=result>> format for calculator calls
+    # Use GSM8KDataLoader's parsing logic to parse tool calls
+    # This ensures consistency with evaluation code
     formatted_answer_parts = []
 
     # Split on tool call markers: <<...>>
@@ -231,24 +236,30 @@ def load_and_format_datasets(split, cache_dir=None):
 
     print(f"\n📚 Loading SmolTalk ({split})...")
     try:
-        # Load the "all" config which includes all conversation types
-        smoltalk = load_dataset(
-            "HuggingFaceTB/smoltalk", "all", split=split, cache_dir=cache_dir
-        )
-        print(f"  Loaded {len(smoltalk):,} examples, sampling randomly...")
-
-        # Randomly sample to get desired number of examples
-        # Using seed=42 for reproducibility
+        # Use SmolTalkDataLoader for consistent loading
         target_samples = (
             SMOLTALK_TRAIN_SAMPLES if split == "train" else SMOLTALK_TEST_SAMPLES
         )
-        if len(smoltalk) > target_samples:
-            smoltalk = smoltalk.shuffle(seed=42).select(range(target_samples))
-            print(f"  Sampled {len(smoltalk):,} examples")
+
+        smoltalk_loader = SmolTalkDataLoader(
+            config="all", split=split, cache_dir=cache_dir, shuffle_seed=42
+        )
+
+        # Load data using the dataloader (returns list of dicts)
+        # The dataloader handles shuffling and sampling
+        smoltalk_examples = smoltalk_loader.load_data(max_examples=target_samples)
+
+        print(
+            f"  Loaded {len(smoltalk_examples):,} examples (sampled via SmolTalkDataLoader)"
+        )
+
+        # Convert back to HuggingFace dataset format for consistency
+        from datasets import Dataset
+
+        smoltalk = Dataset.from_list(smoltalk_examples)
 
         # Apply formatting function to convert to chat format
         # remove_columns removes original columns, keeping only 'text'
-
         smoltalk = smoltalk.map(
             format_smoltalk, remove_columns=smoltalk.column_names, num_proc=NUM_PROC
         )
@@ -272,12 +283,26 @@ def load_and_format_datasets(split, cache_dir=None):
         # For validation, we use the validation split (1,531 examples)
         mmlu_split = "auxiliary_train" if split == "train" else "validation"
 
-        mmlu = load_dataset("cais/mmlu", "all", split=mmlu_split, cache_dir=cache_dir)
+        # Use MMLUDataLoader for consistent loading
+        mmlu_loader = MMLUDataLoader(
+            subset="all", split=mmlu_split, cache_dir=cache_dir, shuffle_seed=42
+        )
 
+        # Load data using the dataloader (returns list of dicts)
+        mmlu_examples = mmlu_loader.load_data()
+
+        # Convert back to HuggingFace dataset format for consistency
+        from datasets import Dataset
+
+        mmlu = Dataset.from_list(mmlu_examples)
+
+        # Apply formatting to convert to chat format
         mmlu = mmlu.map(
             format_mmlu, remove_columns=mmlu.column_names, num_proc=NUM_PROC
         )
-        print(f"  ✓ MMLU ({mmlu_split}): {len(mmlu):,} examples")
+        print(
+            f"  ✓ MMLU ({mmlu_split}): {len(mmlu):,} examples (loaded via MMLUDataLoader)"
+        )
 
         print_sample_example("MMLU", mmlu[0]["text"])
         datasets.append(mmlu)
@@ -291,11 +316,24 @@ def load_and_format_datasets(split, cache_dir=None):
 
     print(f"\n📚 Loading GSM8K ({split})...")
     try:
-        gsm8k = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
+        # Use GSM8KDataLoader for consistent loading
+        gsm8k_loader = GSM8KDataLoader(
+            split=split, cache_dir=cache_dir, shuffle_seed=42
+        )
+
+        # Load data using the dataloader (returns list of dicts)
+        gsm8k_examples = gsm8k_loader.load_data()
+
+        # Convert back to HuggingFace dataset format for consistency
+        from datasets import Dataset
+
+        gsm8k = Dataset.from_list(gsm8k_examples)
+
+        # Apply formatting to convert to chat format
         gsm8k = gsm8k.map(
             format_gsm8k, remove_columns=gsm8k.column_names, num_proc=NUM_PROC
         )
-        print(f"  ✓ GSM8K: {len(gsm8k):,} examples")
+        print(f"  ✓ GSM8K: {len(gsm8k):,} examples (loaded via GSM8KDataLoader)")
 
         print_sample_example("GSM8K", gsm8k[0]["text"])
         datasets.append(gsm8k)
