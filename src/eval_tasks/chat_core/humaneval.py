@@ -96,7 +96,7 @@ def format_humaneval_conversation(prompt: str, canonical_solution: str) -> Dict:
 
     Args:
         prompt: The function signature and docstring
-        canonical_solution: The correct implementation
+        canonical_solution: The correct implementation (function body only)
 
     Returns:
         Conversation dict with 'messages' key containing user and assistant messages
@@ -104,19 +104,23 @@ def format_humaneval_conversation(prompt: str, canonical_solution: str) -> Dict:
         {
             "messages": [
                 {"role": "user", "content": "Complete the following Python function:\n\ndef add(a, b):\n    '''Add two numbers'''\n    "},
-                {"role": "assistant", "content": "    return a + b"},
+                {"role": "assistant", "content": "def add(a, b):\n    '''Add two numbers'''\n    return a + b"},
             ]
         }
     """
     # Add instruction to make the task clear
     user_message = f"Complete the following Python function:\n\n{prompt}"
 
+    # The assistant outputs the complete function (signature + body)
+    # This matches the nanochat approach and what models actually do
+    complete_solution = f"{prompt}{canonical_solution}"
+
     messages = [
         {"role": "user", "content": user_message},
         {
             "role": "assistant",
-            "content": canonical_solution,
-        },  # Only the solution, not the prompt
+            "content": complete_solution,
+        },
     ]
 
     return {"messages": messages}
@@ -168,6 +172,8 @@ def evaluate_humaneval(
     completion_code = extract_program(predicted_text)
 
     # Construct the full program to execute
+    # The completion should contain the full function (signature + body)
+    # We only extract imports from the prompt to prepend if needed
     program = (
         imports
         + "\n\n"

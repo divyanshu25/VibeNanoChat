@@ -353,6 +353,7 @@ def execute_code(
 
     if p.is_alive():
         p.kill()
+        p.join()  # Reap the zombie process to reclaim resources
         return ExecutionResult(
             success=False,
             stdout="",
