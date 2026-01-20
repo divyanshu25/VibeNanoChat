@@ -344,14 +344,22 @@ class ChatCoreEvaluator:
         eval_details,
         total_count,
         num_examples,
+        prompt_tokens=None,
     ):
         """Print detailed output for a single evaluation example."""
         print(f"\n{'='*80}")
         print(f"📝 Example {total_count}/{num_examples}")
         print(f"{'='*80}")
 
-        # Show prompt or question
-        if "prompt" in example:
+        # Show decoded prompt tokens if available
+        if prompt_tokens is not None:
+            print("🔵 PROMPT (decoded from tokens):")
+            print(f"{'='*80}")
+            decoded_prompt = self.tokenizer.decode(prompt_tokens)
+            print(f"{decoded_prompt}")
+            print(f"{'='*80}")
+        # Fallback to showing prompt or question from example
+        elif "prompt" in example:
             print("🔵 PROMPT:")
             print(f"{'='*80}")
             print(f"{example['prompt']}")
@@ -659,6 +667,7 @@ class ChatCoreEvaluator:
                         eval_details,
                         total_count,
                         num_examples,
+                        prompt_tokens,
                     )
 
                 # Progress logging (only on master)

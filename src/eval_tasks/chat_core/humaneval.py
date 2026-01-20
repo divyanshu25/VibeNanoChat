@@ -103,17 +103,20 @@ def format_humaneval_conversation(prompt: str, canonical_solution: str) -> Dict:
         Example:
         {
             "messages": [
-                {"role": "user", "content": "def add(a, b):\\n    '''Add two numbers'''\\n    "},
-                {"role": "assistant", "content": "return a + b"},
+                {"role": "user", "content": "Complete the following Python function:\n\ndef add(a, b):\n    '''Add two numbers'''\n    "},
+                {"role": "assistant", "content": "    return a + b"},
             ]
         }
     """
-    # The complete solution includes the prompt (signature) and the solution
-    complete_solution = f"{prompt}\n{canonical_solution}"
+    # Add instruction to make the task clear
+    user_message = f"Complete the following Python function:\n\n{prompt}"
 
     messages = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": complete_solution},
+        {"role": "user", "content": user_message},
+        {
+            "role": "assistant",
+            "content": canonical_solution,
+        },  # Only the solution, not the prompt
     ]
 
     return {"messages": messages}

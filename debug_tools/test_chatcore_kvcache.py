@@ -53,6 +53,7 @@ from eval_tasks.chat_core.arc_easy import setup_arc_task
 from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
 from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
 from eval_tasks.chat_core.humaneval import setup_humaneval_task
+from eval_tasks.chat_core.mmlu import setup_mmlu_task
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
@@ -260,6 +261,23 @@ def main():
         print("✅ ARC-Challenge task registered")
     except Exception as e:
         print(f"❌ Failed to register ARC-Challenge: {e}")
+        return
+
+    # =========================================================================
+    # STEP 6.7: Register MMLU task
+    # =========================================================================
+    print("\n📋 Registering MMLU task...")
+    try:
+        setup_mmlu_task(
+            evaluator=evaluator,
+            tokenizer=tokenizer,
+            subset="all",
+            split="test",
+            cache_dir="/sensei-fs/users/divgoyal/nanochat_midtraining_data",
+        )
+        print("✅ MMLU task registered")
+    except Exception as e:
+        print(f"❌ Failed to register MMLU: {e}")
         return
 
     # =========================================================================

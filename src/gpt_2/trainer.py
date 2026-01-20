@@ -241,6 +241,7 @@ class Trainer:
             from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
             from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
             from eval_tasks.chat_core.humaneval import setup_humaneval_task
+            from eval_tasks.chat_core.mmlu import setup_mmlu_task
 
             enc, _ = get_custom_tokenizer()
             self.chatcore_evaluator = ChatCoreEvaluator(
@@ -286,9 +287,13 @@ class Trainer:
                 split="test",
                 cache_dir=self.config.chat_core_hf_cache_dir,
             )
-            # Future: Add more tasks here
-            # setup_mmlu_task(self.chatcore_evaluator, enc, split="test")
-            # For ARC-Challenge: setup_arc_task(self.chatcore_evaluator, enc, subset="ARC-Challenge", split="test")
+            setup_mmlu_task(
+                self.chatcore_evaluator,
+                enc,
+                subset="all",
+                split="test",
+                cache_dir=self.config.chat_core_hf_cache_dir,
+            )
         else:
             self.chatcore_evaluator = None
 

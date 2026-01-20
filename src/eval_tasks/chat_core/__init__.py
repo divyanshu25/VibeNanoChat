@@ -18,6 +18,7 @@ from .arc_easy import setup_arc_task
 from .evaluator import ChatCoreEvaluator
 from .gsm8k import setup_gsm8k_task
 from .humaneval import setup_humaneval_task
+from .mmlu import setup_mmlu_task
 
 __all__ = [
     "ChatCoreEvaluator",
@@ -25,4 +26,5 @@ __all__ = [
     "setup_humaneval_task",
     "setup_arc_task",
     "setup_arc_challenge_task",
+    "setup_mmlu_task",
 ]

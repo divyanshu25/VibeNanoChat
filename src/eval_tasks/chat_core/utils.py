@@ -105,9 +105,9 @@ def render_mc(question: str, letters: List[str], choices: List[str]) -> str:
     """
     query = f"Multiple Choice question: {question}\n"
     query += "".join(
-        [f"- {choice}={letter}\n" for letter, choice in zip(letters, choices)]
+        [f"{letter}. {choice}\n" for letter, choice in zip(letters, choices)]
     )
-    query += "\nRespond only with the letter of the correct answer."
+    query += "\nOnly one choice is correct. Start your response with the letter of the correct answer."
     return query
 
 
