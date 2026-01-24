@@ -131,7 +131,7 @@ def format_mmlu(example):
     text = (
         f"<|bos|>"
         f"<|user_start|>{user_content}<|user_end|>"
-        f"<|assistant_start|>The answer is {correct_answer}<|assistant_end|>"
+        f"<|assistant_start|>{correct_answer}<|assistant_end|>"
     )
     return {"text": text}
 

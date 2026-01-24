@@ -146,16 +146,19 @@ class MMLUDataLoader:
         self.cache_dir = cache_dir
         self.shuffle_seed = shuffle_seed
 
-    def load_data(self, max_examples: Optional[int] = None) -> List[Dict]:
+    def load_data(
+        self, max_examples: Optional[int] = None, format_as_conversation: bool = False
+    ) -> List[Dict]:
         """
         Load MMLU dataset from HuggingFace.
 
         Args:
             max_examples: Optional limit on number of examples to load
+            format_as_conversation: If True, return examples in conversation format
 
         Returns:
             List of examples, each with 'question', 'choices', 'answer', 'subject',
-            'answer_letter' keys
+            'answer_letter' keys (or conversation format if format_as_conversation=True)
 
         Note:
             Requires 'datasets' package: pip install datasets
@@ -207,6 +210,19 @@ class MMLUDataLoader:
                     "raw_data": item,  # Include raw data for flexibility
                 }
             )
+
+        # Optionally convert to conversation format
+        if format_as_conversation:
+            conversations = []
+            for example in examples:
+                conv = self.format_conversation(
+                    example["question"],
+                    example["choices"],
+                    example["answer"],
+                    example["subject"],
+                )
+                conversations.append(conv)
+            return conversations
 
         return examples
 
@@ -271,3 +287,19 @@ class MMLUDataLoader:
 
         # Compare (case-insensitive)
         return predicted_text[0].upper() == ground_truth_answer.upper()
+
+
+if __name__ == "__main__":
+    import json
+
+    # Generate examples
+    loader = MMLUDataLoader(subset="abstract_algebra", split="test")
+    examples = loader.load_data(max_examples=3)
+
+    # Pretty-print the JSON
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'='*80}")
+        print(f"Example {i}")
+        print(f"{'='*80}\n")
+        print(json.dumps(example, indent=2, ensure_ascii=False))
+        print()

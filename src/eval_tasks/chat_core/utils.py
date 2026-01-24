@@ -88,3 +88,114 @@ def render_conversation_for_completion(conversation: Dict, tokenizer) -> List[in
     # our custom special tokens (<|bos|>, <|user_start|>, etc.)
     tokens = tokenizer.encode(prompt_text, allowed_special="all")
     return tokens
+
+
+def render_conversation_for_training(conversation: Dict, tokenizer) -> tuple:
+    """
+    Render a conversation for training, returning token IDs and a mask.
+
+    Creates a mask where 1 indicates tokens to train on (assistant responses)
+    and 0 indicates tokens to ignore (special tokens, user messages).
+
+    This is used for supervised fine-tuning (SFT) where we only want to
+    compute loss on the assistant's responses, not the user's prompts.
+
+    Args:
+        conversation: Dict with 'messages' key containing list of messages.
+                     Each message has 'role' and 'content' keys.
+        tokenizer: Tokenizer with encode method (supports allowed_special="all")
+
+    Returns:
+        Tuple of (ids, mask) where:
+        - ids: List of token IDs for the full conversation
+        - mask: List of 0/1 indicating which tokens to train on
+
+    Example:
+        >>> conversation = {
+        ...     'messages': [
+        ...         {'role': 'user', 'content': 'What is 2+2?'},
+        ...         {'role': 'assistant', 'content': '4'}
+        ...     ]
+        ... }
+        >>> ids, mask = render_conversation_for_training(conversation, tokenizer)
+        # ids: tokens for full conversation
+        # mask: [0,0,0,...,1,1,1] (0 for user, 1 for assistant)
+    """
+    try:
+        messages = conversation["messages"]
+        formatted_parts = []
+        mask_parts = []
+
+        # Start with BOS token
+        bos_text = "<|bos|>"
+        bos_tokens = tokenizer.encode(bos_text, allowed_special="all")
+        formatted_parts.extend(bos_tokens)
+        mask_parts.extend([0] * len(bos_tokens))  # Don't train on BOS
+
+        for msg in messages:
+            role = msg["role"].lower()
+            content = msg["content"]
+
+            # Extract text content from structured or string format
+            if isinstance(
+                content, str
+            ):  # if the content is a simple string, just add it to the text_content
+                text_content = content
+            elif isinstance(
+                content, list
+            ):  # if the content is a list of parts, we need to handle the parts
+                # Handle structured content with parts (e.g., SpellingBee, GSM8K with tool calls)
+                text_parts = []
+                for part in content:
+                    if part.get("type") == "text":
+                        text_parts.append(part["text"])
+                    elif part.get("type") == "python":
+                        # Python tool call: <|python|>expression<|python_end|>
+                        text_parts.append(f"<|python|>{part['text']}<|python_end|>")
+                    elif part.get("type") == "output_start":
+                        # Python output: <|output_start|>result<|output_end|>
+                        text_parts.append(
+                            f"<|output_start|>{part['text']}<|output_end|>"
+                        )
+                text_content = "".join(text_parts)
+            else:  # if the content is not a string or a list of parts, convert it to a string
+                text_content = str(content)
+
+            if role == "user":
+                # User message: <|user_start|>content<|user_end|>
+                user_text = f"<|user_start|>{text_content}<|user_end|>"
+                user_tokens = tokenizer.encode(user_text, allowed_special="all")
+                formatted_parts.extend(user_tokens)
+                mask_parts.extend([0] * len(user_tokens))  # Don't train on user tokens
+
+            elif role == "assistant":
+                # Assistant message: <|assistant_start|>content<|assistant_end|>
+                # Train on content and end token, but not start token
+                start_text = "<|assistant_start|>"
+                start_tokens = tokenizer.encode(start_text, allowed_special="all")
+                formatted_parts.extend(start_tokens)
+                mask_parts.extend([0] * len(start_tokens))  # Don't train on start token
+
+                # Content + end token (train on these)
+                content_text = f"{text_content}<|assistant_end|>"
+                content_tokens = tokenizer.encode(content_text, allowed_special="all")
+                formatted_parts.extend(content_tokens)
+                mask_parts.extend(
+                    [1] * len(content_tokens)
+                )  # Train on assistant content
+            else:
+                # Handle other roles (system, etc.) as user for consistency
+                other_text = f"<|user_start|>{text_content}<|user_end|>"
+                other_tokens = tokenizer.encode(other_text, allowed_special="all")
+                formatted_parts.extend(other_tokens)
+                mask_parts.extend([0] * len(other_tokens))  # Don't train on other roles
+
+        return formatted_parts, mask_parts
+
+    except Exception as e:
+        print(f"Error in render_conversation_for_training: {e}")
+        print(f"Conversation: {conversation}")
+        import traceback
+
+        traceback.print_exc()
+        raise

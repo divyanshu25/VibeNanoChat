@@ -247,3 +247,19 @@ class HumanEvalDataLoader:
             }
 
         return result.success
+
+
+if __name__ == "__main__":
+    import json
+
+    # Generate examples
+    loader = HumanEvalDataLoader()
+    examples = loader.load_data(max_examples=3)
+
+    # Pretty-print the JSON
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'='*80}")
+        print(f"Example {i}")
+        print(f"{'='*80}\n")
+        print(json.dumps(example, indent=2, ensure_ascii=False))
+        print()

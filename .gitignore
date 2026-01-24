@@ -20,6 +20,9 @@ wandb/
 # Training logs
 logs/
 
+# Cache directory (word lists, etc.)
+data/cache/
+
 # Binary files
 *.bin
 *.pt
