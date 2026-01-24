@@ -315,7 +315,10 @@ def default_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def create_sft_collate_fn(
-    tokenizer, device: torch.device, pad_token_id: Optional[int] = None
+    tokenizer,
+    device: torch.device,
+    pad_token_id: Optional[int] = None,
+    return_metadata: bool = False,
 ):
     """
     Create a collate function for SFT training that tokenizes conversations and creates masks.
@@ -326,9 +329,10 @@ def create_sft_collate_fn(
         tokenizer: Tokenizer with encode method (from get_custom_tokenizer)
         device: Device to move tensors to (cuda/cpu)
         pad_token_id: Token ID for padding (default: uses <|assistant_end|>)
+        return_metadata: If True, return (inputs, targets, metadata) instead of (inputs, targets)
 
     Returns:
-        Collate function that takes a batch and returns (inputs, targets) tensors
+        Collate function that takes a batch and returns (inputs, targets) or (inputs, targets, metadata)
 
     Example:
         >>> from gpt_2.utils import get_custom_tokenizer
@@ -357,10 +361,16 @@ def create_sft_collate_fn(
             batch: List of example dicts with 'messages' key
 
         Returns:
-            Tuple of (inputs, targets) tensors ready for training
+            Tuple of (inputs, targets) or (inputs, targets, metadata) depending on return_metadata flag
         """
         # Import here to avoid circular dependency
         from eval_tasks.chat_core.utils import render_conversation_for_training
+
+        # Extract dataset names and other metadata (if needed)
+        if return_metadata:
+            dataset_names = [
+                example.get("dataset_name", "unknown") for example in batch
+            ]
 
         # Tokenize all conversations
         tokenized_batch = []
@@ -395,7 +405,12 @@ def create_sft_collate_fn(
         inputs = inputs.to(device)
         targets = targets.to(device)
 
-        return inputs, targets
+        # Return with or without metadata
+        if return_metadata:
+            metadata = {"dataset_names": dataset_names}
+            return inputs, targets, metadata
+        else:
+            return inputs, targets
 
     return collate_fn
 
@@ -523,8 +538,9 @@ if __name__ == "__main__":
 
     from dataloaders.arc_dataloader import ARCDataLoader
     from dataloaders.gsm8k_dataloader import GSM8KDataLoader
-    from dataloaders.mmlu_dataloader import MMLUDataLoader
+    # from dataloaders.mmlu_dataloader import MMLUDataLoader
     from dataloaders.simplespelling_dataloader import SimpleSpellingDataLoader
+    from dataloaders.smoltalk_dataloader import SmolTalkDataLoader
     from dataloaders.spellingbee_dataloader import SpellingBeeDataLoader
     from gpt_2.config import GPTConfig
     from gpt_2.utils import get_custom_tokenizer
@@ -540,26 +556,39 @@ if __name__ == "__main__":
     # Load actual datasets (small samples for demo)
     # Use format_as_conversation=True to get data in conversation format directly
     print("Loading datasets...")
-    arc_data = ARCDataLoader(
+    # 1. -- ARC-Easy --
+    arc_easy_data = ARCDataLoader(
         subset="ARC-Easy", split="train", cache_dir=cache_dir
-    ).load_data(max_examples=50, format_as_conversation=True)
+    ).load_data(format_as_conversation=True)
+
+    # 2. -- ARC-Challenge --
+    arc_challenge_data = ARCDataLoader(
+        subset="ARC-Challenge", split="train", cache_dir=cache_dir
+    ).load_data(format_as_conversation=True)
+
+    # 3. -- GSM8K --
     gsm8k_data = GSM8KDataLoader(split="train", cache_dir=cache_dir).load_data(
-        max_examples=50, format_as_conversation=True
+        format_as_conversation=True
     )
-    mmlu_data = MMLUDataLoader(
-        subset="auxiliary_train", split="train", cache_dir=cache_dir
-    ).load_data(max_examples=30, format_as_conversation=True)
-    # SpellingBee and SimpleSpelling already return conversation format by default
+    # 4. -- SmolTalk --
+    smoltalk_data = SmolTalkDataLoader(split="train", cache_dir=cache_dir).load_data(
+        max_examples=10000
+    )
+
+    # 5. -- SpellingBee --
     spelling_bee_data = SpellingBeeDataLoader(
-        size=30, split="train", cache_dir=cache_dir
-    ).load_data()
-    simple_spelling_data = SimpleSpellingDataLoader(
-        size=20, split="train", cache_dir=cache_dir
+        size=300, split="train", cache_dir=cache_dir
     ).load_data()
 
-    print(f"✓ Loaded {len(arc_data)} ARC examples")
+    # 6. -- SimpleSpelling --
+    simple_spelling_data = SimpleSpellingDataLoader(
+        size=300, split="train", cache_dir=cache_dir
+    ).load_data()
+
+    print(f"✓ Loaded {len(arc_easy_data)} ARC-Easy examples")
+    print(f"✓ Loaded {len(arc_challenge_data)} ARC-Challenge examples")
     print(f"✓ Loaded {len(gsm8k_data)} GSM8K examples")
-    print(f"✓ Loaded {len(mmlu_data)} MMLU examples")
+    print(f"✓ Loaded {len(smoltalk_data)} SmolTalk examples")
     print(f"✓ Loaded {len(spelling_bee_data)} SpellingBee examples")
     print(f"✓ Loaded {len(simple_spelling_data)} SimpleSpelling examples\n")
 
@@ -570,20 +599,22 @@ if __name__ == "__main__":
 
     enc, _ = get_custom_tokenizer()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    collate_fn = create_sft_collate_fn(enc, device)
+    pad_token_id = enc.encode("<|assistant_end|>", allowed_special="all")[0]
+    collate_fn = create_sft_collate_fn(enc, device, return_metadata=True)
 
     dataloader = create_multiplex_dataloader(
         datasets=[
-            ("arc", arc_data),
+            ("arc_easy", arc_easy_data),
+            ("arc_challenge", arc_challenge_data),
             ("gsm8k", gsm8k_data),
-            ("mmlu", mmlu_data),
+            ("smoltalk", smoltalk_data),
             ("spelling_bee", spelling_bee_data),
             ("simple_spelling", simple_spelling_data),
         ],
-        batch_size=8,
+        batch_size=32,
         shuffle=True,
         num_workers=0,
-        sampling_strategy="uniform",
+        sampling_strategy="proportional",
         collate_fn=collate_fn,
     )
 
@@ -592,32 +623,118 @@ if __name__ == "__main__":
     # Show first batch (collated and tokenized)
     print("First batch sample (tokenized):")
     batch = next(iter(dataloader))
-    inputs, targets = batch
+    inputs, targets, metadata = batch
     print(f"  Batch size: {inputs.shape[0]}")
     print(f"  Sequence length: {inputs.shape[1]}")
     print(f"  Inputs shape: {inputs.shape}")
     print(f"  Targets shape: {targets.shape}")
     print(f"  Device: {inputs.device}")
 
+    # Show decoded examples from the dataloader
+    print("\n" + "=" * 80)
+    print("Sample Decoded Examples from Batches")
+    print("(Trainable tokens shown in \033[92mGREEN\033[0m)")
+    print("=" * 80)
+
+    # ANSI color codes
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+
+    for i, batch in enumerate(dataloader):
+        if i >= 5:  # Show fewer batches
+            break
+        inputs, targets, metadata = batch
+
+        # Get first example (move to CPU for processing)
+        first_input = inputs[0].cpu().tolist()
+        first_target = targets[0].cpu().tolist()
+        first_dataset_name = metadata["dataset_names"][0]
+
+        clipped_input = first_input.copy()
+        clipped_target = first_target.copy()
+        valid_len = len(clipped_target)
+        while valid_len > 0 and clipped_target[valid_len - 1] == -1:
+            valid_len -= 1
+
+        assert (
+            clipped_target[valid_len - 1] == pad_token_id
+        ), f"Clipped target last token is not <|assistant_end|>: {clipped_target[valid_len - 1]}"
+        clipped_input = clipped_input[:valid_len]
+        clipped_target = clipped_target[:valid_len]
+
+        # import code; code.interact(local=dict(globals(), **locals()))
+
+        # Reconstruct full sequence: inputs + last target token
+        # inputs = [t0, t1, t2, ..., tn-1]
+        # targets = [t1, t2, t3, ..., tn]
+        # So the last target gives us the final token (tn)
+        full_sequence = clipped_input.copy()
+        full_sequence.append(clipped_target[-1])
+
+        # Build colored output token by token
+        colored_parts = []
+        for idx, token_id in enumerate(full_sequence):
+            # if token_id == pad_token_id and idx == len(full_sequence) - 1:
+            #     continue  # Skip padding
+
+            # Decode single token
+            token_text = enc.decode([token_id])
+
+            # Check if this token is trainable
+            # For inputs[idx], the corresponding target is targets[idx]
+            # For the last appended token, it's trainable if it came from a valid target
+            if idx < len(clipped_input):
+                is_trainable = idx < len(clipped_target) and clipped_target[idx] != -1
+            else:
+                # This is the last token we appended from targets
+                is_trainable = False
+
+            # Apply color if trainable
+            if is_trainable:
+                colored_parts.append(f"{GREEN}{token_text}{RESET}")
+            else:
+                colored_parts.append(token_text)
+
+        # Join all parts
+        colored_output = "".join(colored_parts)
+
+        # Calculate stats
+        num_trainable = sum(1 for t in clipped_target if t != -1)
+        total_tokens = len([t for t in clipped_input if t != pad_token_id])
+        train_percentage = (
+            (num_trainable / total_tokens) * 100 if total_tokens > 0 else 0
+        )
+
+        print(f"\n📝 Batch {i+1}/{10}")
+        print(f"   Shape: {inputs.shape[0]} examples × {inputs.shape[1]} tokens")
+        print(
+            f"   Training: {num_trainable}/{total_tokens} tokens ({train_percentage:.1f}%)"
+        )
+        print(f"\n   Content (clipped example, {first_dataset_name}):")
+        print(f"   {'-'*76}")
+        print(colored_output)
+        print(f"   {'-'*76}")
+
     # Show dataset distribution (create a dataloader without collate_fn to see raw data)
-    print("\nDataset distribution in first 20 batches:")
+    print("\nDataset distribution all batches:")
     raw_dataloader = create_multiplex_dataloader(
         datasets=[
-            ("arc", arc_data),
+            ("arc_easy", arc_easy_data),
+            ("arc_challenge", arc_challenge_data),
             ("gsm8k", gsm8k_data),
-            ("mmlu", mmlu_data),
+            ("smoltalk", smoltalk_data),
             ("spelling_bee", spelling_bee_data),
             ("simple_spelling", simple_spelling_data),
         ],
-        batch_size=8,
+        batch_size=32,
         shuffle=True,
         num_workers=0,
-        sampling_strategy="uniform",
+        sampling_strategy="proportional",
     )
     dataset_counts = {}
     for i, batch in enumerate(raw_dataloader):
-        if i >= 20:
-            break
+        # if i >= 20:
+        #     break
         # PyTorch's default collate converts list of dicts to dict of lists
         # So batch is a dict with 'dataset_name' key containing a list
         if isinstance(batch, dict) and "dataset_name" in batch:
