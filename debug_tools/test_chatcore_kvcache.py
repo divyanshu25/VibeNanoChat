@@ -90,7 +90,7 @@ def main():
     # =========================================================================
     # CONFIGURATION
     # =========================================================================
-    checkpoint_path = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints/model_checkpoint_global2633_midtraining.pt"
+    checkpoint_path = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints/model_checkpoint_global5267_midtraining.pt"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Evaluation settings
@@ -409,3 +409,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# RUN: uv run python test_chatcore_kvcache.py | tee view.log

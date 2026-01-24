@@ -140,8 +140,10 @@ class HumanEvalDataLoader:
         """
         imports = []
         for line in prompt.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("import ") or stripped.startswith("from "):
+            stripped = line.strip()  # this removes whitespace and comments
+            if stripped.startswith("import ") or stripped.startswith(
+                "from "
+            ):  # this checks if the line starts with import or from
                 imports.append(stripped)
             elif stripped and not stripped.startswith("#"):
                 # Stop at first non-import, non-comment line
@@ -232,6 +234,11 @@ class HumanEvalDataLoader:
             + "\n"
             + f"check({entry_point})"
         )
+
+        # print("PROGRAM (sent to execute_code):")
+        # print("=" * 80)
+        # print(program)
+        # print("=" * 80)
 
         # Execute the code in a sandbox
         result = execute_code(
