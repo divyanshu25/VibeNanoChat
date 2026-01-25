@@ -56,13 +56,16 @@ class GPT(nn.Module):
         )
 
         # Language modeling head: projects hidden states to vocabulary logits
-        # Note: We'll tie the weights with the embedding layer
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
 
-        # Weight sharing scheme: tie input and output embeddings
-        # This is a common technique in language models to reduce parameters
-        # and improve performance
-        self.transformer.wte.weight = self.lm_head.weight
+        # Weight sharing scheme: optionally tie input and output embeddings
+        # Tying weights reduces parameters and often improves performance
+        # Untying allows independent optimization of embedding and unembedding weights
+        if getattr(config, "tie_embeddings", True):
+            self.transformer.wte.weight = self.lm_head.weight
+            print("Weight tying: ENABLED (wte <-> lm_head share weights)")
+        else:
+            print("Weight tying: DISABLED (wte and lm_head have independent weights)")
 
         # Initialize all model weights using custom initialization
         self.apply(self._init_weights)
@@ -90,45 +93,95 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def configure_optimizers(self, learning_rate, weight_decay, device):
+    def estimate_flops(self):
         """
-        Configure the optimizer for training with weight decay regularization.
+        Return the estimated FLOPs per token for the model (forward + backward).
 
-        This method separates parameters into two groups:
-        - Parameters with weight decay (typically weights of linear layers)
-        - Parameters without weight decay (typically biases and embeddings)
+        Each matmul weight parameter contributes:
+        - 2 FLOPs in forward pass (multiply + accumulate)
+        - 4 FLOPs in backward pass (2x forward)
+        - Total: 6 FLOPs per parameter
+
+        Plus attention FLOPs: 12 * n_head * head_dim * seq_len
+
+        This follows the nanochat/PaLM calculation method.
+        Ref: https://medium.com/@dzmitrybahdanau/the-flops-calculus-of-language-model-training-3b19c1f025e4
+        Ref: https://arxiv.org/abs/2204.02311 (PaLM paper)
+        """
+        nparams = sum(p.numel() for p in self.parameters())
+
+        # Exclude non-matmul params: embeddings and layer norms
+        # Embeddings are lookups, not matmuls
+        # Layer norms are element-wise ops (negligible FLOPs)
+        nparams_exclude = (
+            self.transformer.wte.weight.numel()  # Token embeddings
+            + self.transformer.wpe.weight.numel()  # Position embeddings
+            + self.transformer.ln_f.weight.numel()  # Final layer norm
+            + self.transformer.ln_f.bias.numel()
+        )
+
+        # Add layer norm params from each transformer block
+        for block in self.transformer.h:
+            nparams_exclude += block.ln_1.weight.numel() + block.ln_1.bias.numel()
+            nparams_exclude += block.ln_2.weight.numel() + block.ln_2.bias.numel()
+
+        # Calculate attention FLOPs: 12 * n_head * head_dim * seq_len
+        h = self.config.n_head
+        q = self.config.n_embed // self.config.n_head  # head_dim
+        t = self.config.block_size  # sequence length
+        attn_flops = 12 * h * q * t * self.config.n_layer
+
+        # Total FLOPs: 6 per matmul param + attention FLOPs
+        num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
+        return num_flops_per_token
+
+    def num_scaling_params(self):
+        """
+        Return total number of parameters (for scaling law calculations).
+
+        Follows Chinchilla paper approach: includes all parameters.
+        Ref: https://arxiv.org/abs/2203.15556
+        """
+        return sum(p.numel() for p in self.parameters())
+
+    def configure_optimizers(self, learning_rate, weight_decay, device, config=None):
+        """
+        Configure optimizer with weight decay grouping.
+
+        Separates parameters into two groups:
+        - 2D+ parameters (weights) get weight decay
+        - 1D parameters (biases, layer norms) don't get weight decay
 
         Args:
-            learning_rate (float): Learning rate for the optimizer
+            learning_rate (float): Base learning rate for the optimizer
             weight_decay (float): Weight decay coefficient for regularization
             device (str): Device type ('cuda', 'mps', or 'cpu')
+            config (GPTConfig, optional): Config object (unused, kept for API compatibility)
 
         Returns:
             torch.optim.AdamW: Configured optimizer
         """
-        # Get all trainable parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # Get all trainable parameters with names
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
-        # Separate parameters based on dimensionality
+        # Original NanoGPT: simple weight decay grouping
         # 2D+ parameters (weights) get weight decay, 1D parameters (biases) don't
         decay_params = [p for p in param_dict.values() if p.dim() >= 2]
         nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
 
-        # Create optimizer parameter groups
         optim_groups = [
-            {"params": [p for p in decay_params], "weight_decay": weight_decay},
-            {"params": [p for p in nodecay_params], "weight_decay": 0.0},
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
         ]
 
         # Print parameter statistics for debugging
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(
-            f"Num decay parameter tensors: {len(decay_params)}, with {num_decay_params} parameters"
+            f"Num decay parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
         )
         print(
-            f"Num nodecay parameter tensors: {len(nodecay_params)}, with {num_nodecay_params} parameters"
+            f"Num nodecay parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
         )
 
         # Use fused AdamW if available on CUDA (faster training)
@@ -136,10 +189,15 @@ class GPT(nn.Module):
         use_fused = fused_available and device.startswith("cuda")
         print(f"Using fused AdamW: {use_fused}")
 
-        # Create and return the optimizer
+        # Create optimizer
         optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused
+            optim_groups,
+            lr=learning_rate,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            fused=use_fused,
         )
+
         return optimizer
 
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction="mean"):

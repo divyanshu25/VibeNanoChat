@@ -21,8 +21,8 @@ from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
-from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
-                         save_checkpoint)
+from gpt_2.utils import (calculate_num_iterations, get_custom_tokenizer,
+                         get_lr, load_checkpoint, save_checkpoint)
 
 
 class Trainer:
@@ -127,7 +127,7 @@ class Trainer:
         self.model.to(self.device)
 
         # Optional: Compile model for faster training
-        # self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model)
 
         if self.ddp:
             self.model = torch.nn.parallel.DistributedDataParallel(
@@ -172,15 +172,35 @@ class Trainer:
         # Learning rate scheduling parameters
         self.max_learning_rate = self.config.max_learning_rate
         self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
+
+        # Automatically calculate steps based on config settings for all phases
+        if self.master_process:
+            print("\n" + "=" * 80)
+            if self.sft_training:
+                print("📊 CALCULATING SFT TRAINING STEPS")
+            elif self.mid_training:
+                print("📊 CALCULATING MID-TRAINING STEPS")
+            else:
+                print("📊 CALCULATING PRETRAINING STEPS")
+            print("=" * 80)
+
+        num_iterations, _, _ = calculate_num_iterations(self.raw_model, self.config)
+        self.max_steps = num_iterations
+
+        if self.master_process:
+            print("=" * 80 + "\n")
+
+        # Set warmup steps based on training phase (calculated as % of max_steps)
         if self.sft_training:
-            self.warmup_steps = self.config.lr_warmup_steps_sft
-            self.max_steps = self.config.steps_per_epoch_sft
+            self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
         elif self.mid_training:
-            self.warmup_steps = self.config.lr_warmup_steps_midtrain
-            self.max_steps = self.config.steps_per_epoch_midtrain
+            self.warmup_steps = int(
+                self.max_steps * self.config.lr_warmup_ratio_midtrain
+            )
         else:
-            self.warmup_steps = self.config.lr_warmup_steps_pretrain
-            self.max_steps = self.config.steps_per_epoch_pretrain
+            self.warmup_steps = int(
+                self.max_steps * self.config.lr_warmup_ratio_pretrain
+            )
 
     def _create_evaluator(self, eval_dataloader):
         """Create a TrainingEvaluator with standard configuration.
@@ -684,6 +704,15 @@ class Trainer:
 
         if self.master_process:
             total_steps = self.max_steps * self.num_epochs
+
+            # Calculate FLOPs statistics
+            raw_model = self.model.module if self.ddp else self.model
+            flops_per_token = raw_model.estimate_flops()
+            total_tokens = self.total_batch_size * total_steps
+            total_flops = flops_per_token * total_tokens
+            num_params = raw_model.num_scaling_params()
+            tokens_params_ratio = total_tokens / num_params
+
             print("\n" + "=" * 80)
             if self.mid_training:
                 print("🔄 STARTING MID-TRAINING")
@@ -703,6 +732,11 @@ class Trainer:
             )
             print(f"🌐 World size: {self.ddp_world_size} GPUs")
             print(f"🎯 Total batch size: {self.total_batch_size:,} tokens/step")
+            print(f"🔢 Model parameters: {num_params:,}")
+            print(f"💫 FLOPs per token: {flops_per_token:.3e}")
+            print(f"📈 Total training tokens: {total_tokens:,}")
+            print(f"⚡ Total training FLOPs: {total_flops:.3e}")
+            print(f"📐 Tokens:Params ratio: {tokens_params_ratio:.2f}")
             print("=" * 80 + "\n")
 
         # Main training loop over epochs
@@ -826,15 +860,13 @@ class Trainer:
                     val_loss = self.evaluator.estimate_validation_loss(
                         step=step, global_step=global_step
                     )
-                    # Select random sample context from the 4 pre-selected contexts
-                    sample_context = random.choice(self.sample_contexts)
 
-                    self.evaluator.sample_from_model(
-                        num_sequences=self.config.generation_num_samples,
-                        max_length=1024,
-                        context=sample_context,
-                        step=step,
-                    )
+                    # self.evaluator.sample_from_model(
+                    #     num_sequences=self.config.generation_num_samples,
+                    #     max_length=1024,
+                    #     context=sample_context,
+                    #     step=step,
+                    # )
 
                 # Run CORE evaluations if enabled
                 if self.run_core_evals and should_eval:

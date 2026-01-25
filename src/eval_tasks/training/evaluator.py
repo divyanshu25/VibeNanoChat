@@ -53,6 +53,15 @@ def generate(
     # Initialize the custom tokenizer with special tokens for chat format
     enc, _ = get_custom_tokenizer()
 
+    # CRITICAL: Check tokenizer vocab size matches model
+    tokenizer_vocab_size = enc.max_token_value + 1
+    model_vocab_size = model.config.vocab_size
+    if tokenizer_vocab_size != model_vocab_size:
+        print("\n⚠️  WARNING: Vocab size mismatch!")
+        print(f"  - Tokenizer vocab: {tokenizer_vocab_size}")
+        print(f"  - Model vocab: {model_vocab_size}")
+        print("  - This will cause decoding failures!\n")
+
     # Encode the context string to token indices (allow special tokens in context)
     tokens = enc.encode(context, allowed_special="all")
     tokens = torch.tensor(tokens, dtype=torch.long)
@@ -205,11 +214,41 @@ def generate(
     print(f"  - Final length: {x.size(1)} tokens")
     print(f"{'='*60}\n")
 
+    print("Starting decoding...")
     all_decoded = []
+
+    # Get vocab size from the encoder
+    vocab_size = enc.max_token_value + 1
+
     for i in range(num_sequences):
+        print(f"  Decoding sequence {i+1}/{num_sequences}...")
         tokens = x[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        all_decoded.append(decoded)
+
+        # Validate tokens are in valid range
+        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
+        if invalid_tokens:
+            print(
+                f"  ⚠️  WARNING: Found {len(invalid_tokens)} invalid tokens (vocab_size={vocab_size})"
+            )
+            print(f"      Invalid token examples: {invalid_tokens[:5]}")
+            # Clip invalid tokens to valid range
+            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
+
+        # Decode (fail fast if there's an error)
+        try:
+            decoded = enc.decode(tokens)
+            all_decoded.append(decoded)
+            print(f"  ✓ Sequence {i+1} decoded ({len(decoded)} chars)")
+        except Exception as e:
+            print(f"\n  ✗ ERROR decoding sequence {i+1}:")
+            print(f"     Error type: {type(e).__name__}")
+            print(f"     Error message: {e}")
+            print(f"     Tokens length: {len(tokens)}")
+            print(f"     First 10 tokens: {tokens[:10]}")
+            print(f"     Last 10 tokens: {tokens[-10:]}")
+            raise  # Re-raise to fail the generation
+
+    print("All sequences decoded successfully!\n")
     return all_decoded
 
 

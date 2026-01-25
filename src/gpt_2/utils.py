@@ -68,6 +68,135 @@ def get_custom_tokenizer():
     return enc, special_tokens
 
 
+def calculate_num_iterations(
+    model,
+    config,
+) -> tuple[int, float, int]:
+    """
+    Calculate the number of training iterations based on nanochat-style logic.
+
+    Priority order (first available is used):
+    1. config.num_iterations (if > 0): explicit number of steps
+    2. config.target_flops (if > 0): calculate from target FLOPs
+    3. config.target_param_data_ratio (if > 0): calculate from data:param ratio
+
+    Args:
+        model: The GPT model (needs estimate_flops() and num_scaling_params() methods)
+        config: Configuration object with training parameters
+
+    Returns:
+        tuple: (num_iterations, num_flops_per_token, num_scaling_params)
+
+    Raises:
+        ValueError: If no training horizon is specified
+    """
+    num_flops_per_token = model.estimate_flops()
+    num_scaling_params = model.num_scaling_params()
+
+    # Priority 1: Explicit num_iterations
+    if config.num_iterations > 0:
+        num_iterations = config.num_iterations
+        print(f"Using user-provided number of iterations: {num_iterations:,}")
+
+    # Priority 2: Target FLOPs
+    elif config.target_flops > 0:
+        num_iterations = round(
+            config.target_flops / (num_flops_per_token * config.total_batch_size)
+        )
+        print(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
+
+    # Priority 3: Data:param ratio (default for nanochat)
+    elif config.target_param_data_ratio > 0:
+        target_tokens = config.target_param_data_ratio * num_scaling_params
+        num_iterations = target_tokens // config.total_batch_size
+        print(
+            f"Calculated number of iterations from target data:param ratio: {num_iterations:,}"
+        )
+
+    else:
+        raise ValueError(
+            "No training horizon specified. Set one of: num_iterations, target_flops, or target_param_data_ratio"
+        )
+
+    # Print training statistics
+    total_tokens = config.total_batch_size * num_iterations
+    total_flops = num_flops_per_token * total_tokens
+    tokens_params_ratio = total_tokens / num_scaling_params
+
+    print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+    print(f"Total number of training tokens: {total_tokens:,}")
+    print(f"Tokens : Params ratio: {tokens_params_ratio:.2f}")
+    print(f"Total training FLOPs estimate: {total_flops:e}")
+
+    return num_iterations, num_flops_per_token, num_scaling_params
+
+
+def get_lr_multiplier(
+    global_step: int,
+    max_steps: int,
+    num_epochs: int,
+    training_phase: str = "pretrain",
+    warmup_ratio: float = 0.0,
+    warmdown_ratio: float = 0.4,
+    final_lr_frac: float = 0.0,
+) -> float:
+    """
+    Compute learning rate multiplier for separate learning rates (nanochat-style).
+
+    This returns a multiplier that gets applied to each parameter group's base
+    learning rate, preserving the relative ratios between groups while following
+    a schedule appropriate for the training phase.
+
+    Training Phase Schedules (matching nanochat exactly):
+    - pretrain: warmup -> constant -> warmdown to final_lr_frac
+    - midtrain: constant for 80% of training -> linear decay to 0
+    - sft/rl: linear decay from 1.0 to 0 (no warmup)
+
+    Args:
+        global_step: Current global training step (across all epochs)
+        max_steps: Maximum steps per epoch
+        num_epochs: Total number of epochs
+        training_phase: One of "pretrain", "midtrain", "sft", "rl"
+        warmup_ratio: Ratio of iterations for LR warmup (pretrain only, default 0.0)
+        warmdown_ratio: Ratio of iterations for LR warmdown (pretrain only, default 0.4)
+        final_lr_frac: Final LR as fraction of initial LR (pretrain only, default 0.0)
+
+    Returns:
+        float: Learning rate multiplier for current step
+    """
+    total_steps = max_steps * num_epochs
+
+    if training_phase == "pretrain":
+        # Nanochat base_train logic: warmup -> constant -> warmdown
+        warmup_iters = round(warmup_ratio * total_steps)
+        warmdown_iters = round(warmdown_ratio * total_steps)
+
+        if global_step < warmup_iters:
+            # Linear warmup
+            return (global_step + 1) / warmup_iters
+        elif global_step <= total_steps - warmdown_iters:
+            # Constant LR
+            return 1.0
+        else:
+            # Linear warmdown to final_lr_frac
+            progress = (total_steps - global_step) / warmdown_iters
+            return progress * 1.0 + (1 - progress) * final_lr_frac
+
+    elif training_phase == "midtrain":
+        # Nanochat mid_train logic: constant for 80%, then linear decay to 0
+        progress = global_step / total_steps
+        return 1.0 if progress < 0.8 else 1.0 - (progress - 0.8) / 0.2
+
+    elif training_phase in ["sft", "rl"]:
+        # Nanochat chat_sft/chat_rl logic: linear decay from 1.0 to 0
+        return 1.0 - global_step / total_steps
+
+    else:
+        raise ValueError(
+            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, midtrain, sft, rl"
+        )
+
+
 def get_lr(
     global_step: int,
     warmup_steps: int,

@@ -11,48 +11,61 @@ class GPTConfig:
     """
 
     # ========================================================================
-    # Model Architecture
+    # Model Architecture (NANOCHAT 560M CONFIG)
     # ========================================================================
-    block_size: int = 1024  # Maximum sequence length (context window)
-    # Vocab size: 50257 (GPT-2) + 9 special tokens
-    # Chat tokens: <|bos|>, <|user_start|>, <|user_end|>, <|assistant_start|>, <|assistant_end|>
-    # Tool tokens: <|python|>, <|python_end|>, <|ouput_start|>, <|output_end|>
-    vocab_size: int = 50266  # Extended vocabulary (50257 base + 9 special tokens)
-    n_layer: int = 12  # Number of transformer blocks in the model
-    n_head: int = 12  # Number of attention heads per transformer block
-    n_kv_head: int = 12  # Number of KV heads for GQA (None = MHA, uses n_head)
-    n_embed: int = 768  # Embedding dimension (hidden size)
+    block_size: int = 2048  # Maximum sequence length (context window)
+    vocab_size: int = 50266  # GPT-2 vocab (50257) + special tokens (9)
+    # NOTE: Nanochat uses 65,536 with a custom tokenizer. We use GPT-2's tokenizer.
+    n_layer: int = 10  # Number of transformer blocks in the model
+    n_head: int = 10  # Number of attention heads per transformer block
+    n_kv_head: int = 10  # Number of KV heads for GQA (MHA in this config)
+    n_embed: int = (
+        1280  # Embedding dimension (hidden size) = depth(20) * aspect_ratio(64)
+    )
 
     # ========================================================================
-    # Training Configuration
+    # Training Configuration (NANOCHAT SETTINGS)
     # ========================================================================
-    num_epochs: int = 6  # Number of training epochs
-    batch_size: int = 64  # Batch size per GPU
+    num_epochs: int = (
+        2  # Number of training epochs (nanochat uses iterations, not epochs)
+    )
+    batch_size: int = (
+        32  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)
+    )
     total_batch_size: int = 524288  # Total tokens per gradient update (2^19)
-    weight_decay: float = 0.10  # L2 regularization weight decay
+    weight_decay: float = 0.10  # L2 regularization weight decay (nanochat default)
     gradient_clip_norm: float = 1.0  # Maximum gradient norm for clipping
 
+    # Training horizon (nanochat-style calculation, priority order):
+    # 1. num_iterations (if > 0): explicit number of optimization steps
+    # 2. target_flops (if > 0): calculate iterations to reach target FLOPs
+    # 3. target_param_data_ratio (if > 0): calculate iterations from data:param ratio (Chinchilla=20)
+    num_iterations: int = (
+        -1
+    )  # Explicit number of optimization steps (-1 = calculate from ratio/flops)
+    target_flops: float = -1.0  # Target total FLOPs (-1 = use param_data_ratio instead)
+    target_param_data_ratio: int = 20  # Data:param ratio (Chinchilla optimal = 20)
+
     # ========================================================================
-    # Learning Rate Schedule - Pretraining
+    # Learning Rate Schedule
     # ========================================================================
-    max_learning_rate: float = 5e-6  # Peak learning rate
+    # NOTE: Training steps are automatically calculated from target_param_data_ratio,
+    # target_flops, or num_iterations (see "Training horizon" section above).
+    # The trainer computes steps dynamically for all phases (pretrain/midtrain/sft).
+
+    max_learning_rate: float = 6e-4  # Peak learning rate
     min_lr_ratio: float = 0.1  # Minimum LR as fraction of peak (0.1 = 10% of peak)
-    lr_warmup_steps_pretrain: int = 715  # Linear warmup steps (pretraining)
-    steps_per_epoch_pretrain: int = 18977  # Training steps per epoch (pretraining)
+
+    # Warmup steps for each training phase (as fraction of max_steps)
+    lr_warmup_ratio_pretrain: float = 0.1  # Warmup as fraction of total steps (10%)
+    lr_warmup_ratio_midtrain: float = 0.1  # Warmup as fraction of total steps (10%)
+    lr_warmup_ratio_sft: float = 0.1  # Warmup as fraction of total steps (10%)
 
     # ========================================================================
-    # Learning Rate Schedule - Mid-training
+    # Weight Tying
     # ========================================================================
-    lr_warmup_steps_midtrain: int = 80  # Linear warmup steps (mid-training)
-    steps_per_epoch_midtrain: int = 878  # Training steps per epoch (mid-training)
-
-    # ========================================================================
-    # Learning Rate Schedule - SFT (Supervised Fine-Tuning)
-    # ========================================================================
-    lr_warmup_steps_sft: int = 85  # Linear warmup steps (SFT)
-    steps_per_epoch_sft: int = (
-        336  # Training steps per epoch (SFT) - approximate for multiplex dataset
-    )
+    tie_embeddings: bool = True  # Tie input (wte) and output (lm_head) embeddings
+    # Setting to False allows independent weights for embedding/unembedding
 
     # ========================================================================
     # Data Directories
