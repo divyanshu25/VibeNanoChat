@@ -388,9 +388,14 @@ class TrainingEvaluator:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 step_info = f"Step {step}" if step is not None else "Unknown Step"
                 f.write(f"\n{'='*80}\n")
-                f.write(f"Timestamp: {timestamp} | {step_info}\n")
+                f.write(f"[{timestamp}] {step_info}\n")
                 f.write(f"Context: {context}\n")
-                f.write(f"{'='*80}\n")
+                f.write(f"{'-'*80}\n")
                 for i, decoded_seq in enumerate(decoded, 1):
-                    f.write(f"\nGeneration {i}:\n{decoded_seq}\n")
-                f.write(f"\n{'='*80}\n")
+                    f.write(f"\nGeneration {i}:\n")
+                    f.write(f"{decoded_seq}\n")
+                    if i < len(
+                        decoded
+                    ):  # Add separator between generations, but not after last one
+                        f.write(f"{'-'*80}\n")
+                f.write(f"{'='*80}\n")

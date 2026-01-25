@@ -4,7 +4,7 @@ A modern web interface for chatting with NanoGPT model checkpoints.
 
 ## Features
 
-- 🎯 **Checkpoint Selection**: Browse and load any checkpoint from the midtraining directory
+- 🎯 **Checkpoint Selection**: Browse and load any checkpoint from the SFT checkpoints directory
 - 💬 **Interactive Chat**: Real-time conversation with the model
 - 🎛️ **Advanced Controls**: Adjust temperature, top-k, and max tokens
 - 🗑️ **Clear Conversation**: Reset chat history anytime
@@ -79,7 +79,7 @@ Type your message and press Enter or click Send
 ### Checkpoint Directory
 The checkpoint directory is configured in `server.py`:
 ```python
-CHECKPOINT_DIR = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+CHECKPOINT_DIR = "/sensei-fs/users/divgoyal/nanogpt/sft_checkpoints"
 ```
 
 You can change this to point to a different checkpoint directory if needed.

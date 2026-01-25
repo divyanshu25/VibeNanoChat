@@ -35,7 +35,7 @@ class GPTConfig:
     # ========================================================================
     # Learning Rate Schedule - Pretraining
     # ========================================================================
-    max_learning_rate: float = 6e-4  # Peak learning rate
+    max_learning_rate: float = 5e-6  # Peak learning rate
     min_lr_ratio: float = 0.1  # Minimum LR as fraction of peak (0.1 = 10% of peak)
     lr_warmup_steps_pretrain: int = 715  # Linear warmup steps (pretraining)
     steps_per_epoch_pretrain: int = 18977  # Training steps per epoch (pretraining)
@@ -49,7 +49,7 @@ class GPTConfig:
     # ========================================================================
     # Learning Rate Schedule - SFT (Supervised Fine-Tuning)
     # ========================================================================
-    lr_warmup_steps_sft: int = 50  # Linear warmup steps (SFT)
+    lr_warmup_steps_sft: int = 85  # Linear warmup steps (SFT)
     steps_per_epoch_sft: int = (
         336  # Training steps per epoch (SFT) - approximate for multiplex dataset
     )

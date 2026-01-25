@@ -41,7 +41,7 @@ import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 
 class MultiplexDataset(Dataset):
@@ -232,49 +232,6 @@ class MultiplexDataset(Dataset):
         return stats
 
 
-class EpochSampler(Sampler):
-    """
-    A sampler that iterates through the dataset once per epoch.
-
-    This sampler ensures that each example in the dataset is seen exactly once
-    per epoch, which is useful for training with a fixed number of epochs.
-    """
-
-    def __init__(self, dataset: Dataset, shuffle: bool = True, seed: int = 0):
-        """
-        Initialize the epoch sampler.
-
-        Args:
-            dataset: The dataset to sample from
-            shuffle: Whether to shuffle indices each epoch
-            seed: Random seed for shuffling
-        """
-        self.dataset = dataset
-        self.shuffle = shuffle
-        self.seed = seed
-        self.epoch = 0
-
-    def __iter__(self):
-        """Iterate through indices."""
-        indices = list(range(len(self.dataset)))
-
-        if self.shuffle:
-            # Use epoch-based seed for different shuffle each epoch
-            rng = torch.Generator()
-            rng.manual_seed(self.seed + self.epoch)
-            indices = torch.randperm(len(self.dataset), generator=rng).tolist()
-
-        yield from indices
-
-    def __len__(self):
-        """Return dataset length."""
-        return len(self.dataset)
-
-    def set_epoch(self, epoch: int):
-        """Set the current epoch (for different shuffle each epoch)."""
-        self.epoch = epoch
-
-
 def default_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Default collate function for multiplex datasets.
@@ -397,6 +354,10 @@ def create_sft_collate_fn(
             n = min(len(ids), max_length + 1)  # +1 because we split into input/target
             ids_tensor = torch.tensor(ids[:n], dtype=torch.long)
             mask_tensor = torch.tensor(mask[:n], dtype=torch.long)
+            ids_tensor[-1] = (
+                pad_token_id  # this will teach the model to stop generating tokens
+            )
+            mask_tensor[-1] = 1  # this will teach the model to stop generating tokens
 
             # Truncate to fit within ncols
             seq_len = min(n - 1, ncols)

@@ -6,6 +6,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+import random
 import time
 from datetime import datetime
 
@@ -19,6 +20,7 @@ from eval_tasks import CoreEvaluator
 from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
+from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
 from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
                          save_checkpoint)
 
@@ -86,6 +88,16 @@ class Trainer:
         self.start_epoch = 0
         self.start_global_step = 0
 
+        # Select 4 random sample contexts for generation evaluation
+        if self.sft_training or self.mid_training:
+            self.sample_contexts = random.sample(
+                SFT_SAMPLE_CONTEXTS, min(4, len(SFT_SAMPLE_CONTEXTS))
+            )
+        else:
+            self.sample_contexts = random.sample(
+                GENERAL_SAMPLE_CONTEXTS, min(4, len(GENERAL_SAMPLE_CONTEXTS))
+            )
+
         # Setup components
         self._setup_logging()
         self._setup_model()
@@ -131,15 +143,27 @@ class Trainer:
         self.run_evals_after = self.config.eval_interval
 
         # Batch size and gradient accumulation
-        self.total_batch_size = self.config.total_batch_size
-        self.grad_accumulation_steps = self.total_batch_size // (
-            self.config.batch_size * self.config.block_size * self.ddp_world_size
-        )
-        assert (
-            self.total_batch_size
-            % (self.config.batch_size * self.config.block_size * self.ddp_world_size)
-            == 0
-        ), "Total batch size must be divisible by batch_size * block_size * world_size"
+        if self.sft_training:
+            # For SFT, we count examples (conversations) not tokens
+            # No gradient accumulation - process each batch immediately
+            self.grad_accumulation_steps = 1
+            self.total_batch_size = self.config.batch_size * self.ddp_world_size
+        else:
+            # For pretrain/midtrain, we count tokens
+            self.total_batch_size = self.config.total_batch_size
+            self.grad_accumulation_steps = self.total_batch_size // (
+                self.config.batch_size * self.config.block_size * self.ddp_world_size
+            )
+
+            assert (
+                self.total_batch_size
+                % (
+                    self.config.batch_size
+                    * self.config.block_size
+                    * self.ddp_world_size
+                )
+                == 0
+            ), "Total batch size must be divisible by batch_size * block_size * world_size"
 
         if self.master_process:
             print(f"Total batch size: {self.total_batch_size}")
@@ -382,29 +406,59 @@ class Trainer:
             ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
         )
 
-        # Validation: SmolTalk test set with 24k rows
+        # Validation: Multiple task validation sets to match training distribution
         if self.run_evals:
             if self.master_process:
-                print("Loading SFT validation dataset (SmolTalk test)...")
+                print("Loading SFT validation datasets...")
 
+            # Load validation splits from all training tasks
+            # Note: ARC has 'train'/'validation'/'test', but GSM8K and SmolTalk only have 'train'/'test'
+            # We use 'validation' for ARC (proper dev set) and 'test' for others (no validation split exists)
+            arc_easy_val_data = ARCDataLoader(
+                subset="ARC-Easy", split="validation", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True)
+
+            arc_challenge_val_data = ARCDataLoader(
+                subset="ARC-Challenge", split="validation", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True)
+
+            # GSM8K only has train/test splits, so use test for validation
+            gsm8k_val_data = GSM8KDataLoader(
+                split="test", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True, max_examples=1000)
+
+            # SmolTalk only has train/test splits, so use test for validation
             smoltalk_val_data = SmolTalkDataLoader(
                 split="test", cache_dir=cache_dir
-            ).load_data(max_examples=24000)
+            ).load_data(max_examples=2000)
+
+            # Note: No validation splits for SpellingBee/SimpleSpelling
+            # (they're generated, so train=test essentially)
 
             if self.master_process:
+                print(f"✓ Loaded {len(arc_easy_val_data)} ARC-Easy validation examples")
+                print(
+                    f"✓ Loaded {len(arc_challenge_val_data)} ARC-Challenge validation examples"
+                )
+                print(f"✓ Loaded {len(gsm8k_val_data)} GSM8K validation examples")
                 print(
                     f"✓ Loaded {len(smoltalk_val_data)} SmolTalk validation examples\n"
                 )
 
             self.eval_dataloader = create_multiplex_dataloader(
-                datasets=[("smoltalk_val", smoltalk_val_data)],
+                datasets=[
+                    ("arc_easy_val", arc_easy_val_data),
+                    ("arc_challenge_val", arc_challenge_val_data),
+                    ("gsm8k_val", gsm8k_val_data),
+                    ("smoltalk_val", smoltalk_val_data),
+                ],
                 batch_size=self.config.batch_size,
                 shuffle=False,
                 num_workers=2,  # Fewer workers for validation (less frequent)
                 pin_memory=True,  # Faster GPU transfer
                 prefetch_factor=2,  # Prefetch 2 batches per worker
                 persistent_workers=True,  # Keep workers alive between epochs
-                sampling_strategy="proportional",
+                sampling_strategy="proportional",  # Match training distribution
                 collate_fn=collate_fn,
                 ddp_rank=self.ddp_rank,  # DDP rank for sharding
                 ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
@@ -667,6 +721,11 @@ class Trainer:
                 torch.tensor(0.0, dtype=torch.float32, device=self.device)
                 torch.tensor(0, dtype=torch.int64, device=self.device)
 
+                # Track active tokens for SFT training (where targets >= 0)
+                num_active_tokens = torch.tensor(
+                    0, dtype=torch.int64, device=self.device
+                )
+
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
                     x, y = self.train_dataloader.next_batch()
@@ -679,6 +738,10 @@ class Trainer:
                     # Compute mean loss for backprop
                     loss = per_token_loss.mean() / self.grad_accumulation_steps
                     loss_accumulator += loss
+
+                    # Count active tokens (for SFT: targets >= 0, for pretrain: all tokens)
+                    if self.sft_training:
+                        num_active_tokens += (y >= 0).sum()
 
                     # Accumulate for BPB calculation
                     # if self._token_bytes is not None:
@@ -697,6 +760,11 @@ class Trainer:
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
                     )
+                    # Sum active tokens across all ranks for SFT
+                    if self.sft_training:
+                        torch.distributed.all_reduce(
+                            num_active_tokens, op=torch.distributed.ReduceOp.SUM
+                        )
                     # if self._token_bytes is not None:
                     #     torch.distributed.all_reduce(
                     #         total_nats, op=torch.distributed.ReduceOp.SUM
@@ -732,13 +800,20 @@ class Trainer:
                 end_time = time.time()
 
                 # Calculate training throughput (tokens processed per second)
-                tokens_per_second = (
-                    self.config.batch_size
-                    * self.config.block_size
-                    * self.grad_accumulation_steps
-                    * self.ddp_world_size
-                    / (end_time - start_time)
-                )
+                if self.sft_training:
+                    # For SFT: count only active tokens (where targets >= 0)
+                    tokens_per_second = num_active_tokens.item() / (
+                        end_time - start_time
+                    )
+                else:
+                    # For pretrain/midtrain: all tokens in batch are active
+                    tokens_per_second = (
+                        self.config.batch_size
+                        * self.config.block_size
+                        * self.grad_accumulation_steps
+                        * self.ddp_world_size
+                        / (end_time - start_time)
+                    )
 
                 # Periodically estimate loss on train/val sets for monitoring
                 total_steps = self.max_steps * self.num_epochs
@@ -751,15 +826,12 @@ class Trainer:
                     val_loss = self.evaluator.estimate_validation_loss(
                         step=step, global_step=global_step
                     )
-                    # Select appropriate sample context based on training mode
-                    if self.sft_training or self.mid_training:
-                        sample_context = "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
-                    else:
-                        sample_context = "Hello, I'm a language model,"
+                    # Select random sample context from the 4 pre-selected contexts
+                    sample_context = random.choice(self.sample_contexts)
 
                     self.evaluator.sample_from_model(
                         num_sequences=self.config.generation_num_samples,
-                        max_length=self.config.generation_max_length,
+                        max_length=1024,
                         context=sample_context,
                         step=step,
                     )
