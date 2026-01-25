@@ -47,10 +47,21 @@ class GPTConfig:
     steps_per_epoch_midtrain: int = 878  # Training steps per epoch (mid-training)
 
     # ========================================================================
+    # Learning Rate Schedule - SFT (Supervised Fine-Tuning)
+    # ========================================================================
+    lr_warmup_steps_sft: int = 50  # Linear warmup steps (SFT)
+    steps_per_epoch_sft: int = (
+        336  # Training steps per epoch (SFT) - approximate for multiplex dataset
+    )
+
+    # ========================================================================
     # Data Directories
     # ========================================================================
     data_dir_pretrain: str = "/sensei-fs/users/divgoyal/fineweb_edu"
     data_dir_midtrain: str = "/sensei-fs/users/divgoyal/nanochat_midtraining_data"
+    sft_cache_dir: str = (
+        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # Cache dir for SFT datasets
+    )
 
     # ========================================================================
     # Checkpointing
@@ -61,11 +72,12 @@ class GPTConfig:
     checkpoint_interval_midtrain: int = (
         400  # Save checkpoint every N global steps (mid-training)
     )
+    checkpoint_interval_sft: int = 100  # Save checkpoint every N global steps (SFT)
 
     # ========================================================================
     # Evaluation Schedule
     # ========================================================================
-    eval_interval: int = 250  # Run evaluations every N global steps
+    eval_interval: int = 100  # Run evaluations every N global steps
     val_loss_eval_batches: int = (
         37  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
     )

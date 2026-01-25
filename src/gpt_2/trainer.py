@@ -41,6 +41,7 @@ class Trainer:
         run_core_evals=False,
         run_chatcore_evals=False,
         mid_training=False,
+        sft_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
         token_bytes_path=None,
@@ -59,6 +60,7 @@ class Trainer:
             run_core_evals: Whether to run CORE benchmark evaluations
             run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
+            sft_training: Whether to do SFT training (uses Multiplex dataloader with conversation data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
             checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
@@ -74,6 +76,7 @@ class Trainer:
         self.run_core_evals = run_core_evals
         self.run_chatcore_evals = run_chatcore_evals
         self.mid_training = mid_training
+        self.sft_training = sft_training
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
         self.token_bytes_path = token_bytes_path
@@ -136,7 +139,7 @@ class Trainer:
             self.total_batch_size
             % (self.config.batch_size * self.config.block_size * self.ddp_world_size)
             == 0
-        ), "Total batch size must be divisible by batch size * block size * world size"
+        ), "Total batch size must be divisible by batch_size * block_size * world_size"
 
         if self.master_process:
             print(f"Total batch size: {self.total_batch_size}")
@@ -145,62 +148,54 @@ class Trainer:
         # Learning rate scheduling parameters
         self.max_learning_rate = self.config.max_learning_rate
         self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
-        if self.mid_training:
+        if self.sft_training:
+            self.warmup_steps = self.config.lr_warmup_steps_sft
+            self.max_steps = self.config.steps_per_epoch_sft
+        elif self.mid_training:
             self.warmup_steps = self.config.lr_warmup_steps_midtrain
             self.max_steps = self.config.steps_per_epoch_midtrain
         else:
             self.warmup_steps = self.config.lr_warmup_steps_pretrain
             self.max_steps = self.config.steps_per_epoch_pretrain
 
-    def _setup_dataloaders(self):
-        """Initialize train and eval dataloaders based on training mode."""
-        # Select dataloader class and data directory based on training mode
-        if self.mid_training:
-            DataloaderClass = TaskMixtureDataloader
-            data_dir = self.config.data_dir_midtrain
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
-                print("=" * 80 + "\n")
-        else:
-            DataloaderClass = FinewebEduDataloader
-            data_dir = self.config.data_dir_pretrain
+    def _create_evaluator(self, eval_dataloader):
+        """Create a TrainingEvaluator with standard configuration.
 
-        self.train_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="train",
+        Args:
+            eval_dataloader: The evaluation dataloader to use
+
+        Returns:
+            TrainingEvaluator instance
+        """
+        return TrainingEvaluator(
+            model=self.model,
+            eval_dataloader=eval_dataloader,
+            device=self.device,
             master_process=self.master_process,
+            ddp=self.ddp,
+            ddp_rank=self.ddp_rank,
+            ddp_world_size=self.ddp_world_size,
+            generation_log_file=self.generation_log_file,
+            token_bytes_path=self.token_bytes_path,
+            val_loss_steps=self.config.val_loss_eval_batches,
+            sample_seed=self.config.generation_seed,
+            use_kv_cache=self.config.use_kv_cache,
         )
 
-        if self.run_evals:
-            self.eval_dataloader = DataloaderClass(
-                data_dir=data_dir,
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="val",
-                master_process=self.master_process,
-            )
-            self.evaluator = TrainingEvaluator(
-                model=self.model,
-                eval_dataloader=self.eval_dataloader,
-                device=self.device,
-                master_process=self.master_process,
-                ddp=self.ddp,
-                ddp_rank=self.ddp_rank,
-                ddp_world_size=self.ddp_world_size,
-                generation_log_file=self.generation_log_file,
-                token_bytes_path=self.token_bytes_path,
-                val_loss_steps=self.config.val_loss_eval_batches,
-                sample_seed=self.config.generation_seed,
-                use_kv_cache=self.config.use_kv_cache,
-            )
+    def _setup_dataloaders(self):
+        """Initialize train and eval dataloaders based on training mode."""
+        if self.sft_training:
+            self._setup_sft_dataloaders()
+        elif self.mid_training:
+            self._setup_midtraining_dataloaders()
         else:
+            self._setup_pretraining_dataloaders()
+
+        # Unified evaluator creation for all modes
+        if self.run_evals:
+            self.evaluator = self._create_evaluator(self.eval_dataloader)
+        else:
+            self.evaluator = None
             if self.master_process:
                 print("Evaluations disabled - skipping eval dataloader initialization")
 
@@ -297,6 +292,187 @@ class Trainer:
         else:
             self.chatcore_evaluator = None
 
+    def _setup_sft_dataloaders(self):
+        """Setup dataloaders for SFT training mode."""
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("🎯 SFT TRAINING MODE: Using Multiplex datasets")
+            print("=" * 80 + "\n")
+
+        # Import required dataloaders
+        from dataloaders.arc_dataloader import ARCDataLoader
+        from dataloaders.gsm8k_dataloader import GSM8KDataLoader
+        from dataloaders.multiplex_dataloader import (
+            create_multiplex_dataloader, create_sft_collate_fn)
+        from dataloaders.simplespelling_dataloader import \
+            SimpleSpellingDataLoader
+        from dataloaders.smoltalk_dataloader import SmolTalkDataLoader
+        from dataloaders.spellingbee_dataloader import SpellingBeeDataLoader
+
+        cache_dir = self.config.sft_cache_dir
+
+        if self.master_process:
+            print("Loading SFT training datasets...")
+
+        # Load datasets exactly as specified in lines 558-619 of multiplex_dataloader.py
+        # 1. ARC-Easy
+        arc_easy_data = ARCDataLoader(
+            subset="ARC-Easy", split="train", cache_dir=cache_dir
+        ).load_data(format_as_conversation=True)
+
+        # 2. ARC-Challenge
+        arc_challenge_data = ARCDataLoader(
+            subset="ARC-Challenge", split="train", cache_dir=cache_dir
+        ).load_data(format_as_conversation=True)
+
+        # 3. GSM8K
+        gsm8k_data = GSM8KDataLoader(split="train", cache_dir=cache_dir).load_data(
+            format_as_conversation=True
+        )
+
+        # 4. SmolTalk
+        smoltalk_data = SmolTalkDataLoader(
+            split="train", cache_dir=cache_dir
+        ).load_data(max_examples=10000)
+
+        # 5. SpellingBee
+        spelling_bee_data = SpellingBeeDataLoader(
+            size=300, split="train", cache_dir=cache_dir
+        ).load_data()
+
+        # 6. SimpleSpelling
+        simple_spelling_data = SimpleSpellingDataLoader(
+            size=300, split="train", cache_dir=cache_dir
+        ).load_data()
+
+        if self.master_process:
+            print(f"✓ Loaded {len(arc_easy_data)} ARC-Easy examples")
+            print(f"✓ Loaded {len(arc_challenge_data)} ARC-Challenge examples")
+            print(f"✓ Loaded {len(gsm8k_data)} GSM8K examples")
+            print(f"✓ Loaded {len(smoltalk_data)} SmolTalk examples")
+            print(f"✓ Loaded {len(spelling_bee_data)} SpellingBee examples")
+            print(f"✓ Loaded {len(simple_spelling_data)} SimpleSpelling examples\n")
+
+        # Setup tokenizer and collate function
+        enc, _ = get_custom_tokenizer()
+        pad_token_id = enc.encode("<|assistant_end|>", allowed_special="all")[0]
+        collate_fn = create_sft_collate_fn(
+            enc, pad_token_id, return_metadata=False, max_length=self.config.block_size
+        )
+
+        # Create multiplex dataloader for training
+        self.train_dataloader = create_multiplex_dataloader(
+            datasets=[
+                ("arc_easy", arc_easy_data),
+                ("arc_challenge", arc_challenge_data),
+                ("gsm8k", gsm8k_data),
+                ("smoltalk", smoltalk_data),
+                ("spelling_bee", spelling_bee_data),
+                ("simple_spelling", simple_spelling_data),
+            ],
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            num_workers=4,  # Parallel data loading workers
+            pin_memory=True,  # Faster GPU transfer
+            prefetch_factor=2,  # Prefetch 2 batches per worker
+            persistent_workers=True,  # Keep workers alive between epochs
+            sampling_strategy="proportional",
+            collate_fn=collate_fn,
+            ddp_rank=self.ddp_rank,  # DDP rank for sharding
+            ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
+        )
+
+        # Validation: SmolTalk test set with 24k rows
+        if self.run_evals:
+            if self.master_process:
+                print("Loading SFT validation dataset (SmolTalk test)...")
+
+            smoltalk_val_data = SmolTalkDataLoader(
+                split="test", cache_dir=cache_dir
+            ).load_data(max_examples=24000)
+
+            if self.master_process:
+                print(
+                    f"✓ Loaded {len(smoltalk_val_data)} SmolTalk validation examples\n"
+                )
+
+            self.eval_dataloader = create_multiplex_dataloader(
+                datasets=[("smoltalk_val", smoltalk_val_data)],
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                num_workers=2,  # Fewer workers for validation (less frequent)
+                pin_memory=True,  # Faster GPU transfer
+                prefetch_factor=2,  # Prefetch 2 batches per worker
+                persistent_workers=True,  # Keep workers alive between epochs
+                sampling_strategy="proportional",
+                collate_fn=collate_fn,
+                ddp_rank=self.ddp_rank,  # DDP rank for sharding
+                ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
+            )
+        else:
+            self.eval_dataloader = None
+
+    def _setup_midtraining_dataloaders(self):
+        """Setup dataloaders for mid-training mode."""
+        DataloaderClass = TaskMixtureDataloader
+        data_dir = self.config.data_dir_midtrain
+
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
+            print("=" * 80 + "\n")
+
+        self.train_dataloader = DataloaderClass(
+            data_dir=data_dir,
+            batch_size=self.config.batch_size,
+            block_size=self.config.block_size,
+            ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            split="train",
+            master_process=self.master_process,
+        )
+
+        if self.run_evals:
+            self.eval_dataloader = DataloaderClass(
+                data_dir=data_dir,
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="val",
+                master_process=self.master_process,
+            )
+        else:
+            self.eval_dataloader = None
+
+    def _setup_pretraining_dataloaders(self):
+        """Setup dataloaders for pretraining mode."""
+        DataloaderClass = FinewebEduDataloader
+        data_dir = self.config.data_dir_pretrain
+
+        self.train_dataloader = DataloaderClass(
+            data_dir=data_dir,
+            batch_size=self.config.batch_size,
+            block_size=self.config.block_size,
+            ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            split="train",
+            master_process=self.master_process,
+        )
+
+        if self.run_evals:
+            self.eval_dataloader = DataloaderClass(
+                data_dir=data_dir,
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="val",
+                master_process=self.master_process,
+            )
+        else:
+            self.eval_dataloader = None
+
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
         self.optimizer = self.raw_model.configure_optimizers(
@@ -309,13 +485,21 @@ class Trainer:
             # Determine checkpoint source
             is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
             is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
+            is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
 
             # Define training scenario flags
-            is_rollover = self.mid_training and is_pretrain_ckpt
-            is_resume_pretrain = not self.mid_training and is_pretrain_ckpt
+            is_rollover_pretrain_to_midtrain = self.mid_training and is_pretrain_ckpt
+            is_rollover_midtrain_to_sft = self.sft_training and is_midtrain_ckpt
+            is_resume_pretrain = (
+                not self.mid_training and not self.sft_training and is_pretrain_ckpt
+            )
             is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+            is_resume_sft = self.sft_training and is_sft_ckpt
 
             # Load optimizer only when resuming (not when rolling over)
+            is_rollover = (
+                is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
+            )
             should_load_optimizer = not is_rollover
 
             checkpoint_result = load_checkpoint(
@@ -329,7 +513,7 @@ class Trainer:
                 self.config = checkpoint_result["config"]
 
             # Reset training counters only when rolling over
-            if is_rollover:
+            if is_rollover_pretrain_to_midtrain:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
@@ -338,14 +522,28 @@ class Trainer:
                         "🔄 Rollover: Pretraining → Mid-training "
                         "(weights loaded, fresh optimizer, counters reset)"
                     )
+            elif is_rollover_midtrain_to_sft:
+                self.start_epoch = 0
+                self.start_step = 0
+                self.start_global_step = 0
+                if self.master_process:
+                    print(
+                        "🔄 Rollover: Mid-training → SFT "
+                        "(weights loaded, fresh optimizer, counters reset)"
+                    )
             # Keep checkpoint counters when resuming
-            elif is_resume_pretrain or is_resume_midtrain:
+            elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
 
                 if self.master_process:
-                    mode = "pretraining" if is_resume_pretrain else "mid-training"
+                    if is_resume_pretrain:
+                        mode = "pretraining"
+                    elif is_resume_midtrain:
+                        mode = "mid-training"
+                    else:
+                        mode = "SFT"
                     print(
                         f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
                         f"step {self.start_step}, global_step {self.start_global_step} "
@@ -357,12 +555,16 @@ class Trainer:
                     f"Unrecognized checkpoint scenario!\n"
                     f"  Checkpoint path: {self.checkpoint_path}\n"
                     f"  mid_training flag: {self.mid_training}\n"
+                    f"  sft_training flag: {self.sft_training}\n"
                     f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
-                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n\n"
+                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n"
+                    f"  is_sft_ckpt: {is_sft_ckpt}\n\n"
                     f"Expected checkpoint path patterns:\n"
-                    f"  - For rollover: mid_training=True + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume pretraining: mid_training=False + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path"
+                    f"  - For rollover pretrain→midtrain: mid_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For rollover midtrain→sft: sft_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: mid_training=False + sft_training=False + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For resume SFT: sft_training=True + 'sft_checkpoints' in path"
                 )
 
             # Handle epoch boundary for resumed checkpoints
@@ -373,16 +575,21 @@ class Trainer:
     def _setup_wandb(self):
         """Initialize Weights & Biases for experiment tracking."""
         if self.master_process:
-            project_name = (
-                "gpt2-midtraining" if self.mid_training else "gpt2-pretraining"
-            )
+            if self.sft_training:
+                project_name = "gpt2-sft"
+                training_mode = "SFT"
+            elif self.mid_training:
+                project_name = "gpt2-midtraining"
+                training_mode = "mid-training"
+            else:
+                project_name = "gpt2-pretraining"
+                training_mode = "pretraining"
+
             wandb.init(
                 project=project_name,
                 config={
                     "model_type": "GPT-2",
-                    "training_mode": (
-                        "mid-training" if self.mid_training else "pretraining"
-                    ),
+                    "training_mode": training_mode,
                     "batch_size": self.config.batch_size,
                     "block_size": self.config.block_size,
                     "max_learning_rate": self.max_learning_rate,
@@ -450,6 +657,8 @@ class Trainer:
             # Process all batches in the current epoch
             # Only use start_step for the first resumed epoch, then start from 0
             epoch_start_step = self.start_step if epoch == self.start_epoch else 0
+
+            # Unified training loop for all modes (pretrain/midtrain/sft)
             for step in range(epoch_start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
                 self.optimizer.zero_grad()
@@ -483,6 +692,7 @@ class Trainer:
                         )
                     # Backward pass: compute gradients
                     loss.backward()
+
                 if self.ddp:
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
@@ -523,8 +733,8 @@ class Trainer:
 
                 # Calculate training throughput (tokens processed per second)
                 tokens_per_second = (
-                    self.train_dataloader.batch_size
-                    * self.train_dataloader.block_size
+                    self.config.batch_size
+                    * self.config.block_size
                     * self.grad_accumulation_steps
                     * self.ddp_world_size
                     / (end_time - start_time)
@@ -541,11 +751,12 @@ class Trainer:
                     val_loss = self.evaluator.estimate_validation_loss(
                         step=step, global_step=global_step
                     )
-                    sample_context = (
-                        "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
-                        if self.mid_training
-                        else "Hello, I'm a language model,"
-                    )
+                    # Select appropriate sample context based on training mode
+                    if self.sft_training or self.mid_training:
+                        sample_context = "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
+                    else:
+                        sample_context = "Hello, I'm a language model,"
+
                     self.evaluator.sample_from_model(
                         num_sequences=self.config.generation_num_samples,
                         max_length=self.config.generation_max_length,
@@ -560,11 +771,13 @@ class Trainer:
                     )
 
                 # Save checkpoint at intervals or at end of training (independent of evals)
-                checkpoint_interval = (
-                    self.config.checkpoint_interval_midtrain
-                    if self.mid_training
-                    else self.config.checkpoint_interval_pretrain
-                )
+                if self.sft_training:
+                    checkpoint_interval = self.config.checkpoint_interval_sft
+                elif self.mid_training:
+                    checkpoint_interval = self.config.checkpoint_interval_midtrain
+                else:
+                    checkpoint_interval = self.config.checkpoint_interval_pretrain
+
                 save_checkpoint(
                     model=self.model,
                     optimizer=self.optimizer,
@@ -579,7 +792,9 @@ class Trainer:
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
                     mid_training=self.mid_training,
+                    sft_training=self.sft_training,
                 )
+
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()

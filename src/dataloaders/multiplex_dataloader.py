@@ -41,7 +41,7 @@ import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
 
 
 class MultiplexDataset(Dataset):
@@ -316,9 +316,9 @@ def default_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def create_sft_collate_fn(
     tokenizer,
-    device: torch.device,
     pad_token_id: Optional[int] = None,
     return_metadata: bool = False,
+    max_length: int = 1024,
 ):
     """
     Create a collate function for SFT training that tokenizes conversations and creates masks.
@@ -327,18 +327,18 @@ def create_sft_collate_fn(
 
     Args:
         tokenizer: Tokenizer with encode method (from get_custom_tokenizer)
-        device: Device to move tensors to (cuda/cpu)
         pad_token_id: Token ID for padding (default: uses <|assistant_end|>)
         return_metadata: If True, return (inputs, targets, metadata) instead of (inputs, targets)
+        max_length: Maximum sequence length (default: 1024 to match model block_size)
 
     Returns:
         Collate function that takes a batch and returns (inputs, targets) or (inputs, targets, metadata)
+        Note: Data is returned on CPU - move to device in training loop for uniformity
 
     Example:
         >>> from gpt_2.utils import get_custom_tokenizer
         >>> tokenizer, _ = get_custom_tokenizer()
-        >>> device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        >>> collate_fn = create_sft_collate_fn(tokenizer, device)
+        >>> collate_fn = create_sft_collate_fn(tokenizer, max_length=1024)
         >>>
         >>> dataloader = create_multiplex_dataloader(
         ...     datasets=datasets,
@@ -347,6 +347,7 @@ def create_sft_collate_fn(
         ... )
         >>>
         >>> for inputs, targets in dataloader:
+        ...     inputs, targets = inputs.to(device), targets.to(device)
         ...     loss = model(inputs, targets)
     """
     if pad_token_id is None:
@@ -379,11 +380,13 @@ def create_sft_collate_fn(
             ids, mask = render_conversation_for_training(example, tokenizer)
             tokenized_batch.append((ids, mask))
 
-        # Find max length in batch
+        # Find max length in batch, but cap at max_length
         nrows = len(tokenized_batch)
-        ncols = (
-            max(len(ids) for ids, mask in tokenized_batch) - 1
-        )  # seq of n creates inputs/targets of n-1
+        ncols = min(
+            max(len(ids) for ids, mask in tokenized_batch)
+            - 1,  # seq of n creates inputs/targets of n-1
+            max_length,
+        )
 
         # Create padded tensors
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
@@ -391,21 +394,21 @@ def create_sft_collate_fn(
 
         # Fill in the data
         for i, (ids, mask) in enumerate(tokenized_batch):
-            n = len(ids)
-            ids_tensor = torch.tensor(ids, dtype=torch.long)
-            inputs[i, : n - 1] = ids_tensor[:-1]
+            n = min(len(ids), max_length + 1)  # +1 because we split into input/target
+            ids_tensor = torch.tensor(ids[:n], dtype=torch.long)
+            mask_tensor = torch.tensor(mask[:n], dtype=torch.long)
+
+            # Truncate to fit within ncols
+            seq_len = min(n - 1, ncols)
+            inputs[i, :seq_len] = ids_tensor[:seq_len]
 
             # Apply mask to targets (mask out where mask is 0)
-            row_targets = ids_tensor[1:]
-            mask_tensor = torch.tensor(mask[1:], dtype=torch.long)
-            row_targets[mask_tensor == 0] = -1  # Mask out targets where mask is 0
-            targets[i, : n - 1] = row_targets
+            row_targets = ids_tensor[1:n]
+            mask_targets = mask_tensor[1:n]
+            row_targets[mask_targets == 0] = -1  # Mask out targets where mask is 0
+            targets[i, :seq_len] = row_targets[:seq_len]
 
-        # Move to device
-        inputs = inputs.to(device)
-        targets = targets.to(device)
-
-        # Return with or without metadata
+        # Return with or without metadata (data stays on CPU for uniformity)
         if return_metadata:
             metadata = {"dataset_names": dataset_names}
             return inputs, targets, metadata
@@ -428,6 +431,8 @@ def create_multiplex_dataloader(
     sampling_weights: Optional[List[float]] = None,
     collate_fn: Optional[Callable] = None,
     shuffle_seed: int = 42,
+    ddp_rank: Optional[int] = None,
+    ddp_world_size: Optional[int] = None,
 ) -> DataLoader:
     """
     Create a PyTorch DataLoader that multiplexes multiple datasets.
@@ -449,9 +454,15 @@ def create_multiplex_dataloader(
         sampling_weights: Optional weights for each dataset (used with 'weighted' strategy)
         collate_fn: Custom collate function (default: default_collate_fn)
         shuffle_seed: Random seed for reproducibility
+        ddp_rank: Rank of current process in DDP (None for single GPU)
+        ddp_world_size: Total number of processes in DDP (None for single GPU)
 
     Returns:
         PyTorch DataLoader that yields batches from the multiplexed datasets
+
+    Note:
+        For DDP training, pass ddp_rank and ddp_world_size to ensure each GPU
+        gets different batches. Without these, all GPUs will see the same data!
 
     Example:
         >>> datasets = [
@@ -478,13 +489,33 @@ def create_multiplex_dataloader(
     if collate_fn is None:
         collate_fn = default_collate_fn
 
+    # Setup sampler for DDP if needed
+    sampler = None
+    if ddp_rank is not None and ddp_world_size is not None and ddp_world_size > 1:
+        # Use DistributedSampler for DDP training
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=ddp_world_size,
+            rank=ddp_rank,
+            shuffle=shuffle,
+            seed=shuffle_seed,
+            drop_last=drop_last,
+        )
+        # When using sampler, don't pass shuffle to DataLoader
+        shuffle = False
+
     # Build DataLoader kwargs
     dataloader_kwargs = {
         "batch_size": batch_size,
-        "shuffle": shuffle,
+        "sampler": sampler,
+        "shuffle": (
+            shuffle if sampler is None else False
+        ),  # Can't use both sampler and shuffle
         "num_workers": num_workers,
         "pin_memory": pin_memory,
-        "drop_last": drop_last,
+        "drop_last": (
+            drop_last if sampler is None else False
+        ),  # DistributedSampler handles drop_last
         "collate_fn": collate_fn,
     }
 
@@ -495,16 +526,93 @@ def create_multiplex_dataloader(
         if persistent_workers:
             dataloader_kwargs["persistent_workers"] = persistent_workers
 
-    # Create and return DataLoader
+    # Create DataLoader
     dataloader = DataLoader(dataset, **dataloader_kwargs)
 
     # Attach dataset stats for easy access
     dataloader.dataset_stats = dataset.get_dataset_stats()
 
-    return dataloader
+    # Wrap with InfiniteDataLoader to provide next_batch() interface
+    return InfiniteDataLoader(dataloader)
 
 
-def print_dataloader_stats(dataloader: DataLoader):
+class InfiniteDataLoader:
+    """
+    Wrapper around PyTorch DataLoader to provide infinite iteration with next_batch() interface.
+
+    This makes PyTorch DataLoaders compatible with the pretrain/midtrain training loop
+    by automatically restarting iteration when the dataset is exhausted.
+
+    Handles DistributedSampler epoch updates for proper DDP shuffling.
+
+    Args:
+        dataloader: PyTorch DataLoader to wrap
+
+    Example:
+        >>> dataloader = DataLoader(dataset, batch_size=32)
+        >>> infinite_loader = InfiniteDataLoader(dataloader)
+        >>> x, y = infinite_loader.next_batch()  # Works indefinitely
+    """
+
+    def __init__(self, dataloader: DataLoader):
+        self.dataloader = dataloader
+        self.iterator = None
+        self.epoch = 0
+        # Preserve important attributes
+        self.batch_size = dataloader.batch_size
+        self.dataset = dataloader.dataset
+        if hasattr(dataloader, "dataset_stats"):
+            self.dataset_stats = dataloader.dataset_stats
+
+    def next_batch(self):
+        """
+        Get the next batch, automatically restarting iteration when exhausted.
+
+        Handles DistributedSampler epoch updates for proper shuffling in DDP.
+
+        Returns:
+            Tuple of (inputs, targets) from the dataloader
+        """
+        if self.iterator is None:
+            self._set_epoch_if_needed()
+            self.iterator = iter(self.dataloader)
+
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            # Restart iteration and increment epoch for DistributedSampler
+            self.epoch += 1
+            self._set_epoch_if_needed()
+            self.iterator = iter(self.dataloader)
+            return next(self.iterator)
+
+    def _set_epoch_if_needed(self):
+        """Set epoch on DistributedSampler if present (for proper DDP shuffling)."""
+        if hasattr(self.dataloader, "sampler") and isinstance(
+            self.dataloader.sampler, DistributedSampler
+        ):
+            self.dataloader.sampler.set_epoch(self.epoch)
+
+    def reset(self):
+        """
+        Reset the iterator to start from the beginning.
+
+        This is useful for validation loops where you want to ensure you start
+        from the beginning of the dataset each time.
+        """
+        self.iterator = None
+        self.epoch = 0
+
+    def __iter__(self):
+        """Allow using this wrapper with standard iteration."""
+        return iter(self.dataloader)
+
+    def __len__(self):
+        """Return the length of the underlying dataloader."""
+        return len(self.dataloader)
+
+
+def print_dataloader_stats(dataloader):
     """
     Print statistics about a multiplex dataloader.
 
@@ -600,7 +708,7 @@ if __name__ == "__main__":
     enc, _ = get_custom_tokenizer()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pad_token_id = enc.encode("<|assistant_end|>", allowed_special="all")[0]
-    collate_fn = create_sft_collate_fn(enc, device, return_metadata=True)
+    collate_fn = create_sft_collate_fn(enc, pad_token_id, return_metadata=True)
 
     dataloader = create_multiplex_dataloader(
         datasets=[

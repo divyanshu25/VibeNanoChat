@@ -217,6 +217,7 @@ def save_checkpoint(
     num_epochs: int = 3,
     master_process: bool = True,
     mid_training: bool = False,
+    sft_training: bool = False,
 ) -> None:
     """
     Save model checkpoint at specified intervals.
@@ -235,6 +236,7 @@ def save_checkpoint(
         num_epochs: Total number of epochs
         master_process: Whether this is the master process
         mid_training: Whether this is mid-training mode
+        sft_training: Whether this is SFT training mode
     """
     total_steps = max_steps * num_epochs
     should_save = (global_step > 0 and global_step % checkpoint_interval == 0) or (
@@ -258,7 +260,13 @@ def save_checkpoint(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
+    if sft_training:
+        checkpoint_suffix = "_sft"
+    elif mid_training:
+        checkpoint_suffix = "_midtraining"
+    else:
+        checkpoint_suffix = "_pretraining"
+
     checkpoint_path = (
         f"{checkpoint_dir}/model_checkpoint_global{global_step}{checkpoint_suffix}.pt"
     )

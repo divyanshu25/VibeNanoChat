@@ -120,6 +120,7 @@ gpu-status: ## Show current GPU utilization and memory usage
 
 # Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true
 # Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
+# Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
 ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs

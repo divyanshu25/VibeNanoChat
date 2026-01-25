@@ -212,9 +212,11 @@ class GPT(nn.Module):
         loss = None
         if targets is not None:
             # Reshape for cross-entropy loss computation
+            # Use ignore_index=-1 to skip masked positions (from SFT data collation)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
+                ignore_index=-1,
                 reduction=loss_reduction,
             )  # shape depends on reduction: (1,) for mean/sum, (B*T,) for none
 
