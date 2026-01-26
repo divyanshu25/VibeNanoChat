@@ -14,14 +14,7 @@ import torch
 
 
 def get_special_tokens():
-    """
-    Define special tokens for chat format and tool calling.
-
-    Token IDs start at 50257 (right after GPT-2's vocab which ends at 50256).
-
-    Returns:
-        dict: Mapping of special token strings to their token IDs
-    """
+    """Define special tokens for chat format and tool calling."""
     return {
         "<|bos|>": 50257,  # Beginning of sequence - marks start of conversation
         "<|user_start|>": 50258,  # Marks start of user message
@@ -243,58 +236,63 @@ def load_checkpoint(
     device: str,
     optimizer: torch.optim.Optimizer = None,
     master_process: bool = True,
+    print_resume_info: bool = True,
 ) -> dict:
     """
     Load model weights and optionally optimizer state from a checkpoint.
 
+    Expects canonical format with clean state_dict (no 'module.' prefix).
+    Model should be the raw unwrapped model (e.g., self.raw_model from trainer).
+
     Args:
         checkpoint_path: Path to the checkpoint file
-        model: The model to load weights into
-        device: Device to map the checkpoint to
-        optimizer: Optional optimizer to load state into (for resuming training)
+        model: Raw unwrapped model (not DDP/compile wrapped)
+        device: Device to map the checkpoint to ('cuda', 'cpu', etc.)
+        optimizer: Optional optimizer to load state into
         master_process: Whether this is the master process (for logging)
+        print_resume_info: Whether to print resume info (False for rollover scenarios)
 
     Returns:
-        dict: Dictionary with 'start_step', 'start_epoch', 'start_global_step', 'config', 'val_loss'
+        dict: Training state with 'start_step', 'start_epoch', 'start_global_step',
+              'config', and 'val_loss' keys
+
+    Raises:
+        ValueError: If checkpoint has 'module.' prefix or vocabulary size mismatch
+        KeyError: If checkpoint is missing required keys
     """
     if master_process:
         print(f"\n{'='*80}")
         print(f"📂 Loading checkpoint from: {checkpoint_path}")
         print(f"{'='*80}\n")
 
-    # weights_only=False required for loading custom classes like GPTConfig
-    # (PyTorch 2.6+ defaults to weights_only=True for security)
+    # Load checkpoint (weights_only=False needed for GPTConfig and other custom objects)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # Check for vocabulary size mismatch
     checkpoint_state = checkpoint["model"]
-    checkpoint_vocab_size = checkpoint_state["transformer.wte.weight"].shape[0]
+
+    # Validate vocabulary size compatibility
+    wte_key = "transformer.wte.weight"
+    if wte_key not in checkpoint_state:
+        raise KeyError(
+            f"Missing word token embedding weights in checkpoint.\n"
+            f"Expected key: '{wte_key}'\n"
+            f"Available keys (first 5): {list(checkpoint_state.keys())[:5]}"
+        )
+
+    checkpoint_vocab_size = checkpoint_state[wte_key].shape[0]
     model_vocab_size = model.transformer.wte.weight.shape[0]
 
     if checkpoint_vocab_size != model_vocab_size:
-        error_msg = (
-            f"\n{'='*80}\n"
-            f"❌ VOCABULARY SIZE MISMATCH ERROR\n"
-            f"{'='*80}\n"
-            f"Checkpoint vocab size: {checkpoint_vocab_size}\n"
-            f"Model vocab size:      {model_vocab_size}\n"
-            f"Difference:            {abs(model_vocab_size - checkpoint_vocab_size)} tokens\n"
-            f"\n"
-            f"The checkpoint was saved with a different vocabulary size than the\n"
-            f"current model configuration. This will cause index out of bounds errors.\n"
-            f"\n"
-            f"Possible solutions:\n"
-            f"1. Use a checkpoint with matching vocab_size={model_vocab_size}\n"
-            f"2. Modify your model config to use vocab_size={checkpoint_vocab_size}\n"
-            f"3. Retrain from scratch with the correct vocabulary size\n"
-            f"{'='*80}\n"
+        raise ValueError(
+            f"Vocabulary size mismatch - "
+            f"Checkpoint: {checkpoint_vocab_size}, Model: {model_vocab_size}"
         )
-        raise ValueError(error_msg)
 
-    # Load model state
+    # Load model weights
     model.load_state_dict(checkpoint_state)
+    if master_process:
+        print("✅ Model weights loaded")
 
-    # Load optimizer state if provided and available
+    # Load optimizer state (optional, for resuming training)
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
         if master_process:
@@ -317,7 +315,8 @@ def load_checkpoint(
     if "global_step" in checkpoint:
         result["start_global_step"] = checkpoint["global_step"] + 1
 
-    if master_process:
+    # Only print resume info if requested (skip for rollover scenarios)
+    if master_process and print_resume_info:
         print(
             f"✅ Resuming from epoch {result['start_epoch']}, step {result['start_step']}"
         )
@@ -348,15 +347,18 @@ def save_checkpoint(
     """
     Save model checkpoint at specified intervals.
 
+    Model should be the raw unwrapped model (e.g., self.raw_model from trainer)
+    to ensure clean state_dict without 'module.' or other wrapper prefixes.
+
     Args:
-        model: The model to save (can be DDP wrapped)
-        optimizer: The optimizer to save state from
+        model: Raw unwrapped model to save (not DDP/compile wrapped)
+        optimizer: Optimizer to save state from
         step: Current step within epoch
-        epoch: Current epoch
+        epoch: Current epoch number
         global_step: Global step across all epochs
         val_loss: Validation loss for this checkpoint
         checkpoint_dir: Directory to save checkpoints
-        ddp: Whether using distributed data parallel
+        ddp: Unused (kept for API compatibility)
         checkpoint_interval: Save checkpoint every N steps
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
@@ -372,12 +374,11 @@ def save_checkpoint(
     if not (master_process and should_save):
         return
 
-    # Get the underlying model (unwrap DDP if needed)
-    model_to_save = model.module if ddp else model
+    # Save model state_dict (model should already be unwrapped)
     checkpoint = {
-        "model": model_to_save.state_dict(),
+        "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
-        "config": model_to_save.config,
+        "config": model.config,
         "step": step,
         "epoch": epoch,
         "global_step": global_step,

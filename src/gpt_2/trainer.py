@@ -124,24 +124,28 @@ class Trainer:
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
         self.config = GPTConfig()
-        self.model = GPT(self.config)
-        self.model.to(self.device)
 
-        # Optional: Compile model for faster training
-        self.model = torch.compile(self.model)
+        # Create raw model and keep reference BEFORE any wrapping
+        # This reference will always point to the unwrapped model with updated weights
+        self.raw_model = GPT(self.config)
+        self.raw_model.to(self.device)
 
+        # Wrap with torch.compile for faster training
+        self.model = torch.compile(self.raw_model)
+
+        # Wrap with DDP for distributed training
         if self.ddp:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, device_ids=[self.ddp_local_rank]
             )
-            self.raw_model = self.model.module
-        else:
-            self.raw_model = self.model
+
+        # Note: self.raw_model stays unchanged and shares parameters with self.model
+        # This allows clean checkpoint saving without unwrapping
 
     def _setup_hyperparameters(self):
         """Configure training hyperparameters based on training mode."""
         self.num_epochs = self.config.num_epochs
-        self.run_evals_after = self.config.eval_interval
+        self.run_evals_after = self.config.eval_interval  # every 100 steps
 
         # Batch size and gradient accumulation
         if self.sft_training:
@@ -260,17 +264,6 @@ class Trainer:
         # Initialize CORE evaluator if requested
         if self.run_core_evals:
             enc, _ = get_custom_tokenizer()
-            # For smaller/faster evals during training, limit to subset of tasks
-            # You can remove tasks_to_run to run all tasks, or adjust max_examples_per_task
-            # core_tasks_subset = [
-            #     'hellaswag_zeroshot',
-            #     'arc_easy',
-            #     'arc_challenge',
-            #     'copa',
-            #     'winograd',
-            #     'winogrande',
-            #     'lambada_openai',
-            # ]
             self.core_evaluator = CoreEvaluator(
                 model=self.raw_model,
                 tokenizer=enc,
@@ -589,6 +582,8 @@ class Trainer:
                 is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
             )
             should_load_optimizer = not is_rollover
+            # Don't print resume info for rollover scenarios
+            should_print_resume_info = not is_rollover
 
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
@@ -596,6 +591,7 @@ class Trainer:
                 device=self.device,
                 optimizer=self.optimizer if should_load_optimizer else None,
                 master_process=self.master_process,
+                print_resume_info=should_print_resume_info,
             )
             if checkpoint_result["config"]:
                 self.config = checkpoint_result["config"]
@@ -608,8 +604,10 @@ class Trainer:
                 if self.master_process:
                     print(
                         "🔄 Rollover: Pretraining → Mid-training "
-                        "(weights loaded, fresh optimizer, counters reset)"
+                        "(weights loaded, fresh optimizer, counters reset to 0)"
                     )
+                    print("   Training will start from global_step: 0")
+                    print(f"{'='*80}\n")
             elif is_rollover_midtrain_to_sft:
                 self.start_epoch = 0
                 self.start_step = 0
@@ -617,8 +615,10 @@ class Trainer:
                 if self.master_process:
                     print(
                         "🔄 Rollover: Mid-training → SFT "
-                        "(weights loaded, fresh optimizer, counters reset)"
+                        "(weights loaded, fresh optimizer, counters reset to 0)"
                     )
+                    print("   Training will start from global_step: 0")
+                    print(f"{'='*80}\n")
             # Keep checkpoint counters when resuming
             elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
                 self.start_epoch = checkpoint_result["start_epoch"]
@@ -673,8 +673,19 @@ class Trainer:
                 project_name = "gpt2-pretraining"
                 training_mode = "pretraining"
 
+            # Calculate total FLOPs budget for this run
+            total_flops = self.flops_per_token * self.total_batch_size * self.max_steps
+
+            # Format FLOPs in scientific notation (e.g., "7.9e18" -> "7.9e18")
+            flops_str = f"{total_flops:.1e}"
+
+            # Create run name: L{layers}-{flops}
+            # Example: "L12-7.9e18" for 12 layers and 7.9e18 FLOPs
+            run_name = f"model_L{self.config.n_layer}-{flops_str}"
+
             wandb.init(
                 project=project_name,
+                name=run_name,
                 config={
                     "model_type": "GPT-2",
                     "training_mode": training_mode,
@@ -691,6 +702,8 @@ class Trainer:
                     "run_core_evals": self.run_core_evals,
                     "run_chatcore_evals": self.run_chatcore_evals,
                     "start_step": self.start_step,
+                    "n_layers": self.config.n_layer,
+                    "total_flops": total_flops,
                 },
             )
 
@@ -878,7 +891,7 @@ class Trainer:
                 )
                 if self.run_evals and should_eval:
                     val_loss = self.evaluator.estimate_validation_loss(
-                        step=step, global_step=global_step
+                        step=step, global_step=global_step, total_flops=flops_so_far
                     )
 
                     # self.evaluator.sample_from_model(
@@ -903,7 +916,7 @@ class Trainer:
                     checkpoint_interval = self.config.checkpoint_interval_pretrain
 
                 save_checkpoint(
-                    model=self.model,
+                    model=self.raw_model,  # Pass unwrapped model for clean state_dict
                     optimizer=self.optimizer,
                     step=step,
                     epoch=epoch,
@@ -931,8 +944,8 @@ class Trainer:
 
                     wandb.log(
                         {
-                            "epoch": epoch,
-                            "epoch_step": step,
+                            # "epoch": epoch,
+                            # "epoch_step": step,
                             "step": global_step,
                             "train_loss": train_loss,
                             # "train_bpb": train_bpb,
@@ -941,7 +954,7 @@ class Trainer:
                             "time_taken": end_time - start_time,
                             "gradient_norm": norm,
                             "flops_per_second": flops_per_second,
-                            "total_training_flops": flops_so_far,
+                            # "total_training_flops": flops_so_far,
                             "mfu": mfu,
                         }
                     )

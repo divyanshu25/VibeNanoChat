@@ -119,7 +119,7 @@ def format_mmlu(example):
     )
 
     # Get the correct answer text (e.g., "A. 3x10^8 m/s")
-    correct_answer = f"{choice_labels[answer_idx]}. {choices[answer_idx]}"
+    correct_answer = f"{choice_labels[answer_idx]} : {choices[answer_idx]}"
 
     # Build the user prompt with optional subject
     if subject:

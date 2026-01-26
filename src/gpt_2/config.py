@@ -43,7 +43,7 @@ class GPTConfig:
     num_iterations: int = (
         -1
     )  # Explicit number of optimization steps (-1 = calculate from ratio/flops)
-    target_flops: float = -1.0  # Target total FLOPs (-1 = use param_data_ratio instead)
+    target_flops: float = 3e18  # Target total FLOPs (-1 = use param_data_ratio instead)
     target_param_data_ratio: int = 20  # Data:param ratio (Chinchilla optimal = 20)
 
     # ========================================================================
@@ -58,8 +58,8 @@ class GPTConfig:
 
     # Warmup steps for each training phase (as fraction of max_steps)
     lr_warmup_ratio_pretrain: float = 0.1  # Warmup as fraction of total steps (10%)
-    lr_warmup_ratio_midtrain: float = 0.1  # Warmup as fraction of total steps (10%)
-    lr_warmup_ratio_sft: float = 0.1  # Warmup as fraction of total steps (10%)
+    lr_warmup_ratio_midtrain: float = 0.2  # Warmup as fraction of total steps (10%)
+    lr_warmup_ratio_sft: float = 0.4  # Warmup as fraction of total steps (10%)
 
     # ========================================================================
     # Weight Tying

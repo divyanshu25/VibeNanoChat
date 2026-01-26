@@ -297,7 +297,7 @@ class TrainingEvaluator:
         else:
             raise ValueError("token_bytes_path is required for BPB calculation")
 
-    def estimate_validation_loss(self, step, global_step=None):
+    def estimate_validation_loss(self, step, global_step=None, total_flops=None):
         """
         Estimate average loss on validation set and compute bits per byte (BPB).
         BPB is tokenization-independent: normalized by actual byte length of tokens.
@@ -305,6 +305,7 @@ class TrainingEvaluator:
         Args:
             step: Current step within epoch
             global_step: Global step across all epochs (for wandb logging)
+            total_flops: Total training FLOPs so far (for wandb logging)
 
         Returns:
             float: Validation loss
@@ -364,13 +365,18 @@ class TrainingEvaluator:
                 f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss:.4f} | BPB: {val_bpb:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
-            wandb.log(
-                {
-                    "val_loss": val_loss,
-                    "val_bpb": val_bpb,
-                    "step": global_step if global_step is not None else step,
-                }
-            )
+
+            log_dict = {
+                "val_loss": val_loss,
+                "val_bpb": val_bpb,
+                "step": global_step if global_step is not None else step,
+            }
+
+            # Add FLOPs for validation BPB vs FLOPs plot
+            if total_flops is not None:
+                log_dict["total_training_flops_data"] = total_flops
+
+            wandb.log(log_dict)
 
         return val_loss
 
