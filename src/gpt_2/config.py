@@ -27,7 +27,7 @@ class GPTConfig:
     # Training Configuration (NANOCHAT SETTINGS)
     # ========================================================================
     num_epochs: int = (
-        2  # Number of training epochs (nanochat uses iterations, not epochs)
+        1  # Number of training epochs (nanochat uses iterations, not epochs)
     )
     batch_size: int = (
         32  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)

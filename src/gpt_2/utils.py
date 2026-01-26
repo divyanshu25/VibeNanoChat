@@ -71,6 +71,7 @@ def get_custom_tokenizer():
 def calculate_num_iterations(
     model,
     config,
+    master_process: bool = True,
 ) -> tuple[int, float, int]:
     """
     Calculate the number of training iterations based on nanochat-style logic.
@@ -83,6 +84,7 @@ def calculate_num_iterations(
     Args:
         model: The GPT model (needs estimate_flops() and num_scaling_params() methods)
         config: Configuration object with training parameters
+        master_process: If True, print logging information (default: True)
 
     Returns:
         tuple: (num_iterations, num_flops_per_token, num_scaling_params)
@@ -96,37 +98,32 @@ def calculate_num_iterations(
     # Priority 1: Explicit num_iterations
     if config.num_iterations > 0:
         num_iterations = config.num_iterations
-        print(f"Using user-provided number of iterations: {num_iterations:,}")
+        if master_process:
+            print(f"Using user-provided number of iterations: {num_iterations:,}")
 
     # Priority 2: Target FLOPs
     elif config.target_flops > 0:
         num_iterations = round(
             config.target_flops / (num_flops_per_token * config.total_batch_size)
         )
-        print(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
+        if master_process:
+            print(
+                f"Calculated number of iterations from target FLOPs: {num_iterations:,}"
+            )
 
     # Priority 3: Data:param ratio (default for nanochat)
     elif config.target_param_data_ratio > 0:
         target_tokens = config.target_param_data_ratio * num_scaling_params
         num_iterations = target_tokens // config.total_batch_size
-        print(
-            f"Calculated number of iterations from target data:param ratio: {num_iterations:,}"
-        )
+        if master_process:
+            print(
+                f"Calculated number of iterations from target data:param ratio: {num_iterations:,}"
+            )
 
     else:
         raise ValueError(
             "No training horizon specified. Set one of: num_iterations, target_flops, or target_param_data_ratio"
         )
-
-    # Print training statistics
-    total_tokens = config.total_batch_size * num_iterations
-    total_flops = num_flops_per_token * total_tokens
-    tokens_params_ratio = total_tokens / num_scaling_params
-
-    print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
-    print(f"Total number of training tokens: {total_tokens:,}")
-    print(f"Tokens : Params ratio: {tokens_params_ratio:.2f}")
-    print(f"Total training FLOPs estimate: {total_flops:e}")
 
     return num_iterations, num_flops_per_token, num_scaling_params
 
@@ -440,3 +437,89 @@ def accumulate_bpb(per_token_loss, targets, token_bytes):
     bytes_sum = num_bytes.sum()
 
     return nats_sum, bytes_sum
+
+
+def get_peak_flops(device_name: str) -> float:
+    """
+    Get theoretical peak FLOPs for bfloat16 on various GPU architectures.
+
+    Returns the theoretical peak FLOPS (floating point operations per second)
+    for bfloat16 computation on the specified device. Used to calculate MFU
+    (Model FLOPs Utilization).
+
+    Inspired by:
+    - torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
+    - nanochat: https://github.com/karpathy/nanochat
+
+    Args:
+        device_name: Name of the GPU device (e.g., "NVIDIA H100")
+
+    Returns:
+        float: Peak FLOPS for bfloat16 operations. Returns inf if unknown device
+               (so MFU shows as 0% rather than an incorrect value)
+    """
+    name = device_name.lower()
+
+    # --- NVIDIA Blackwell ---
+    if "gb200" in name or "grace blackwell" in name:
+        return 2.5e15
+    if "b200" in name:
+        return 2.25e15
+    if "b100" in name:
+        return 1.8e15
+
+    # --- NVIDIA Hopper (H100/H200/H800) ---
+    if "h200" in name:
+        if "nvl" in name or "pcie" in name:
+            return 836e12
+        return 989e12  # H200 SXM
+    if "h100" in name:
+        if "nvl" in name:
+            return 835e12
+        if "pcie" in name:
+            return 756e12
+        return 989e12  # H100 SXM
+    if "h800" in name:
+        if "nvl" in name:
+            return 989e12
+        return 756e12  # H800 PCIe
+
+    # --- NVIDIA Ampere data center ---
+    if "a100" in name or "a800" in name:
+        return 312e12
+    if "a40" in name:
+        return 149.7e12
+    if "a30" in name:
+        return 165e12
+
+    # --- NVIDIA Ada data center ---
+    if "l40s" in name or "l40-s" in name or "l40 s" in name:
+        return 362e12
+    if "l4" in name:
+        return 121e12
+
+    # --- AMD CDNA accelerators ---
+    if "mi355" in name:
+        return 2.5e15
+    if "mi325" in name or "mi300x" in name:
+        return 1.3074e15
+    if "mi300a" in name:
+        return 980.6e12
+    if "mi250x" in name:
+        return 383e12
+    if "mi250" in name:
+        return 362.1e12
+
+    # --- Consumer RTX (for hobbyists) ---
+    if "5090" in name:
+        return 209.5e12
+    if "4090" in name:
+        return 165.2e12
+    if "3090" in name:
+        return 71e12
+
+    # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
+    print(
+        f"WARNING: Peak FLOPS undefined for device: {device_name}, MFU will show as 0%"
+    )
+    return float("inf")

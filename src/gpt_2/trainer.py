@@ -22,7 +22,8 @@ from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
 from gpt_2.utils import (calculate_num_iterations, get_custom_tokenizer,
-                         get_lr, load_checkpoint, save_checkpoint)
+                         get_lr, get_peak_flops, load_checkpoint,
+                         save_checkpoint)
 
 
 class Trainer:
@@ -184,11 +185,24 @@ class Trainer:
                 print("📊 CALCULATING PRETRAINING STEPS")
             print("=" * 80)
 
-        num_iterations, _, _ = calculate_num_iterations(self.raw_model, self.config)
+        num_iterations, flops_per_token, _ = calculate_num_iterations(
+            self.raw_model, self.config, self.master_process
+        )
         self.max_steps = num_iterations
+        self.flops_per_token = flops_per_token
 
         if self.master_process:
             print("=" * 80 + "\n")
+
+        # Initialize peak FLOPs for MFU calculation
+        if self.device.startswith("cuda"):
+            device_name = torch.cuda.get_device_name(self.device)
+            self.peak_flops = get_peak_flops(device_name)
+            if self.master_process:
+                print(f"GPU: {device_name}")
+                print(f"Peak FLOPS (BF16): {self.peak_flops:.2e}\n")
+        else:
+            self.peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
 
         # Set warmup steps based on training phase (calculated as % of max_steps)
         if self.sft_training:
@@ -703,14 +717,12 @@ class Trainer:
         torch.set_float32_matmul_precision("high")
 
         if self.master_process:
-            total_steps = self.max_steps * self.num_epochs
+            total_steps = self.max_steps
 
-            # Calculate FLOPs statistics
-            raw_model = self.model.module if self.ddp else self.model
-            flops_per_token = raw_model.estimate_flops()
+            # Calculate FLOPs statistics (using pre-computed values from init)
             total_tokens = self.total_batch_size * total_steps
-            total_flops = flops_per_token * total_tokens
-            num_params = raw_model.num_scaling_params()
+            total_flops = self.flops_per_token * total_tokens
+            num_params = self.raw_model.num_scaling_params()
             tokens_params_ratio = total_tokens / num_params
 
             print("\n" + "=" * 80)
@@ -733,7 +745,7 @@ class Trainer:
             print(f"🌐 World size: {self.ddp_world_size} GPUs")
             print(f"🎯 Total batch size: {self.total_batch_size:,} tokens/step")
             print(f"🔢 Model parameters: {num_params:,}")
-            print(f"💫 FLOPs per token: {flops_per_token:.3e}")
+            print(f"💫 FLOPs per token: {self.flops_per_token:.3e}")
             print(f"📈 Total training tokens: {total_tokens:,}")
             print(f"⚡ Total training FLOPs: {total_flops:.3e}")
             print(f"📐 Tokens:Params ratio: {tokens_params_ratio:.2f}")
@@ -849,6 +861,14 @@ class Trainer:
                         / (end_time - start_time)
                     )
 
+                # Calculate FLOPs metrics
+                flops_per_second = self.flops_per_token * tokens_per_second
+                flops_so_far = (
+                    self.flops_per_token * self.total_batch_size * global_step
+                )
+                # MFU: Model FLOPs Utilization (% of theoretical peak performance)
+                mfu = 100 * flops_per_second / (self.peak_flops * self.ddp_world_size)
+
                 # Periodically estimate loss on train/val sets for monitoring
                 total_steps = self.max_steps * self.num_epochs
                 val_loss = None  # Will be set if evals run
@@ -920,6 +940,9 @@ class Trainer:
                             "tokens_per_second": tokens_per_second,
                             "time_taken": end_time - start_time,
                             "gradient_norm": norm,
+                            "flops_per_second": flops_per_second,
+                            "total_training_flops": flops_so_far,
+                            "mfu": mfu,
                         }
                     )
 
@@ -932,6 +955,7 @@ class Trainer:
                         f"LR: {lr:.2e} | "
                         f"Grad: {norm:.2e} | "
                         f"Speed: {tokens_per_second/1000:.1f}K tok/s | "
+                        f"MFU: {mfu:.2f}% | "
                         f"Time: {end_time - start_time:.2f}s"
                     )
 
