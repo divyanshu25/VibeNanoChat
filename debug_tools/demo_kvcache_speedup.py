@@ -313,8 +313,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 import torch.nn.functional as F
 
+from eval_tasks.chat_core.kv_cache_utils import (create_kv_cache, forward_pass,
+                                                 get_model_config,
+                                                 prefill_prompt)
 from gpt_2.gpt2_model import GPT
-from gpt_2.kv_cache import KVCache
 from gpt_2.utils import get_custom_tokenizer, load_checkpoint
 
 
@@ -353,13 +355,11 @@ def generate_with_timing(
     # STEP 1: Extract model configuration
     # =========================================================================
     # We need these dimensions to create the KV cache with correct shape
-    config = model.config
-    num_heads = config.n_kv_head if hasattr(config, "n_kv_head") else config.n_head
-    head_dim = config.n_embed // config.n_head
-    num_layers = config.n_layer
+    # Now using shared utility function for consistency
+    num_heads, head_dim, num_layers, max_seq_len = get_model_config(model)
 
     # =========================================================================
-    # STEP 2: Create KV cache if enabled
+    # STEP 2: Create KV cache if enabled (using shared utility)
     # =========================================================================
     # The cache will store Key and Value tensors for each layer
     #
@@ -441,42 +441,43 @@ def generate_with_timing(
     # To store new K,V at position pos:
     #   kv_cache[layer, 0, :, :, pos:pos+1, :] = new_k
     #   kv_cache[layer, 1, :, :, pos:pos+1, :] = new_v
-
-    kv_cache = None
-    if use_kv_cache:
-        kv_cache = KVCache(
-            batch_size=1,  # We're generating one sequence
-            num_heads=num_heads,
-            seq_len=len(prompt_tokens) + num_tokens,  # Total capacity needed
-            head_dim=head_dim,
-            num_layers=num_layers,
-        )
-        # At this point, cache is created but empty
-        # It will be filled during the prefill phase
-        #
-        # VISUAL: What the cache looks like conceptually
-        #
-        #   Layer 0:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]  ← Empty slots for 512 tokens
-        #   Layer 1:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
-        #   Layer 2:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
-        #   ...
-        #   Layer 11: [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
-        #
-        # After prefill with "Hello world" (2 tokens):
-        #
-        #   Layer 0:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]  ← Filled for 2 tokens
-        #   Layer 1:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
-        #   Layer 2:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
-        #   ...
-        #   Layer 11: [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
-        #
-        # After generating 3 more tokens:
-        #
-        #   Layer 0:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]  ← Now 5 tokens cached
-        #   Layer 1:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
-        #   Layer 2:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
-        #   ...
-        #   Layer 11: [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
+    #
+    # Now using shared create_kv_cache() utility for consistency with prod code:
+    kv_cache = create_kv_cache(
+        prompt_length=len(prompt_tokens),
+        max_tokens=num_tokens,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_layers=num_layers,
+        max_seq_len=max_seq_len,
+        use_kv_cache=use_kv_cache,
+    )
+    # At this point, cache is created but empty
+    # It will be filled during the prefill phase
+    #
+    # VISUAL: What the cache looks like conceptually
+    #
+    #   Layer 0:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]  ← Empty slots for 512 tokens
+    #   Layer 1:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
+    #   Layer 2:  [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
+    #   ...
+    #   Layer 11: [ K: ▢▢▢▢▢... ] [ V: ▢▢▢▢▢... ]
+    #
+    # After prefill with "Hello world" (2 tokens):
+    #
+    #   Layer 0:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]  ← Filled for 2 tokens
+    #   Layer 1:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
+    #   Layer 2:  [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
+    #   ...
+    #   Layer 11: [ K: ■■▢▢▢... ] [ V: ■■▢▢▢... ]
+    #
+    # After generating 3 more tokens:
+    #
+    #   Layer 0:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]  ← Now 5 tokens cached
+    #   Layer 1:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
+    #   Layer 2:  [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
+    #   ...
+    #   Layer 11: [ K: ■■■■■▢... ] [ V: ■■■■■▢... ]
 
     # =========================================================================
     # STEP 3: PREFILL PHASE - Process the entire prompt at once
@@ -484,15 +485,11 @@ def generate_with_timing(
     # This is the same for both cached and non-cached generation
     # We process all prompt tokens in one forward pass
     # If cache is enabled, this fills the cache with K,V for all prompt tokens
-    prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
+    # Now using shared utility function for consistency
+    next_token_logits = prefill_prompt(model, prompt_tokens, device, kv_cache)
 
-    with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
-        with torch.no_grad():
-            logits, _ = model(
-                prompt_tensor, kv_cache=kv_cache
-            )  # shape (1, len(prompt_tokens), vocab_size)
-
-    probs = F.softmax(logits[0, -1, :], dim=-1)
+    # Sample the first token
+    probs = F.softmax(next_token_logits, dim=-1)
     next_token = torch.multinomial(probs, num_samples=1).item()
 
     # After prefill:
@@ -513,17 +510,13 @@ def generate_with_timing(
         # =====================================================================
         # KEY DIFFERENCE: What do we pass to the model?
         # =====================================================================
+        # Append the token we're about to process
+        generated_tokens.append(next_token)
+
         if use_kv_cache:
             # WITH CACHE: Only pass the NEW token!
             # The cache already has K,V for all previous tokens
             # This makes the forward pass O(1) with respect to sequence length
-
-            # Append the token we're about to process
-            generated_tokens.append(next_token)
-
-            next_token_tensor = torch.tensor(
-                [[next_token]], dtype=torch.long, device=device
-            )
             # Shape: (1, 1) - just ONE token!
 
             # Example at step 10:
@@ -532,15 +525,12 @@ def generate_with_timing(
             # - Cache provides: K,V for previous 11 tokens
             # - Result: Attention computation is fast!
 
+            token_or_tokens = next_token  # Pass single token
+
         else:
             # WITHOUT CACHE: Pass the ENTIRE sequence so far!
             # We recompute K,V for ALL tokens at every step
             # This makes the forward pass O(N) with respect to sequence length
-
-            generated_tokens.append(next_token)
-            next_token_tensor = torch.tensor(
-                [generated_tokens], dtype=torch.long, device=device
-            )
             # Shape: (1, current_length) - GROWING each step!
 
             # Example at step 10:
@@ -549,20 +539,21 @@ def generate_with_timing(
             # - Cache provides: nothing
             # - Result: Attention computation gets slower each step!
 
+            token_or_tokens = generated_tokens  # Pass entire sequence
+
         # =====================================================================
         # TIME THIS STEP
         # =====================================================================
         # This is the critical measurement that shows the speedup
+        # Now using shared utility functions for consistency
 
         step_start = time.time()
 
-        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
-            with torch.no_grad():
-                logits, _ = model(
-                    next_token_tensor, kv_cache=kv_cache
-                )  # shape (1, 1, vocab_size)
+        # Forward pass through model (handles single token or full sequence)
+        next_token_logits = forward_pass(model, token_or_tokens, device, kv_cache)
 
-        probs = F.softmax(logits[0, -1, :], dim=-1)
+        # Sample next token (using greedy sampling for determinism)
+        probs = F.softmax(next_token_logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1).item()
 
         step_time = time.time() - step_start
@@ -922,7 +913,8 @@ Want to learn more? Try these experiments:
    - Question: How does model size affect cache benefit?
 
 Related files to explore:
-  - src/gpt_2/kv_cache.py: KV cache implementation
+  - src/gpt_2/kv_cache.py: KV cache data structure implementation
+  - src/eval_tasks/chat_core/kv_cache_utils.py: Shared KV cache utilities
   - src/gpt_2/attention.py: How cache is used in attention
   - debug_tools/test_kvcache_correctness.py: Verify cache correctness
   - debug_tools/test_chatcore_kvcache.py: Real evaluation with cache

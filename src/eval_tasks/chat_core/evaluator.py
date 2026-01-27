@@ -12,9 +12,6 @@ Supported tasks:
 
 """
 
-import os
-# Import KVCache from the model package (where it belongs as a core component)
-import sys
 import time
 from typing import Dict, List, Optional
 
@@ -23,10 +20,9 @@ import torch.distributed as dist
 
 import wandb
 
+from .kv_cache_utils import (create_kv_cache, forward_pass, get_model_config,
+                             prefill_prompt, sample_next_token)
 from .tools import use_calculator
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
-from gpt_2.kv_cache import KVCache
 
 
 class ChatCoreEvaluator:
@@ -128,130 +124,12 @@ class ChatCoreEvaluator:
         except (AttributeError, KeyError, Exception):
             return False
 
-    def _get_model_config(self):
-        """Extract model configuration for KV cache dimensions."""
-        if hasattr(self.model, "config"):
-            m = self.model.config
-            num_heads = m.n_kv_head if hasattr(m, "n_kv_head") else m.n_head
-            head_dim = m.n_embed // m.n_head
-            num_layers = m.n_layer
-            max_seq_len = m.block_size if hasattr(m, "block_size") else 2048
-        else:
-            # Fallback: try to infer from model structure
-            if self.master_process:
-                print("Warning: Could not find model.config, using fallback dimensions")
-            num_heads = 12
-            head_dim = 64
-            num_layers = 12
-            max_seq_len = 2048
-
-        return num_heads, head_dim, num_layers, max_seq_len
-
     def _get_assistant_end_token(self):
         """Get the assistant end token ID."""
         try:
             return self.tokenizer._special_tokens["<|assistant_end|>"]
         except (AttributeError, KeyError, Exception):
             return 50256  # Fallback to GPT-2's <|endoftext|>
-
-    def _create_kv_cache(
-        self,
-        prompt_length: int,
-        num_heads: int,
-        head_dim: int,
-        num_layers: int,
-        max_seq_len: int,
-    ):
-        """Create KV cache for generation if enabled."""
-        if not self.use_kv_cache:
-            return None
-
-        estimated_length = prompt_length + self.max_tokens
-        if estimated_length > max_seq_len:
-            estimated_length = max_seq_len
-
-        return KVCache(
-            batch_size=1,
-            num_heads=num_heads,
-            seq_len=estimated_length,
-            head_dim=head_dim,
-            num_layers=num_layers,
-        )
-
-    def _prefill_prompt(self, prompt_tokens: List[int], kv_cache):
-        """
-        Process all prompt tokens at once (prefill phase).
-
-        Returns:
-            next_token_logits: Logits for the position after the prompt
-        """
-        prompt_tensor = torch.tensor(
-            [prompt_tokens], dtype=torch.long, device=self.device
-        )
-
-        with torch.amp.autocast(
-            device_type=(
-                self.device.type if hasattr(self.device, "type") else str(self.device)
-            ),
-            dtype=torch.bfloat16,
-        ):
-            logits, _ = self.model(prompt_tensor, kv_cache=kv_cache)
-
-        return logits[0, -1, :]
-
-    def _sample_next_token(self, logits):
-        """Sample next token from logits using temperature and top-k."""
-        if self.temperature > 0:
-            # Apply temperature scaling
-            logits = logits / self.temperature
-
-            # Apply top-k filtering
-            if self.top_k > 0:
-                top_k_logits, top_k_indices = torch.topk(logits, self.top_k)
-                logits = torch.full_like(logits, float("-inf"))
-                logits.scatter_(0, top_k_indices, top_k_logits)
-
-            # Sample from probability distribution
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1).item()
-        else:
-            # Greedy decoding (deterministic)
-            next_token = logits.argmax().item()
-
-        return next_token
-
-    def _forward_pass(self, token_or_tokens, kv_cache):
-        """
-        Run forward pass through model with autocast.
-
-        Args:
-            token_or_tokens: Either a single token (int) or list of tokens
-            kv_cache: KV cache to use (or None)
-
-        Returns:
-            next_token_logits: Logits for the next token position
-        """
-        # Prepare input tensor
-        if isinstance(token_or_tokens, int):
-            # Single token - for decode phase with KV cache
-            input_tensor = torch.tensor(
-                [[token_or_tokens]], dtype=torch.long, device=self.device
-            )
-        else:
-            # Multiple tokens - for prefill or no-cache mode
-            input_tensor = torch.tensor(
-                [token_or_tokens], dtype=torch.long, device=self.device
-            )
-
-        with torch.amp.autocast(
-            device_type=(
-                self.device.type if hasattr(self.device, "type") else str(self.device)
-            ),
-            dtype=torch.bfloat16,
-        ):
-            logits, _ = self.model(input_tensor, kv_cache=kv_cache)
-
-        return logits[0, -1, :]
 
     def register_task(self, task_name: str, task_config: Dict):
         """
@@ -411,16 +289,24 @@ class ChatCoreEvaluator:
             Generated text (decoded tokens)
         """
         # Setup: Get model config and special tokens
-        num_heads, head_dim, num_layers, max_seq_len = self._get_model_config()
+        num_heads, head_dim, num_layers, max_seq_len = get_model_config(self.model)
         assistant_end_id = self._get_assistant_end_token()
 
         # Create KV cache for the entire generation (if enabled)
-        kv_cache = self._create_kv_cache(
-            len(prompt_tokens), num_heads, head_dim, num_layers, max_seq_len
+        kv_cache = create_kv_cache(
+            len(prompt_tokens),
+            self.max_tokens,
+            num_heads,
+            head_dim,
+            num_layers,
+            max_seq_len,
+            self.use_kv_cache,
         )
 
         # PHASE 1: PREFILL - Process entire prompt at once
-        next_token_logits = self._prefill_prompt(prompt_tokens, kv_cache)
+        next_token_logits = prefill_prompt(
+            self.model, prompt_tokens, kv_cache, self.device
+        )
 
         # PHASE 2: DECODE - Generate tokens one at a time
         generated_tokens = list(prompt_tokens)
@@ -428,7 +314,9 @@ class ChatCoreEvaluator:
         # Main generation loop
         for _ in range(self.max_tokens):
             # Sample next token from logits
-            next_token = self._sample_next_token(next_token_logits)
+            next_token = sample_next_token(
+                next_token_logits, self.temperature, self.top_k
+            )
 
             # Check for termination
             if next_token == assistant_end_id:
@@ -447,9 +335,13 @@ class ChatCoreEvaluator:
             # Get logits for next token
             # With KV cache: pass only new token; Without: pass entire sequence
             if self.use_kv_cache:
-                next_token_logits = self._forward_pass(next_token, kv_cache)
+                next_token_logits = forward_pass(
+                    self.model, next_token, kv_cache, self.device
+                )
             else:
-                next_token_logits = self._forward_pass(generated_tokens, kv_cache)
+                next_token_logits = forward_pass(
+                    self.model, generated_tokens, kv_cache, self.device
+                )
 
         # Extract only newly generated tokens (exclude the prompt)
         new_tokens = generated_tokens[len(prompt_tokens) :]
@@ -503,13 +395,21 @@ class ChatCoreEvaluator:
         assistant_end_id = self._get_assistant_end_token()
 
         # Setup: Get model config and create KV cache
-        num_heads, head_dim, num_layers, max_seq_len = self._get_model_config()
-        kv_cache = self._create_kv_cache(
-            len(prompt_tokens), num_heads, head_dim, num_layers, max_seq_len
+        num_heads, head_dim, num_layers, max_seq_len = get_model_config(self.model)
+        kv_cache = create_kv_cache(
+            len(prompt_tokens),
+            self.max_tokens,
+            num_heads,
+            head_dim,
+            num_layers,
+            max_seq_len,
+            self.use_kv_cache,
         )
 
         # PHASE 1: PREFILL - Process entire prompt at once
-        next_token_logits = self._prefill_prompt(prompt_tokens, kv_cache)
+        next_token_logits = prefill_prompt(
+            self.model, prompt_tokens, kv_cache, self.device
+        )
 
         # PHASE 2: DECODE - Setup for autoregressive generation with tool use
         generated_tokens = list(prompt_tokens)
@@ -533,14 +433,20 @@ class ChatCoreEvaluator:
 
                 # Update KV cache with forced token
                 if self.use_kv_cache:
-                    next_token_logits = self._forward_pass(next_token, kv_cache)
+                    next_token_logits = forward_pass(
+                        self.model, next_token, kv_cache, self.device
+                    )
                 else:
-                    next_token_logits = self._forward_pass(generated_tokens, kv_cache)
+                    next_token_logits = forward_pass(
+                        self.model, generated_tokens, kv_cache, self.device
+                    )
 
                 continue
 
             # Sample next token from logits
-            next_token = self._sample_next_token(next_token_logits)
+            next_token = sample_next_token(
+                next_token_logits, self.temperature, self.top_k
+            )
 
             # Check for termination
             if next_token == assistant_end_id:
@@ -591,9 +497,13 @@ class ChatCoreEvaluator:
 
             # Get logits for next token
             if self.use_kv_cache:
-                next_token_logits = self._forward_pass(next_token, kv_cache)
+                next_token_logits = forward_pass(
+                    self.model, next_token, kv_cache, self.device
+                )
             else:
-                next_token_logits = self._forward_pass(generated_tokens, kv_cache)
+                next_token_logits = forward_pass(
+                    self.model, generated_tokens, kv_cache, self.device
+                )
 
         # Extract only newly generated tokens (exclude the prompt)
         new_tokens = generated_tokens[len(prompt_tokens) :]

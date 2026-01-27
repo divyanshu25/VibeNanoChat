@@ -729,9 +729,10 @@ class Trainer:
         # Set precision for matrix multiplications (improves performance on modern GPUs)
         torch.set_float32_matmul_precision("high")
 
-        if self.master_process:
-            total_steps = self.max_steps
+        # Calculate total steps once for the entire training run
+        total_steps = self.max_steps * self.num_epochs
 
+        if self.master_process:
             # Calculate FLOPs statistics (using pre-computed values from init)
             total_tokens = self.total_batch_size * total_steps
             total_flops = self.flops_per_token * total_tokens
@@ -776,9 +777,9 @@ class Trainer:
                 start_time = time.time()  # Track step timing
                 self.optimizer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
-                # BPB accumulators
-                torch.tensor(0.0, dtype=torch.float32, device=self.device)
-                torch.tensor(0, dtype=torch.int64, device=self.device)
+                # # BPB accumulators
+                # torch.tensor(0.0, dtype=torch.float32, device=self.device)
+                # torch.tensor(0, dtype=torch.int64, device=self.device)
 
                 # Track active tokens for SFT training (where targets >= 0)
                 num_active_tokens = torch.tensor(
@@ -883,7 +884,6 @@ class Trainer:
                 mfu = 100 * flops_per_second / (self.peak_flops * self.ddp_world_size)
 
                 # Periodically estimate loss on train/val sets for monitoring
-                total_steps = self.max_steps * self.num_epochs
                 val_loss = None  # Will be set if evals run
                 should_eval = (
                     global_step % self.run_evals_after == 0
@@ -960,7 +960,6 @@ class Trainer:
                     )
 
                     # Print comprehensive training statistics
-                    total_steps = self.max_steps * self.num_epochs
                     progress = (global_step + 1) / total_steps * 100
                     print(
                         f"[Epoch {epoch+1}/{self.num_epochs}] [Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
