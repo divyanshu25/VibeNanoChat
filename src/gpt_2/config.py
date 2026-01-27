@@ -16,7 +16,7 @@ class GPTConfig:
     block_size: int = 2048  # Maximum sequence length (context window)
     vocab_size: int = 50266  # GPT-2 vocab (50257) + special tokens (9)
     # NOTE: Nanochat uses 65,536 with a custom tokenizer. We use GPT-2's tokenizer.
-    n_layer: int = 18  # Number of transformer blocks in the model
+    n_layer: int = 6  # Number of transformer blocks in the model
     n_head: int = 10  # Number of attention heads per transformer block
     n_kv_head: int = 10  # Number of KV heads for GQA (MHA in this config)
     n_embed: int = (
@@ -30,7 +30,7 @@ class GPTConfig:
         1  # Number of training epochs (nanochat uses iterations, not epochs)
     )
     batch_size: int = (
-        16  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)
+        32  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)
     )
     total_batch_size: int = 524288  # Total tokens per gradient update (2^19)
     weight_decay: float = 0.10  # L2 regularization weight decay (nanochat default)

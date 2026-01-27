@@ -62,6 +62,7 @@ log_files = {
     "n12": "/mnt/localssd/NanoGPT/logs/scaling_law_n12_20260126_131156.log",
     "n14": "/mnt/localssd/NanoGPT/logs/scaling_law_n14_20260126_131156.log",
     "n16": "/mnt/localssd/NanoGPT/logs/scaling_law_n16_20260126_131156.log",
+    "n18": "/mnt/localssd/NanoGPT/logs/scaling_law_n18_20260126_131156.log",
 }
 
 # Model parameters (from previous analysis)
@@ -70,6 +71,7 @@ model_params = {
     "n12": 303_093_760,
     "n14": 342_448_640,
     "n16": 381_803_520,
+    "n18": 421_158_400,
 }
 
 print("=" * 70)
@@ -110,8 +112,8 @@ params_M = params / 1e6
 fig, ax1 = plt.subplots(figsize=(12, 7))
 
 # Plot the data points for training time
-colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3"]
-model_colors = {k: colors[i] for i, k in enumerate(["n10", "n12", "n14", "n16"])}
+colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3", "#F38630"]
+model_colors = {k: colors[i] for i, k in enumerate(["n10", "n12", "n14", "n16", "n18"])}
 point_colors = [model_colors[k] for k in model_names]
 
 scatter1 = ax1.scatter(

@@ -41,6 +41,13 @@ data = {
         "flops_per_token": 2.392e9,
         "final_val_bpb": 1.07513,  # Step 2391
     },
+    "n18": {
+        "params": 421_158_400,
+        "tokens": 1_114_636_288,
+        "flops": 3.0e18,
+        "flops_per_token": 2.691e9,
+        "final_val_bpb": 1.08998,  # Step 2125
+    },
 }
 
 # Extract data for plotting
@@ -62,7 +69,7 @@ scatter = plt.scatter(
     params_M,
     tokens_B,
     s=200,
-    c=["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3"],
+    c=["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3", "#F38630"],
     alpha=0.8,
     edgecolors="black",
     linewidth=2,
@@ -159,7 +166,7 @@ val_params_M = val_params / 1e6
 fig, ax = plt.subplots(figsize=(10, 7))
 
 # Plot the data points
-colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3"]
+colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#95E1D3", "#F38630"]
 model_colors = {k: colors[i] for i, k in enumerate(data.keys())}
 scatter_colors = [model_colors[k] for k in val_model_names]
 

@@ -11,17 +11,14 @@ Example:
     >>> print(f"Loaded {len(examples)} SpellingBee examples")
 """
 
-import os
 import random
 import re
-import urllib.request
 from typing import Dict, List, Optional
+
+from dataloaders.word_utils import download_word_list
 
 # Letters of the alphabet
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
-
-# A list of 370K English words
-WORD_LIST_URL = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads/master/words_alpha.txt"
 
 # Separate train and test with different random seeds
 TEST_RANDOM_SEED_OFFSET = 10_000_000
@@ -89,42 +86,6 @@ USER_MSG_TEMPLATES = [
     "{word}の中に{letter}がいくつ",
     "{word}に{letter}が何回出てくる",
 ]
-
-
-def download_word_list(cache_dir: Optional[str] = None) -> List[str]:
-    """
-    Download and cache the English word list.
-
-    Args:
-        cache_dir: Optional directory to cache the word list
-
-    Returns:
-        List of English words
-    """
-    # Determine cache location - use repo's data/cache directory
-    if cache_dir is None:
-        # Get the repo root (assuming this file is in src/dataloaders/)
-        repo_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-        cache_dir = os.path.join(repo_root, "data", "cache")
-
-    os.makedirs(cache_dir, exist_ok=True)
-
-    filename = WORD_LIST_URL.split("/")[-1]
-    cache_path = os.path.join(cache_dir, filename)
-
-    # Download if not cached
-    if not os.path.exists(cache_path):
-        print(f"Downloading word list from {WORD_LIST_URL}...")
-        urllib.request.urlretrieve(WORD_LIST_URL, cache_path)
-        print(f"Saved to {cache_path}")
-
-    # Load words
-    with open(cache_path, "r", encoding="utf-8") as f:
-        words = [line.strip() for line in f if line.strip()]
-
-    return words
 
 
 def extract_answer(text: str) -> Optional[str]:
