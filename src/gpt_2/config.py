@@ -8,10 +8,27 @@ class GPTConfig:
 
     This dataclass holds all the configuration parameters needed to define
     the architecture and training setup of the GPT model.
+
+    Model architecture can be specified in two ways:
+    1. nanochat-style: Set 'depth' and 'aspect_ratio', which auto-calculates n_layer, n_embed, n_head
+    2. Traditional: Set n_layer, n_embed, n_head, n_kv_head directly
     """
 
     # ========================================================================
-    # Model Architecture (NANOCHAT 560M CONFIG)
+    # Model Architecture - nanochat-style (preferred for scaling laws)
+    # ========================================================================
+    # Set depth to auto-calculate architecture dimensions (depth × aspect_ratio design)
+    # When depth > 0: n_layer = depth, n_embed = depth × aspect_ratio (rounded to head_dim multiple)
+    depth: int = -1  # Model depth (-1 = use n_layer/n_embed instead)
+    aspect_ratio: int = (
+        64  # Multiplier for model_dim (model_dim = depth × aspect_ratio)
+    )
+    head_dim: int = (
+        128  # Target dimension per attention head (for Flash Attention efficiency)
+    )
+
+    # ========================================================================
+    # Model Architecture - Traditional (used when depth = -1)
     # ========================================================================
     block_size: int = 2048  # Maximum sequence length (context window)
     vocab_size: int = 50266  # GPT-2 vocab (50257) + special tokens (9)
@@ -90,7 +107,12 @@ class GPTConfig:
     # ========================================================================
     # Evaluation Schedule
     # ========================================================================
-    eval_interval: int = 100  # Run evaluations every N global steps
+    eval_interval: int = (
+        500  # Run validation loss evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
+    )
+    core_eval_interval: int = (
+        2000  # Run CORE benchmark evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
+    )
     val_loss_eval_batches: int = (
         76  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
     )
@@ -123,3 +145,41 @@ class GPTConfig:
     chat_core_hf_cache_dir: str = (
         "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # HuggingFace cache directory for datasets
     )
+
+    def __post_init__(self):
+        """
+        Auto-calculate model architecture dimensions from depth if specified.
+
+        This implements nanochat's depth × aspect_ratio parameterization:
+        - n_layer = depth
+        - base_dim = depth × aspect_ratio
+        - n_embed = round base_dim up to nearest multiple of head_dim
+        - n_head = n_embed // head_dim
+        - n_kv_head = n_head (1:1 GQA ratio, i.e., MHA)
+        """
+        if self.depth > 0:
+            # Calculate dimensions from depth
+            self.n_layer = self.depth
+            base_dim = self.depth * self.aspect_ratio
+
+            # Round up to nearest multiple of head_dim for clean division
+            # This ensures: n_embed % head_dim == 0
+            self.n_embed = (
+                (base_dim + self.head_dim - 1) // self.head_dim
+            ) * self.head_dim
+
+            # Calculate number of heads
+            self.n_head = self.n_embed // self.head_dim
+            self.n_kv_head = self.n_head  # Default: 1:1 GQA ratio (MHA)
+
+            # Calculate the "nudge" for logging
+            nudge = self.n_embed - base_dim
+
+            # Store calculated values for later reference
+            self._depth_mode = True
+            self._base_dim = base_dim
+            self._nudge = nudge
+        else:
+            self._depth_mode = False
+            self._base_dim = None
+            self._nudge = 0

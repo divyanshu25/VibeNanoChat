@@ -33,6 +33,29 @@ To chat with your trained model:
 uv run python scripts/chat.py --checkpoint /path/to/checkpoint.pt
 ```
 
+## Depth Parameterization (Scaling Laws)
+
+NanoGPT supports **depth-based parameterization** inspired by [nanochat](https://github.com/karpathy/nanochat), which simplifies model scaling using a single knob:
+
+```bash
+# Train models of different sizes with one parameter
+make ddp-train DEPTH=6 TARGET_FLOPS=1e18   # ~30M params
+make ddp-train DEPTH=12 TARGET_FLOPS=1e18  # ~150M params
+make ddp-train DEPTH=20 TARGET_FLOPS=1e18  # ~560M params
+```
+
+**Benefits:**
+- 🎯 **Single knob:** `DEPTH` controls both model width and depth
+- 📊 **Auto-scaling:** Learning rate and weight decay scale automatically
+- 🔬 **Easy sweeps:** Run scaling law experiments with simple loops
+
+**Run full scaling law experiments:**
+```bash
+make run-scaling-law  # Sweeps depths 6-14 and FLOP budgets 1e18-6e18
+```
+
+📖 **See [docs/DEPTH_PARAMETERIZATION.md](docs/DEPTH_PARAMETERIZATION.md) for full documentation**
+
 ## Reproducing GPT-2 (124M)
 
 This implementation reproduces GPT-2 (124M parameters) with the following architecture:

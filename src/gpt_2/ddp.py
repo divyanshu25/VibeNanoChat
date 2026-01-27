@@ -133,7 +133,12 @@ def run_pretraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
-    n_layer=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    target_flops=None,
+    eval_interval=None,
+    core_eval_interval=None,
 ):
     """
     Execute the pretraining phase.
@@ -184,7 +189,12 @@ def run_pretraining(
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
-        n_layer=n_layer,
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        target_flops=target_flops,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
     )
     trainer.train()
 
@@ -213,7 +223,11 @@ def run_midtraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
-    n_layer=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    eval_interval=None,
+    core_eval_interval=None,
 ):
     """
     Execute the mid-training phase.
@@ -274,7 +288,11 @@ def run_midtraining(
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
-        n_layer=n_layer,
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
     )
     trainer.train()
 
@@ -302,7 +320,11 @@ def run_sft(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
-    n_layer=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    eval_interval=None,
+    core_eval_interval=None,
 ):
     """
     Execute the SFT (Supervised Fine-Tuning) phase.
@@ -360,7 +382,11 @@ def run_sft(
         checkpoint_path=checkpoint_path,  # Rollover from mid-training checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
-        n_layer=n_layer,
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
     )
     trainer.train()
 
@@ -415,7 +441,12 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,  # Optional: resume from checkpoint
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                target_flops=args.target_flops,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
         # -----------------------------------------------------------------------
@@ -434,7 +465,11 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
         # -----------------------------------------------------------------------
@@ -453,7 +488,11 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
         # -----------------------------------------------------------------------
@@ -478,7 +517,12 @@ def run_trainer(args):
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=False,  # Don't run chatcore in pretraining
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                target_flops=args.target_flops,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
             # Transition message
@@ -501,7 +545,11 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=False,  # Don't run chatcore in midtraining for full pipeline
                 checkpoint_path=checkpoint_path,
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
             # Transition message
@@ -524,7 +572,11 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=checkpoint_path,
-                n_layer=args.n_layer,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
             if master_process:
@@ -595,12 +647,49 @@ if __name__ == "__main__":
         help="Enable ChatCore evaluations during training (runs after each epoch)",
     )
 
-    # n_layer override for scaling law experiments
+    # Depth-based architecture (nanochat-style)
     parser.add_argument(
-        "--n-layer",
+        "--depth",
         type=int,
         default=None,
-        help="Override the number of transformer layers in the model (for scaling law experiments)",
+        help="Model depth (auto-calculates n_layer, n_embed, n_head from depth × aspect_ratio)",
+    )
+
+    parser.add_argument(
+        "--aspect-ratio",
+        type=int,
+        default=64,
+        help="Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default=64)",
+    )
+
+    parser.add_argument(
+        "--head-dim",
+        type=int,
+        default=128,
+        help="Target head dimension for depth mode (default=128 for Flash Attention efficiency)",
+    )
+
+    # Training horizon
+    parser.add_argument(
+        "--target-flops",
+        type=float,
+        default=None,
+        help="Target total FLOPs for training (overrides config.target_flops)",
+    )
+
+    # Evaluation frequency
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=None,
+        help="Run validation loss evaluations every N steps (default: adaptive, ~10 evals per run)",
+    )
+
+    parser.add_argument(
+        "--core-eval-interval",
+        type=int,
+        default=None,
+        help="Run CORE benchmark evaluations every N steps (default: adaptive, ~4 evals per run)",
     )
 
     # Parse and process arguments

@@ -118,10 +118,10 @@ gpu-hot: ## Keep GPUs at ~90%+ utilization. Usage: make gpu-hot [GPUS=0,1,2] [DE
 gpu-status: ## Show current GPU utilization and memory usage
 	@nvidia-smi
 
-# Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true
-# Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
-# Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [N_LAYER=6]
+# Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=12 TARGET_FLOPS=1e18
+# Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
+# Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
 	@NGPUS=$${NGPUS:-2}; \
@@ -130,9 +130,13 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	VAL_EVALS=$${VAL_EVALS:-true}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
 	CHATCORE_EVALS=$${CHATCORE_EVALS:-false}; \
-	N_LAYER=$${N_LAYER:-}; \
+	DEPTH=$${DEPTH:-}; \
+	ASPECT_RATIO=$${ASPECT_RATIO:-64}; \
+	HEAD_DIM=$${HEAD_DIM:-128}; \
+	TARGET_FLOPS=$${TARGET_FLOPS:-}; \
+	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	LOG_FILE="logs/ddp_train_$${TIMESTAMP}.log"; \
+	LOG_FILE="logs/scaling_laws_$${TIMESTAMP}.log"; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
 	echo "📝 Logging to: $$LOG_FILE"; \
@@ -155,26 +159,38 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		echo "💬 ChatCore evaluations enabled"; \
 		CMD="$$CMD --run-chatcore-evals"; \
 	fi; \
-	if [ -n "$$N_LAYER" ]; then \
-		echo "🔢 Overriding n_layer config: $$N_LAYER"; \
-		CMD="$$CMD --n-layer $$N_LAYER"; \
+	if [ -n "$$DEPTH" ]; then \
+		echo "📐 Using depth-based architecture: depth=$$DEPTH (aspect_ratio=$$ASPECT_RATIO, head_dim=$$HEAD_DIM)"; \
+		CMD="$$CMD --depth $$DEPTH --aspect-ratio $$ASPECT_RATIO --head-dim $$HEAD_DIM"; \
+	fi; \
+	if [ -n "$$TARGET_FLOPS" ]; then \
+		echo "🎯 Target FLOPs: $$TARGET_FLOPS"; \
+		CMD="$$CMD --target-flops $$TARGET_FLOPS"; \
+	fi; \
+	if [ -n "$$EVAL_INTERVAL" ]; then \
+		echo "⏱️  Eval interval: $$EVAL_INTERVAL steps"; \
+		CMD="$$CMD --eval-interval $$EVAL_INTERVAL"; \
 	fi; \
 	echo ""; \
 	eval $$CMD 2>&1 | tee $$LOG_FILE
 
 
-run-scaling-law: ## Run scaling law experiment with different layer counts
-	@echo "🔬 Starting scaling law experiments..."
-	@for N_LAYER in 2 4 6 8 10 12 14; do \
+run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep
+	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
+	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
+	@for FLOPS in 1e18 3e18 6e18; do \
 		echo ""; \
-		echo "========================================"; \
-		echo "🧪 Running experiment with $$N_LAYER layers"; \
-		echo "========================================"; \
-		echo ""; \
-		$(MAKE) ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true N_LAYER=$$N_LAYER || exit 1; \
-		echo "🧹 Cleaning up GPUs..."; \
-		$(MAKE) kill-gpu; \
-		sleep 2; \
+		echo "================================================================="; \
+		echo "💰 Compute budget: $$FLOPS FLOPs"; \
+		echo "================================================================="; \
+		for DEPTH in 6 8 10 12 14; do \
+			echo ""; \
+			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
+			$(MAKE) ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100|| exit 1; \
+			echo "  🧹 Cleaning up GPUs..."; \
+			$(MAKE) kill-gpu; \
+			sleep 2; \
+		done; \
 	done
 	@echo "✅ All scaling law experiments complete!"
 
