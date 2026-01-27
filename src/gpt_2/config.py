@@ -30,7 +30,7 @@ class GPTConfig:
         1  # Number of training epochs (nanochat uses iterations, not epochs)
     )
     batch_size: int = (
-        32  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)
+        16  # Batch size per GPU (32 sequences * 2048 tokens = 65,536 tokens/GPU)
     )
     total_batch_size: int = 524288  # Total tokens per gradient update (2^19)
     weight_decay: float = 0.10  # L2 regularization weight decay (nanochat default)
@@ -43,8 +43,8 @@ class GPTConfig:
     num_iterations: int = (
         -1
     )  # Explicit number of optimization steps (-1 = calculate from ratio/flops)
-    target_flops: float = 3e18  # Target total FLOPs (-1 = use param_data_ratio instead)
-    target_param_data_ratio: int = 20  # Data:param ratio (Chinchilla optimal = 20)
+    target_flops: float = 1e18  # Target total FLOPs (-1 = use param_data_ratio instead)
+    target_param_data_ratio: int = -1  # Data:param ratio (Chinchilla optimal = 20)
 
     # ========================================================================
     # Learning Rate Schedule
@@ -92,7 +92,7 @@ class GPTConfig:
     # ========================================================================
     eval_interval: int = 100  # Run evaluations every N global steps
     val_loss_eval_batches: int = (
-        37  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
+        76  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
     )
 
     # ========================================================================

@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train chat-server
+.PHONY: uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
 
 
 dotenv: ## Initialize .env file
@@ -121,7 +121,7 @@ gpu-status: ## Show current GPU utilization and memory usage
 # Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true
 # Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
 # Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true]
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [N_LAYER=6]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
 	@NGPUS=$${NGPUS:-2}; \
@@ -130,6 +130,7 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	VAL_EVALS=$${VAL_EVALS:-true}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
 	CHATCORE_EVALS=$${CHATCORE_EVALS:-false}; \
+	N_LAYER=$${N_LAYER:-}; \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
 	LOG_FILE="logs/ddp_train_$${TIMESTAMP}.log"; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
@@ -154,9 +155,28 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		echo "💬 ChatCore evaluations enabled"; \
 		CMD="$$CMD --run-chatcore-evals"; \
 	fi; \
+	if [ -n "$$N_LAYER" ]; then \
+		echo "🔢 Overriding n_layer config: $$N_LAYER"; \
+		CMD="$$CMD --n-layer $$N_LAYER"; \
+	fi; \
 	echo ""; \
 	eval $$CMD 2>&1 | tee $$LOG_FILE
 
+
+run-scaling-law: ## Run scaling law experiment with different layer counts
+	@echo "🔬 Starting scaling law experiments..."
+	@for N_LAYER in 2 4 6 8 10 12 14; do \
+		echo ""; \
+		echo "========================================"; \
+		echo "🧪 Running experiment with $$N_LAYER layers"; \
+		echo "========================================"; \
+		echo ""; \
+		$(MAKE) ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true N_LAYER=$$N_LAYER || exit 1; \
+		echo "🧹 Cleaning up GPUs..."; \
+		$(MAKE) kill-gpu; \
+		sleep 2; \
+	done
+	@echo "✅ All scaling law experiments complete!"
 
 chat-server: ## Start the chat web UI server on port 8003
 	@echo "🔍 Checking if port 8003 is in use..."

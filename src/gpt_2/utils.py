@@ -416,7 +416,10 @@ def accumulate_bpb(per_token_loss, targets, token_bytes):
         token_bytes: Tensor mapping token ID to byte length, shape (vocab_size,)
 
     Returns:
-        tuple: (nats_sum, bytes_sum) to add to running totals
+        tuple: (nats_sum, bytes_sum, valid_mask) where:
+            - nats_sum: sum of losses for valid tokens
+            - bytes_sum: sum of byte lengths for valid tokens
+            - valid_mask: boolean mask of shape (B*T,) indicating valid tokens (num_bytes > 0)
     """
     y = targets.view(-1)
 
@@ -434,10 +437,11 @@ def accumulate_bpb(per_token_loss, targets, token_bytes):
         num_bytes = token_bytes[y]
 
     # Exclude special tokens (num_bytes == 0) from loss sum
-    nats_sum = (per_token_loss * (num_bytes > 0)).sum()
+    valid_mask = num_bytes > 0
+    nats_sum = (per_token_loss * valid_mask).sum()
     bytes_sum = num_bytes.sum()
 
-    return nats_sum, bytes_sum
+    return nats_sum, bytes_sum, valid_mask
 
 
 def get_peak_flops(device_name: str) -> float:

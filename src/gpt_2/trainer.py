@@ -48,6 +48,7 @@ class Trainer:
         checkpoint_path=None,
         checkpoint_dir=None,
         token_bytes_path=None,
+        n_layer=None,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -67,6 +68,7 @@ class Trainer:
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
             checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
+            n_layer: Override the number of transformer layers (for scaling law experiments)
         """
         # Store basic config
         self.ddp = ddp
@@ -83,6 +85,7 @@ class Trainer:
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
         self.token_bytes_path = token_bytes_path
+        self.n_layer_override = n_layer
 
         # Initialize start states
         self.start_step = 0
@@ -124,6 +127,14 @@ class Trainer:
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
         self.config = GPTConfig()
+
+        # Override n_layer if specified (for scaling law experiments)
+        if self.n_layer_override is not None:
+            if self.master_process:
+                print(
+                    f"🔢 Overriding n_layer: {self.config.n_layer} → {self.n_layer_override}"
+                )
+            self.config.n_layer = self.n_layer_override
 
         # Create raw model and keep reference BEFORE any wrapping
         # This reference will always point to the unwrapped model with updated weights
@@ -670,7 +681,7 @@ class Trainer:
                 project_name = "gpt2-midtraining"
                 training_mode = "mid-training"
             else:
-                project_name = "gpt2-pretraining"
+                project_name = "gpt2-pretraining-scaling-law"  # TODO: Change to gpt2-pretraining when done running scaling law experiments
                 training_mode = "pretraining"
 
             # Calculate total FLOPs budget for this run
@@ -954,7 +965,7 @@ class Trainer:
                             "time_taken": end_time - start_time,
                             "gradient_norm": norm,
                             "flops_per_second": flops_per_second,
-                            # "total_training_flops": flops_so_far,
+                            "total_training_flops_train": flops_so_far,
                             "mfu": mfu,
                         }
                     )

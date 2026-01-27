@@ -121,10 +121,10 @@ class GPT(nn.Module):
         )
 
         # TODO: Enable it once done running Scaling Laws
-        # if getattr(self.config, "tie_embeddings", True):
-        #     # remove wte weight from nparams_exclude
-        #     # This is removed because it weights are tied. LMhead FLOP computation are ignored.
-        #     nparams_exclude -= self.transformer.wte.weight.numel()
+        if getattr(self.config, "tie_embeddings", True):
+            # remove wte weight from nparams_exclude
+            # This is removed because it weights are tied. LMhead FLOP computation are ignored.
+            nparams_exclude -= self.transformer.wte.weight.numel()
 
         # Add layer norm params from each transformer block
         for block in self.transformer.h:

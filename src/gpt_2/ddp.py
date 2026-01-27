@@ -133,6 +133,7 @@ def run_pretraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
+    n_layer=None,
 ):
     """
     Execute the pretraining phase.
@@ -183,6 +184,7 @@ def run_pretraining(
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        n_layer=n_layer,
     )
     trainer.train()
 
@@ -211,6 +213,7 @@ def run_midtraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
+    n_layer=None,
 ):
     """
     Execute the mid-training phase.
@@ -271,6 +274,7 @@ def run_midtraining(
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        n_layer=n_layer,
     )
     trainer.train()
 
@@ -298,6 +302,7 @@ def run_sft(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
+    n_layer=None,
 ):
     """
     Execute the SFT (Supervised Fine-Tuning) phase.
@@ -355,6 +360,7 @@ def run_sft(
         checkpoint_path=checkpoint_path,  # Rollover from mid-training checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        n_layer=n_layer,
     )
     trainer.train()
 
@@ -409,6 +415,7 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,  # Optional: resume from checkpoint
+                n_layer=args.n_layer,
             )
 
         # -----------------------------------------------------------------------
@@ -427,6 +434,7 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
+                n_layer=args.n_layer,
             )
 
         # -----------------------------------------------------------------------
@@ -445,6 +453,7 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
+                n_layer=args.n_layer,
             )
 
         # -----------------------------------------------------------------------
@@ -469,6 +478,7 @@ def run_trainer(args):
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=False,  # Don't run chatcore in pretraining
+                n_layer=args.n_layer,
             )
 
             # Transition message
@@ -491,6 +501,7 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=False,  # Don't run chatcore in midtraining for full pipeline
                 checkpoint_path=checkpoint_path,
+                n_layer=args.n_layer,
             )
 
             # Transition message
@@ -513,6 +524,7 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=checkpoint_path,
+                n_layer=args.n_layer,
             )
 
             if master_process:
@@ -581,6 +593,14 @@ if __name__ == "__main__":
         "--run-chatcore-evals",
         action="store_true",
         help="Enable ChatCore evaluations during training (runs after each epoch)",
+    )
+
+    # n_layer override for scaling law experiments
+    parser.add_argument(
+        "--n-layer",
+        type=int,
+        default=None,
+        help="Override the number of transformer layers in the model (for scaling law experiments)",
     )
 
     # Parse and process arguments

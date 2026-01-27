@@ -318,7 +318,9 @@ class TrainingEvaluator:
 
         token_bytes = self._token_bytes
         # Accumulators for loss and BPB
-        val_loss_accumulator = torch.tensor(0.0, device=self.device)
+        # Track sum of losses and count of valid tokens (excluding special tokens)
+        total_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        total_valid_tokens = torch.tensor(0, dtype=torch.int64, device=self.device)
         total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
 
@@ -332,26 +334,36 @@ class TrainingEvaluator:
                         X, Y, loss_reduction="none"
                     )  # (B*T,)
 
-                # Compute mean loss from per-token losses
-                val_loss_accumulator += per_token_loss.mean() / val_loss_steps
-
-                # BPB calculation
-                nats, bytes = accumulate_bpb(per_token_loss, Y, token_bytes)
+                # BPB calculation (also used for consistent val_loss calculation)
+                # accumulate_bpb returns the valid_mask, which we reuse for val_loss
+                nats, bytes, valid_mask = accumulate_bpb(per_token_loss, Y, token_bytes)
                 total_nats += nats
                 total_bytes += bytes
+
+                # Use the same valid_mask for val_loss (excludes special tokens and ignored tokens)
+                total_loss_sum += (per_token_loss * valid_mask).sum()
+                total_valid_tokens += valid_mask.sum()
 
         self.model.train()
 
         # Reduce across ranks
         if self.ddp_world_size > 1:
-            dist.all_reduce(val_loss_accumulator, op=dist.ReduceOp.AVG)
+            dist.all_reduce(total_loss_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_valid_tokens, op=dist.ReduceOp.SUM)
             dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
             dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
 
         elapsed_time = time.time() - start_time
 
+        # Calculate val_loss (average loss per valid token, excluding special tokens)
+        total_loss_sum_val = total_loss_sum.item()
+        total_valid_tokens_val = total_valid_tokens.item()
+        if total_valid_tokens_val == 0:
+            val_loss = float("inf")
+        else:
+            val_loss = total_loss_sum_val / total_valid_tokens_val
+
         # Calculate BPB
-        val_loss = val_loss_accumulator.item()
         total_nats_val = total_nats.item()
         total_bytes_val = total_bytes.item()
         if total_bytes_val == 0:
@@ -374,7 +386,7 @@ class TrainingEvaluator:
 
             # Add FLOPs for validation BPB vs FLOPs plot
             if total_flops is not None:
-                log_dict["total_training_flops_data"] = total_flops
+                log_dict["total_training_flops_val"] = total_flops
 
             wandb.log(log_dict)
 
