@@ -9,7 +9,7 @@ class ChatConfig:
     """Configuration class for the chat server."""
 
     # Directory containing model checkpoints
-    CHECKPOINT_DIR = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
+    CHECKPOINT_DIR = "/sensei-fs/users/divgoyal/nanogpt/sft_checkpoints"
 
     # Session management
     SESSION_TIMEOUT_MINUTES = 60  # Sessions expire after 1 hour of inactivity

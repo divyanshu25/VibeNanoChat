@@ -112,9 +112,7 @@ def on_starting(server):
     print(f"📍 Server binding to: {bind}")
     print(f"👷 Workers: {workers} (uvicorn async workers)")
     print(f"⏱️  Timeout: {timeout}s (for model inference)")
-    print(
-        "📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
-    )
+    print("📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/sft_checkpoints")
     print("🌐 Access URLs:")
     print("   - Chat UI:      http://localhost:8003/")
     print("   - API Docs:     http://localhost:8003/docs")

@@ -6,6 +6,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+import random
 import time
 from datetime import datetime
 
@@ -19,7 +20,9 @@ from eval_tasks import CoreEvaluator
 from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
-from gpt_2.utils import (get_custom_tokenizer, get_lr, load_checkpoint,
+from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
+from gpt_2.utils import (calculate_num_iterations, get_custom_tokenizer,
+                         get_lr, get_peak_flops, load_checkpoint,
                          save_checkpoint)
 
 
@@ -41,9 +44,16 @@ class Trainer:
         run_core_evals=False,
         run_chatcore_evals=False,
         mid_training=False,
+        sft_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
         token_bytes_path=None,
+        depth=None,
+        aspect_ratio=None,
+        head_dim=None,
+        target_flops=None,
+        eval_interval=None,
+        core_eval_interval=None,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -59,9 +69,14 @@ class Trainer:
             run_core_evals: Whether to run CORE benchmark evaluations
             run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
             mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
+            sft_training: Whether to do SFT training (uses Multiplex dataloader with conversation data)
             checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
             checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
+            depth: Model depth (auto-calculates n_layer/n_embed/n_head from depth × aspect_ratio)
+            aspect_ratio: Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default from config)
+            head_dim: Target head dimension for depth mode (default from config)
+            target_flops: Target total FLOPs for training (overrides config.target_flops)
         """
         # Store basic config
         self.ddp = ddp
@@ -74,14 +89,31 @@ class Trainer:
         self.run_core_evals = run_core_evals
         self.run_chatcore_evals = run_chatcore_evals
         self.mid_training = mid_training
+        self.sft_training = sft_training
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
         self.token_bytes_path = token_bytes_path
+        self.depth_override = depth
+        self.aspect_ratio_override = aspect_ratio
+        self.head_dim_override = head_dim
+        self.target_flops_override = target_flops
+        self.eval_interval_override = eval_interval
+        self.core_eval_interval_override = core_eval_interval
 
         # Initialize start states
         self.start_step = 0
         self.start_epoch = 0
         self.start_global_step = 0
+
+        # Select 4 random sample contexts for generation evaluation
+        if self.sft_training or self.mid_training:
+            self.sample_contexts = random.sample(
+                SFT_SAMPLE_CONTEXTS, min(4, len(SFT_SAMPLE_CONTEXTS))
+            )
+        else:
+            self.sample_contexts = random.sample(
+                GENERAL_SAMPLE_CONTEXTS, min(4, len(GENERAL_SAMPLE_CONTEXTS))
+            )
 
         # Setup components
         self._setup_logging()
@@ -108,35 +140,113 @@ class Trainer:
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
         self.config = GPTConfig()
-        self.model = GPT(self.config)
-        self.model.to(self.device)
 
-        # Optional: Compile model for faster training
-        # self.model = torch.compile(self.model)
+        # Override architecture parameters using depth-based parameterization
+        if self.depth_override is not None:
+            if self.master_process:
+                print(f"🔢 Using depth-based architecture: depth={self.depth_override}")
+            self.config.depth = self.depth_override
+            if self.aspect_ratio_override is not None:
+                self.config.aspect_ratio = self.aspect_ratio_override
+            if self.head_dim_override is not None:
+                self.config.head_dim = self.head_dim_override
+            # __post_init__ will auto-calculate n_layer, n_embed, n_head
+            self.config.__post_init__()
 
+            # Auto-scale batch size based on model size to avoid OOM
+            # Small models can use larger batch sizes for faster training
+            # Large models need smaller batch sizes to fit in memory
+            # Reference: tuned on 2x H100 80GB
+            if self.depth_override <= 8:
+                auto_batch_size = 64  # ~30M-60M params: maximize throughput
+            elif self.depth_override <= 10:
+                auto_batch_size = 32  # ~100M params: high throughput
+            elif self.depth_override <= 14:
+                auto_batch_size = 16  # ~150M-210M params: balanced
+            elif self.depth_override <= 18:
+                auto_batch_size = 8  # ~280M-360M params: conservative
+            elif self.depth_override <= 22:
+                auto_batch_size = 4  # ~560M-700M params: tight fit
+            else:
+                auto_batch_size = 2  # ~1B+ params: minimal batch
+
+            if self.master_process:
+                if auto_batch_size != self.config.batch_size:
+                    print(
+                        f"   Auto-scaling batch_size: {self.config.batch_size} → {auto_batch_size} (for depth={self.depth_override})"
+                    )
+                else:
+                    print(
+                        f"   Batch size: {auto_batch_size} (optimal for depth={self.depth_override})"
+                    )
+            self.config.batch_size = auto_batch_size
+        else:
+            # Use default config values
+            if self.master_process:
+                print(
+                    f"📝 Using default architecture: n_layer={self.config.n_layer}, n_embed={self.config.n_embed}"
+                )
+
+        # Override target_flops if provided
+        if self.target_flops_override is not None:
+            if self.master_process:
+                print(
+                    f"🎯 Overriding target_flops: {self.config.target_flops:.2e} → {self.target_flops_override:.2e}"
+                )
+            self.config.target_flops = self.target_flops_override
+
+        # Override eval_interval if provided
+        if self.eval_interval_override is not None:
+            if self.master_process:
+                print(
+                    f"⏱️  Overriding eval_interval: {self.config.eval_interval} → {self.eval_interval_override}"
+                )
+            self.config.eval_interval = self.eval_interval_override
+
+        # Create raw model and keep reference BEFORE any wrapping
+        # This reference will always point to the unwrapped model with updated weights
+        self.raw_model = GPT(self.config)
+        self.raw_model.to(self.device)
+
+        # Wrap with torch.compile for faster training
+        self.model = torch.compile(self.raw_model)
+
+        # Wrap with DDP for distributed training
         if self.ddp:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, device_ids=[self.ddp_local_rank]
             )
-            self.raw_model = self.model.module
-        else:
-            self.raw_model = self.model
+
+        # Note: self.raw_model stays unchanged and shares parameters with self.model
+        # This allows clean checkpoint saving without unwrapping
 
     def _setup_hyperparameters(self):
         """Configure training hyperparameters based on training mode."""
         self.num_epochs = self.config.num_epochs
-        self.run_evals_after = self.config.eval_interval
+        # Note: self.run_evals_after will be set adaptively after we know max_steps
 
         # Batch size and gradient accumulation
-        self.total_batch_size = self.config.total_batch_size
-        self.grad_accumulation_steps = self.total_batch_size // (
-            self.config.batch_size * self.config.block_size * self.ddp_world_size
-        )
-        assert (
-            self.total_batch_size
-            % (self.config.batch_size * self.config.block_size * self.ddp_world_size)
-            == 0
-        ), "Total batch size must be divisible by batch size * block size * world size"
+        if self.sft_training:
+            # For SFT, we count examples (conversations) not tokens
+            # No gradient accumulation - process each batch immediately
+            self.grad_accumulation_steps = 1
+            self.total_batch_size = self.config.batch_size * self.ddp_world_size
+        else:
+            # For pretrain/midtrain, we count tokens
+            self.total_batch_size = self.config.total_batch_size
+            self.grad_accumulation_steps = self.total_batch_size // (
+                self.config.batch_size * self.config.block_size * self.ddp_world_size
+            )
+
+            assert (
+                self.total_batch_size
+                % (
+                    self.config.batch_size
+                    * self.config.block_size
+                    * self.ddp_world_size
+                )
+                == 0
+            ), "Total batch size must be divisible by batch_size * block_size * world_size"
 
         if self.master_process:
             print(f"Total batch size: {self.total_batch_size}")
@@ -145,79 +255,143 @@ class Trainer:
         # Learning rate scheduling parameters
         self.max_learning_rate = self.config.max_learning_rate
         self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
-        if self.mid_training:
-            self.warmup_steps = self.config.lr_warmup_steps_midtrain
-            self.max_steps = self.config.steps_per_epoch_midtrain
+
+        # Apply nanochat-style depth-aware scaling if using depth mode
+        if self.config._depth_mode:
+            # Learning rate scaling: LR ∝ 1/√model_dim
+            # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
+            reference_dim = 768
+            lr_scale = (self.config.n_embed / reference_dim) ** -0.5
+            self.max_learning_rate *= lr_scale
+            self.min_learning_rate *= lr_scale
+
+            if self.master_process:
+                print(f"\n📐 DEPTH-AWARE SCALING (depth={self.config.depth})")
+                print(f"   n_layer: {self.config.n_layer}")
+                print(
+                    f"   n_embed: {self.config.n_embed} (base: {self.config._base_dim}, nudge: {self.config._nudge:+d})"
+                )
+                print(f"   n_head: {self.config.n_head}")
+                print(f"   head_dim: {self.config.n_embed // self.config.n_head}")
+                print(
+                    f"   LR scaling: {lr_scale:.6f} (∝ 1/√({self.config.n_embed}/{reference_dim}))"
+                )
+                print(
+                    f"   Max LR: {self.config.max_learning_rate:.2e} → {self.max_learning_rate:.2e}"
+                )
+
+        # Automatically calculate steps based on config settings for all phases
+        if self.master_process:
+            print("\n" + "=" * 80)
+            if self.sft_training:
+                print("📊 CALCULATING SFT TRAINING STEPS")
+            elif self.mid_training:
+                print("📊 CALCULATING MID-TRAINING STEPS")
+            else:
+                print("📊 CALCULATING PRETRAINING STEPS")
+            print("=" * 80)
+
+        num_iterations, flops_per_token, _ = calculate_num_iterations(
+            self.raw_model, self.config, self.master_process
+        )
+        self.max_steps = num_iterations
+        self.flops_per_token = flops_per_token
+
+        if self.master_process:
+            print("=" * 80 + "\n")
+
+        # Initialize peak FLOPs for MFU calculation
+        if self.device.startswith("cuda"):
+            device_name = torch.cuda.get_device_name(self.device)
+            self.peak_flops = get_peak_flops(device_name)
+            if self.master_process:
+                print(f"GPU: {device_name}")
+                print(f"Peak FLOPS (BF16): {self.peak_flops:.2e}\n")
         else:
-            self.warmup_steps = self.config.lr_warmup_steps_pretrain
-            self.max_steps = self.config.steps_per_epoch_pretrain
+            self.peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
+
+        # Set warmup steps based on training phase (calculated as % of max_steps)
+        if self.sft_training:
+            self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
+        elif self.mid_training:
+            self.warmup_steps = int(
+                self.max_steps * self.config.lr_warmup_ratio_midtrain
+            )
+        else:
+            self.warmup_steps = int(
+                self.max_steps * self.config.lr_warmup_ratio_pretrain
+            )
+
+        # Set adaptive eval intervals based on total training steps
+        # Val loss: frequent (good learning curve), Core evals: sparse (expensive benchmarks)
+        total_steps = self.max_steps * self.num_epochs
+
+        # Validation loss interval (faster, more frequent)
+        if self.eval_interval_override is not None:
+            self.run_evals_after = self.eval_interval_override
+        else:
+            # Adaptive: target ~8-12 val loss measurements for smooth learning curve
+            adaptive_val_interval = max(100, total_steps // 10)  # min 100 steps
+            adaptive_val_interval = min(
+                adaptive_val_interval, 500
+            )  # max 500 steps (don't spam)
+            self.run_evals_after = adaptive_val_interval
+
+        # Core evaluation interval (slower, less frequent)
+        if self.core_eval_interval_override is not None:
+            self.run_core_evals_after = self.core_eval_interval_override
+        else:
+            # Adaptive: target ~3-5 core eval measurements (expensive, 80s each)
+            adaptive_core_interval = max(250, total_steps // 4)  # min 250 steps
+            adaptive_core_interval = min(
+                adaptive_core_interval, total_steps // 2
+            )  # at least 2 evals
+            self.run_core_evals_after = adaptive_core_interval
+
+    def _create_evaluator(self, eval_dataloader):
+        """Create a TrainingEvaluator with standard configuration.
+
+        Args:
+            eval_dataloader: The evaluation dataloader to use
+
+        Returns:
+            TrainingEvaluator instance
+        """
+        return TrainingEvaluator(
+            model=self.model,
+            eval_dataloader=eval_dataloader,
+            device=self.device,
+            master_process=self.master_process,
+            ddp=self.ddp,
+            ddp_rank=self.ddp_rank,
+            ddp_world_size=self.ddp_world_size,
+            generation_log_file=self.generation_log_file,
+            token_bytes_path=self.token_bytes_path,
+            val_loss_steps=self.config.val_loss_eval_batches,
+            sample_seed=self.config.generation_seed,
+            use_kv_cache=self.config.use_kv_cache,
+        )
 
     def _setup_dataloaders(self):
         """Initialize train and eval dataloaders based on training mode."""
-        # Select dataloader class and data directory based on training mode
-        if self.mid_training:
-            DataloaderClass = TaskMixtureDataloader
-            data_dir = self.config.data_dir_midtrain
-            if self.master_process:
-                print("\n" + "=" * 80)
-                print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
-                print("=" * 80 + "\n")
+        if self.sft_training:
+            self._setup_sft_dataloaders()
+        elif self.mid_training:
+            self._setup_midtraining_dataloaders()
         else:
-            DataloaderClass = FinewebEduDataloader
-            data_dir = self.config.data_dir_pretrain
+            self._setup_pretraining_dataloaders()
 
-        self.train_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="train",
-            master_process=self.master_process,
-        )
-
+        # Unified evaluator creation for all modes
         if self.run_evals:
-            self.eval_dataloader = DataloaderClass(
-                data_dir=data_dir,
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="val",
-                master_process=self.master_process,
-            )
-            self.evaluator = TrainingEvaluator(
-                model=self.model,
-                eval_dataloader=self.eval_dataloader,
-                device=self.device,
-                master_process=self.master_process,
-                ddp=self.ddp,
-                ddp_rank=self.ddp_rank,
-                ddp_world_size=self.ddp_world_size,
-                generation_log_file=self.generation_log_file,
-                token_bytes_path=self.token_bytes_path,
-                val_loss_steps=self.config.val_loss_eval_batches,
-                sample_seed=self.config.generation_seed,
-                use_kv_cache=self.config.use_kv_cache,
-            )
+            self.evaluator = self._create_evaluator(self.eval_dataloader)
         else:
+            self.evaluator = None
             if self.master_process:
                 print("Evaluations disabled - skipping eval dataloader initialization")
 
         # Initialize CORE evaluator if requested
         if self.run_core_evals:
             enc, _ = get_custom_tokenizer()
-            # For smaller/faster evals during training, limit to subset of tasks
-            # You can remove tasks_to_run to run all tasks, or adjust max_examples_per_task
-            # core_tasks_subset = [
-            #     'hellaswag_zeroshot',
-            #     'arc_easy',
-            #     'arc_challenge',
-            #     'copa',
-            #     'winograd',
-            #     'winogrande',
-            #     'lambada_openai',
-            # ]
             self.core_evaluator = CoreEvaluator(
                 model=self.raw_model,
                 tokenizer=enc,
@@ -297,11 +471,240 @@ class Trainer:
         else:
             self.chatcore_evaluator = None
 
+    def _setup_sft_dataloaders(self):
+        """Setup dataloaders for SFT training mode."""
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("🎯 SFT TRAINING MODE: Using Multiplex datasets")
+            print("=" * 80 + "\n")
+
+        # Import required dataloaders
+        from dataloaders.arc_dataloader import ARCDataLoader
+        from dataloaders.gsm8k_dataloader import GSM8KDataLoader
+        from dataloaders.multiplex_dataloader import (
+            create_multiplex_dataloader, create_sft_collate_fn)
+        from dataloaders.simplespelling_dataloader import \
+            SimpleSpellingDataLoader
+        from dataloaders.smoltalk_dataloader import SmolTalkDataLoader
+        from dataloaders.spellingbee_dataloader import SpellingBeeDataLoader
+
+        cache_dir = self.config.sft_cache_dir
+
+        if self.master_process:
+            print("Loading SFT training datasets...")
+
+        # Load datasets exactly as specified in lines 558-619 of multiplex_dataloader.py
+        # 1. ARC-Easy
+        arc_easy_data = ARCDataLoader(
+            subset="ARC-Easy", split="train", cache_dir=cache_dir
+        ).load_data(format_as_conversation=True)
+
+        # 2. ARC-Challenge
+        arc_challenge_data = ARCDataLoader(
+            subset="ARC-Challenge", split="train", cache_dir=cache_dir
+        ).load_data(format_as_conversation=True)
+
+        # 3. GSM8K
+        gsm8k_data = GSM8KDataLoader(split="train", cache_dir=cache_dir).load_data(
+            format_as_conversation=True
+        )
+
+        # 4. SmolTalk
+        smoltalk_data = SmolTalkDataLoader(
+            split="train", cache_dir=cache_dir
+        ).load_data(max_examples=10000)
+
+        # 5. SpellingBee
+        spelling_bee_data = SpellingBeeDataLoader(
+            size=300, split="train", cache_dir=cache_dir
+        ).load_data()
+
+        # 6. SimpleSpelling
+        simple_spelling_data = SimpleSpellingDataLoader(
+            size=300, split="train", cache_dir=cache_dir
+        ).load_data()
+
+        if self.master_process:
+            print(f"✓ Loaded {len(arc_easy_data)} ARC-Easy examples")
+            print(f"✓ Loaded {len(arc_challenge_data)} ARC-Challenge examples")
+            print(f"✓ Loaded {len(gsm8k_data)} GSM8K examples")
+            print(f"✓ Loaded {len(smoltalk_data)} SmolTalk examples")
+            print(f"✓ Loaded {len(spelling_bee_data)} SpellingBee examples")
+            print(f"✓ Loaded {len(simple_spelling_data)} SimpleSpelling examples\n")
+
+        # Setup tokenizer and collate function
+        enc, _ = get_custom_tokenizer()
+        pad_token_id = enc.encode("<|assistant_end|>", allowed_special="all")[0]
+        collate_fn = create_sft_collate_fn(
+            enc, pad_token_id, return_metadata=False, max_length=self.config.block_size
+        )
+
+        # Create multiplex dataloader for training
+        self.train_dataloader = create_multiplex_dataloader(
+            datasets=[
+                ("arc_easy", arc_easy_data),
+                ("arc_challenge", arc_challenge_data),
+                ("gsm8k", gsm8k_data),
+                ("smoltalk", smoltalk_data),
+                ("spelling_bee", spelling_bee_data),
+                ("simple_spelling", simple_spelling_data),
+            ],
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            num_workers=4,  # Parallel data loading workers
+            pin_memory=True,  # Faster GPU transfer
+            prefetch_factor=2,  # Prefetch 2 batches per worker
+            persistent_workers=True,  # Keep workers alive between epochs
+            sampling_strategy="proportional",
+            collate_fn=collate_fn,
+            ddp_rank=self.ddp_rank,  # DDP rank for sharding
+            ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
+        )
+
+        # Validation: Multiple task validation sets to match training distribution
+        if self.run_evals:
+            if self.master_process:
+                print("Loading SFT validation datasets...")
+
+            # Load validation splits from all training tasks
+            # Note: ARC has 'train'/'validation'/'test', but GSM8K and SmolTalk only have 'train'/'test'
+            # We use 'validation' for ARC (proper dev set) and 'test' for others (no validation split exists)
+            arc_easy_val_data = ARCDataLoader(
+                subset="ARC-Easy", split="validation", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True)
+
+            arc_challenge_val_data = ARCDataLoader(
+                subset="ARC-Challenge", split="validation", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True)
+
+            # GSM8K only has train/test splits, so use test for validation
+            gsm8k_val_data = GSM8KDataLoader(
+                split="test", cache_dir=cache_dir
+            ).load_data(format_as_conversation=True, max_examples=1000)
+
+            # SmolTalk only has train/test splits, so use test for validation
+            smoltalk_val_data = SmolTalkDataLoader(
+                split="test", cache_dir=cache_dir
+            ).load_data(max_examples=2000)
+
+            # Note: No validation splits for SpellingBee/SimpleSpelling
+            # (they're generated, so train=test essentially)
+
+            if self.master_process:
+                print(f"✓ Loaded {len(arc_easy_val_data)} ARC-Easy validation examples")
+                print(
+                    f"✓ Loaded {len(arc_challenge_val_data)} ARC-Challenge validation examples"
+                )
+                print(f"✓ Loaded {len(gsm8k_val_data)} GSM8K validation examples")
+                print(
+                    f"✓ Loaded {len(smoltalk_val_data)} SmolTalk validation examples\n"
+                )
+
+            self.eval_dataloader = create_multiplex_dataloader(
+                datasets=[
+                    ("arc_easy_val", arc_easy_val_data),
+                    ("arc_challenge_val", arc_challenge_val_data),
+                    ("gsm8k_val", gsm8k_val_data),
+                    ("smoltalk_val", smoltalk_val_data),
+                ],
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                num_workers=2,  # Fewer workers for validation (less frequent)
+                pin_memory=True,  # Faster GPU transfer
+                prefetch_factor=2,  # Prefetch 2 batches per worker
+                persistent_workers=True,  # Keep workers alive between epochs
+                sampling_strategy="proportional",  # Match training distribution
+                collate_fn=collate_fn,
+                ddp_rank=self.ddp_rank,  # DDP rank for sharding
+                ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
+            )
+        else:
+            self.eval_dataloader = None
+
+    def _setup_midtraining_dataloaders(self):
+        """Setup dataloaders for mid-training mode."""
+        DataloaderClass = TaskMixtureDataloader
+        data_dir = self.config.data_dir_midtrain
+
+        if self.master_process:
+            print("\n" + "=" * 80)
+            print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
+            print("=" * 80 + "\n")
+
+        self.train_dataloader = DataloaderClass(
+            data_dir=data_dir,
+            batch_size=self.config.batch_size,
+            block_size=self.config.block_size,
+            ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            split="train",
+            master_process=self.master_process,
+        )
+
+        if self.run_evals:
+            self.eval_dataloader = DataloaderClass(
+                data_dir=data_dir,
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="val",
+                master_process=self.master_process,
+            )
+        else:
+            self.eval_dataloader = None
+
+    def _setup_pretraining_dataloaders(self):
+        """Setup dataloaders for pretraining mode."""
+        DataloaderClass = FinewebEduDataloader
+        data_dir = self.config.data_dir_pretrain
+
+        self.train_dataloader = DataloaderClass(
+            data_dir=data_dir,
+            batch_size=self.config.batch_size,
+            block_size=self.config.block_size,
+            ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            split="train",
+            master_process=self.master_process,
+        )
+
+        if self.run_evals:
+            self.eval_dataloader = DataloaderClass(
+                data_dir=data_dir,
+                batch_size=self.config.batch_size,
+                block_size=self.config.block_size,
+                ddp_world_size=self.ddp_world_size,
+                ddp_rank=self.ddp_rank,
+                split="val",
+                master_process=self.master_process,
+            )
+        else:
+            self.eval_dataloader = None
+
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
+        # Apply nanochat-style depth-aware weight decay scaling if using depth mode
+        if self.config._depth_mode:
+            # Weight decay scaling: WD ∝ 1/depth²
+            # Reference: tuned at depth=12 with WD=0.10
+            reference_depth = 12
+            wd_scale = (reference_depth / self.config.depth) ** 2
+            weight_decay = self.config.weight_decay * wd_scale
+
+            if self.master_process:
+                print(
+                    f"   WD scaling: {wd_scale:.6f} (∝ ({reference_depth}/{self.config.depth})²)"
+                )
+                print(
+                    f"   Weight decay: {self.config.weight_decay:.6f} → {weight_decay:.6f}\n"
+                )
+        else:
+            weight_decay = self.config.weight_decay
+
         self.optimizer = self.raw_model.configure_optimizers(
             learning_rate=self.max_learning_rate,
-            weight_decay=self.config.weight_decay,
+            weight_decay=weight_decay,
             device=self.device,
         )
 
@@ -309,14 +712,24 @@ class Trainer:
             # Determine checkpoint source
             is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
             is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
+            is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
 
             # Define training scenario flags
-            is_rollover = self.mid_training and is_pretrain_ckpt
-            is_resume_pretrain = not self.mid_training and is_pretrain_ckpt
+            is_rollover_pretrain_to_midtrain = self.mid_training and is_pretrain_ckpt
+            is_rollover_midtrain_to_sft = self.sft_training and is_midtrain_ckpt
+            is_resume_pretrain = (
+                not self.mid_training and not self.sft_training and is_pretrain_ckpt
+            )
             is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+            is_resume_sft = self.sft_training and is_sft_ckpt
 
             # Load optimizer only when resuming (not when rolling over)
+            is_rollover = (
+                is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
+            )
             should_load_optimizer = not is_rollover
+            # Don't print resume info for rollover scenarios
+            should_print_resume_info = not is_rollover
 
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
@@ -324,28 +737,47 @@ class Trainer:
                 device=self.device,
                 optimizer=self.optimizer if should_load_optimizer else None,
                 master_process=self.master_process,
+                print_resume_info=should_print_resume_info,
             )
             if checkpoint_result["config"]:
                 self.config = checkpoint_result["config"]
 
             # Reset training counters only when rolling over
-            if is_rollover:
+            if is_rollover_pretrain_to_midtrain:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
                 if self.master_process:
                     print(
                         "🔄 Rollover: Pretraining → Mid-training "
-                        "(weights loaded, fresh optimizer, counters reset)"
+                        "(weights loaded, fresh optimizer, counters reset to 0)"
                     )
+                    print("   Training will start from global_step: 0")
+                    print(f"{'='*80}\n")
+            elif is_rollover_midtrain_to_sft:
+                self.start_epoch = 0
+                self.start_step = 0
+                self.start_global_step = 0
+                if self.master_process:
+                    print(
+                        "🔄 Rollover: Mid-training → SFT "
+                        "(weights loaded, fresh optimizer, counters reset to 0)"
+                    )
+                    print("   Training will start from global_step: 0")
+                    print(f"{'='*80}\n")
             # Keep checkpoint counters when resuming
-            elif is_resume_pretrain or is_resume_midtrain:
+            elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
 
                 if self.master_process:
-                    mode = "pretraining" if is_resume_pretrain else "mid-training"
+                    if is_resume_pretrain:
+                        mode = "pretraining"
+                    elif is_resume_midtrain:
+                        mode = "mid-training"
+                    else:
+                        mode = "SFT"
                     print(
                         f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
                         f"step {self.start_step}, global_step {self.start_global_step} "
@@ -357,12 +789,16 @@ class Trainer:
                     f"Unrecognized checkpoint scenario!\n"
                     f"  Checkpoint path: {self.checkpoint_path}\n"
                     f"  mid_training flag: {self.mid_training}\n"
+                    f"  sft_training flag: {self.sft_training}\n"
                     f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
-                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n\n"
+                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n"
+                    f"  is_sft_ckpt: {is_sft_ckpt}\n\n"
                     f"Expected checkpoint path patterns:\n"
-                    f"  - For rollover: mid_training=True + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume pretraining: mid_training=False + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path"
+                    f"  - For rollover pretrain→midtrain: mid_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For rollover midtrain→sft: sft_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: mid_training=False + sft_training=False + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For resume SFT: sft_training=True + 'sft_checkpoints' in path"
                 )
 
             # Handle epoch boundary for resumed checkpoints
@@ -373,16 +809,32 @@ class Trainer:
     def _setup_wandb(self):
         """Initialize Weights & Biases for experiment tracking."""
         if self.master_process:
-            project_name = (
-                "gpt2-midtraining" if self.mid_training else "gpt2-pretraining"
-            )
+            if self.sft_training:
+                project_name = "gpt2-sft"
+                training_mode = "SFT"
+            elif self.mid_training:
+                project_name = "gpt2-midtraining"
+                training_mode = "mid-training"
+            else:
+                project_name = "gpt2-pretraining-scaling-law"  # TODO: Change to gpt2-pretraining when done running scaling law experiments
+                training_mode = "pretraining"
+
+            # Calculate total FLOPs budget for this run
+            total_flops = self.flops_per_token * self.total_batch_size * self.max_steps
+
+            # Format FLOPs in scientific notation (e.g., "7.9e18" -> "7.9e18")
+            flops_str = f"{total_flops:.1e}"
+
+            # Create run name: L{layers}-{flops}
+            # Example: "L12-7.9e18" for 12 layers and 7.9e18 FLOPs
+            run_name = f"model_L{self.config.n_layer}-{flops_str}"
+
             wandb.init(
                 project=project_name,
+                name=run_name,
                 config={
                     "model_type": "GPT-2",
-                    "training_mode": (
-                        "mid-training" if self.mid_training else "pretraining"
-                    ),
+                    "training_mode": training_mode,
                     "batch_size": self.config.batch_size,
                     "block_size": self.config.block_size,
                     "max_learning_rate": self.max_learning_rate,
@@ -396,6 +848,8 @@ class Trainer:
                     "run_core_evals": self.run_core_evals,
                     "run_chatcore_evals": self.run_chatcore_evals,
                     "start_step": self.start_step,
+                    "n_layers": self.config.n_layer,
+                    "total_flops": total_flops,
                 },
             )
 
@@ -421,8 +875,16 @@ class Trainer:
         # Set precision for matrix multiplications (improves performance on modern GPUs)
         torch.set_float32_matmul_precision("high")
 
+        # Calculate total steps once for the entire training run
+        total_steps = self.max_steps * self.num_epochs
+
         if self.master_process:
-            total_steps = self.max_steps * self.num_epochs
+            # Calculate FLOPs statistics (using pre-computed values from init)
+            total_tokens = self.total_batch_size * total_steps
+            total_flops = self.flops_per_token * total_tokens
+            num_params = self.raw_model.num_scaling_params()
+            tokens_params_ratio = total_tokens / num_params
+
             print("\n" + "=" * 80)
             if self.mid_training:
                 print("🔄 STARTING MID-TRAINING")
@@ -442,6 +904,40 @@ class Trainer:
             )
             print(f"🌐 World size: {self.ddp_world_size} GPUs")
             print(f"🎯 Total batch size: {self.total_batch_size:,} tokens/step")
+            print(f"🔢 Model parameters: {num_params:,}")
+            print(f"💫 FLOPs per token: {self.flops_per_token:.3e}")
+            print(f"📈 Total training tokens: {total_tokens:,}")
+            print(f"⚡ Total training FLOPs: {total_flops:.3e}")
+            print(f"📐 Tokens:Params ratio: {tokens_params_ratio:.2f}")
+
+            # Show evaluation schedule
+            if self.run_evals:
+                num_val_evals = (
+                    total_steps // self.run_evals_after
+                    if self.run_evals_after > 0
+                    else 0
+                )
+                val_type = (
+                    "manual" if self.eval_interval_override is not None else "adaptive"
+                )
+                print(
+                    f"📊 Val loss evals: every {self.run_evals_after} steps → ~{num_val_evals} total ({val_type})"
+                )
+            if self.run_core_evals:
+                num_core_evals = (
+                    total_steps // self.run_core_evals_after
+                    if self.run_core_evals_after > 0
+                    else 0
+                )
+                core_type = (
+                    "manual"
+                    if self.core_eval_interval_override is not None
+                    else "adaptive"
+                )
+                print(
+                    f"📊 Core benchmark evals: every {self.run_core_evals_after} steps → ~{num_core_evals} total ({core_type})"
+                )
+
             print("=" * 80 + "\n")
 
         # Main training loop over epochs
@@ -450,13 +946,20 @@ class Trainer:
             # Process all batches in the current epoch
             # Only use start_step for the first resumed epoch, then start from 0
             epoch_start_step = self.start_step if epoch == self.start_epoch else 0
+
+            # Unified training loop for all modes (pretrain/midtrain/sft)
             for step in range(epoch_start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
                 self.optimizer.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
-                # BPB accumulators
-                torch.tensor(0.0, dtype=torch.float32, device=self.device)
-                torch.tensor(0, dtype=torch.int64, device=self.device)
+                # # BPB accumulators
+                # torch.tensor(0.0, dtype=torch.float32, device=self.device)
+                # torch.tensor(0, dtype=torch.int64, device=self.device)
+
+                # Track active tokens for SFT training (where targets >= 0)
+                num_active_tokens = torch.tensor(
+                    0, dtype=torch.int64, device=self.device
+                )
 
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
@@ -471,6 +974,10 @@ class Trainer:
                     loss = per_token_loss.mean() / self.grad_accumulation_steps
                     loss_accumulator += loss
 
+                    # Count active tokens (for SFT: targets >= 0, for pretrain: all tokens)
+                    if self.sft_training:
+                        num_active_tokens += (y >= 0).sum()
+
                     # Accumulate for BPB calculation
                     # if self._token_bytes is not None:
                     #     nats, bytes = accumulate_bpb(per_token_loss, y, self._token_bytes)
@@ -483,10 +990,16 @@ class Trainer:
                         )
                     # Backward pass: compute gradients
                     loss.backward()
+
                 if self.ddp:
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
                     )
+                    # Sum active tokens across all ranks for SFT
+                    if self.sft_training:
+                        torch.distributed.all_reduce(
+                            num_active_tokens, op=torch.distributed.ReduceOp.SUM
+                        )
                     # if self._token_bytes is not None:
                     #     torch.distributed.all_reduce(
                     #         total_nats, op=torch.distributed.ReduceOp.SUM
@@ -522,51 +1035,67 @@ class Trainer:
                 end_time = time.time()
 
                 # Calculate training throughput (tokens processed per second)
-                tokens_per_second = (
-                    self.train_dataloader.batch_size
-                    * self.train_dataloader.block_size
-                    * self.grad_accumulation_steps
-                    * self.ddp_world_size
-                    / (end_time - start_time)
+                if self.sft_training:
+                    # For SFT: count only active tokens (where targets >= 0)
+                    tokens_per_second = num_active_tokens.item() / (
+                        end_time - start_time
+                    )
+                else:
+                    # For pretrain/midtrain: all tokens in batch are active
+                    tokens_per_second = (
+                        self.config.batch_size
+                        * self.config.block_size
+                        * self.grad_accumulation_steps
+                        * self.ddp_world_size
+                        / (end_time - start_time)
+                    )
+
+                # Calculate FLOPs metrics
+                flops_per_second = self.flops_per_token * tokens_per_second
+                flops_so_far = (
+                    self.flops_per_token * self.total_batch_size * global_step
                 )
+                # MFU: Model FLOPs Utilization (% of theoretical peak performance)
+                mfu = 100 * flops_per_second / (self.peak_flops * self.ddp_world_size)
 
                 # Periodically estimate loss on train/val sets for monitoring
-                total_steps = self.max_steps * self.num_epochs
                 val_loss = None  # Will be set if evals run
-                should_eval = (
+                should_eval_val = (
                     global_step % self.run_evals_after == 0
                     or global_step == total_steps - 1
                 )
-                if self.run_evals and should_eval:
+                if self.run_evals and should_eval_val:
                     val_loss = self.evaluator.estimate_validation_loss(
-                        step=step, global_step=global_step
-                    )
-                    sample_context = (
-                        "<|bos|><|user_start|>Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?<|user_end|>"
-                        if self.mid_training
-                        else "Hello, I'm a language model,"
-                    )
-                    self.evaluator.sample_from_model(
-                        num_sequences=self.config.generation_num_samples,
-                        max_length=self.config.generation_max_length,
-                        context=sample_context,
-                        step=step,
+                        step=step, global_step=global_step, total_flops=flops_so_far
                     )
 
-                # Run CORE evaluations if enabled
-                if self.run_core_evals and should_eval:
+                    # self.evaluator.sample_from_model(
+                    #     num_sequences=self.config.generation_num_samples,
+                    #     max_length=1024,
+                    #     context=sample_context,
+                    #     step=step,
+                    # )
+
+                # Run CORE evaluations if enabled (separate interval from val loss)
+                should_eval_core = (
+                    global_step % self.run_core_evals_after == 0
+                    or global_step == total_steps - 1
+                )
+                if self.run_core_evals and should_eval_core:
                     self.core_evaluator.evaluate_all_tasks(
                         step=step, global_step=global_step
                     )
 
                 # Save checkpoint at intervals or at end of training (independent of evals)
-                checkpoint_interval = (
-                    self.config.checkpoint_interval_midtrain
-                    if self.mid_training
-                    else self.config.checkpoint_interval_pretrain
-                )
+                if self.sft_training:
+                    checkpoint_interval = self.config.checkpoint_interval_sft
+                elif self.mid_training:
+                    checkpoint_interval = self.config.checkpoint_interval_midtrain
+                else:
+                    checkpoint_interval = self.config.checkpoint_interval_pretrain
+
                 save_checkpoint(
-                    model=self.model,
+                    model=self.raw_model,  # Pass unwrapped model for clean state_dict
                     optimizer=self.optimizer,
                     step=step,
                     epoch=epoch,
@@ -579,7 +1108,9 @@ class Trainer:
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
                     mid_training=self.mid_training,
+                    sft_training=self.sft_training,
                 )
+
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()
@@ -592,8 +1123,8 @@ class Trainer:
 
                     wandb.log(
                         {
-                            "epoch": epoch,
-                            "epoch_step": step,
+                            # "epoch": epoch,
+                            # "epoch_step": step,
                             "step": global_step,
                             "train_loss": train_loss,
                             # "train_bpb": train_bpb,
@@ -601,11 +1132,13 @@ class Trainer:
                             "tokens_per_second": tokens_per_second,
                             "time_taken": end_time - start_time,
                             "gradient_norm": norm,
+                            "flops_per_second": flops_per_second,
+                            "total_training_flops_train": flops_so_far,
+                            "mfu": mfu,
                         }
                     )
 
                     # Print comprehensive training statistics
-                    total_steps = self.max_steps * self.num_epochs
                     progress = (global_step + 1) / total_steps * 100
                     print(
                         f"[Epoch {epoch+1}/{self.num_epochs}] [Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
@@ -613,6 +1146,7 @@ class Trainer:
                         f"LR: {lr:.2e} | "
                         f"Grad: {norm:.2e} | "
                         f"Speed: {tokens_per_second/1000:.1f}K tok/s | "
+                        f"MFU: {mfu:.2f}% | "
                         f"Time: {end_time - start_time:.2f}s"
                     )
 

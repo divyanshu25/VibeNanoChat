@@ -54,15 +54,19 @@ class GSM8KDataLoader:
         self.cache_dir = cache_dir
         self.shuffle_seed = shuffle_seed
 
-    def load_data(self, max_examples: Optional[int] = None) -> List[Dict]:
+    def load_data(
+        self, max_examples: Optional[int] = None, format_as_conversation: bool = False
+    ) -> List[Dict]:
         """
         Load GSM8K dataset from HuggingFace.
 
         Args:
             max_examples: Optional limit on number of examples to load
+            format_as_conversation: If True, return examples in conversation format
 
         Returns:
             List of examples, each with 'question', 'answer', 'answer_value' keys
+            (or conversation format if format_as_conversation=True)
 
         Note:
             Requires 'datasets' package: pip install datasets
@@ -103,6 +107,14 @@ class GSM8KDataLoader:
                     "raw_data": item,  # Include raw data for flexibility
                 }
             )
+
+        # Optionally convert to conversation format
+        if format_as_conversation:
+            conversations = []
+            for example in examples:
+                conv = self.format_conversation(example["question"], example["answer"])
+                conversations.append(conv)
+            return conversations
 
         return examples
 
@@ -224,3 +236,19 @@ class GSM8KDataLoader:
 
         # Compare as strings (already normalized by removing commas)
         return ref_answer == pred_answer
+
+
+if __name__ == "__main__":
+    import json
+
+    # Generate examples
+    loader = GSM8KDataLoader(split="train")
+    examples = loader.load_data(max_examples=3)
+
+    # Pretty-print the JSON
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'='*80}")
+        print(f"Example {i}")
+        print(f"{'='*80}\n")
+        print(json.dumps(example, indent=2, ensure_ascii=False))
+        print()

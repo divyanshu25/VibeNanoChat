@@ -54,7 +54,9 @@ def forward_model(model, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.T
     # Example: input_ids = [The, cat, sat, on, mat]
     #          target_ids = [cat, sat, on, mat, ?]
     # This is because in language modeling, predictions[i] predicts input_ids[i+1]
-    target_ids = torch.roll(input_ids, shifts=-1, dims=1)
+    target_ids = torch.roll(
+        input_ids, shifts=-1, dims=1
+    )  # this will shift the input_ids to the left by one position
 
     # Calculate cross entropy at all positions
     # losses[i] = how well the model predicted input_ids[i+1] from position i

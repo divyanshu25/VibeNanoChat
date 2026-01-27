@@ -140,8 +140,10 @@ class HumanEvalDataLoader:
         """
         imports = []
         for line in prompt.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("import ") or stripped.startswith("from "):
+            stripped = line.strip()  # this removes whitespace and comments
+            if stripped.startswith("import ") or stripped.startswith(
+                "from "
+            ):  # this checks if the line starts with import or from
                 imports.append(stripped)
             elif stripped and not stripped.startswith("#"):
                 # Stop at first non-import, non-comment line
@@ -233,6 +235,11 @@ class HumanEvalDataLoader:
             + f"check({entry_point})"
         )
 
+        # print("PROGRAM (sent to execute_code):")
+        # print("=" * 80)
+        # print(program)
+        # print("=" * 80)
+
         # Execute the code in a sandbox
         result = execute_code(
             program, timeout=timeout, maximum_memory_bytes=maximum_memory_bytes
@@ -247,3 +254,19 @@ class HumanEvalDataLoader:
             }
 
         return result.success
+
+
+if __name__ == "__main__":
+    import json
+
+    # Generate examples
+    loader = HumanEvalDataLoader()
+    examples = loader.load_data(max_examples=3)
+
+    # Pretty-print the JSON
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'='*80}")
+        print(f"Example {i}")
+        print(f"{'='*80}\n")
+        print(json.dumps(example, indent=2, ensure_ascii=False))
+        print()

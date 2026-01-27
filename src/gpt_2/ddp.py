@@ -2,10 +2,11 @@
 DDP (Distributed Data Parallel) Training Script for GPT-2
 
 This module orchestrates distributed training across multiple GPUs using PyTorch's
-DistributedDataParallel (DDP). It supports three training modes:
+DistributedDataParallel (DDP). It supports four training modes:
     - pretraining: Train a model from scratch on general data
     - mid-training: Continue training from a checkpoint on specialized data
-    - all: Run pretraining followed by mid-training automatically
+    - sft: Supervised fine-tuning with conversation data
+    - all: Run pretraining followed by mid-training and then SFT automatically
 
 Usage Examples:
     # Single GPU pretraining
@@ -17,7 +18,10 @@ Usage Examples:
     # Mid-training from a checkpoint
     torchrun --nproc_per_node=4 ddp.py --mode mid-training --checkpoint /path/to/checkpoint.pt
 
-    # Full pipeline (pretrain → mid-train)
+    # SFT from a mid-training checkpoint
+    torchrun --nproc_per_node=4 ddp.py --mode sft --checkpoint /path/to/midtrain_checkpoint.pt
+
+    # Full pipeline (pretrain → mid-train → sft)
     torchrun --nproc_per_node=4 ddp.py --mode all
 """
 
@@ -129,6 +133,12 @@ def run_pretraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    target_flops=None,
+    eval_interval=None,
+    core_eval_interval=None,
 ):
     """
     Execute the pretraining phase.
@@ -179,6 +189,12 @@ def run_pretraining(
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        target_flops=target_flops,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
     )
     trainer.train()
 
@@ -207,6 +223,11 @@ def run_midtraining(
     run_core_evals=False,
     run_chatcore_evals=False,
     checkpoint_path=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    eval_interval=None,
+    core_eval_interval=None,
 ):
     """
     Execute the mid-training phase.
@@ -267,6 +288,11 @@ def run_midtraining(
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
     )
     trainer.train()
 
@@ -283,6 +309,100 @@ def run_midtraining(
     return final_checkpoint
 
 
+def run_sft(
+    ddp,
+    ddp_rank,
+    ddp_local_rank,
+    ddp_world_size,
+    master_process,
+    device,
+    run_evals,
+    run_core_evals=False,
+    run_chatcore_evals=False,
+    checkpoint_path=None,
+    depth=None,
+    aspect_ratio=None,
+    head_dim=None,
+    eval_interval=None,
+    core_eval_interval=None,
+):
+    """
+    Execute the SFT (Supervised Fine-Tuning) phase.
+
+    SFT continues from a mid-training checkpoint and trains on conversation data
+    using the multiplex dataloader. This adapts the model for chat and instruction
+    following capabilities.
+
+    Args:
+        ddp (bool): Whether DDP is enabled
+        ddp_rank (int): Global process rank
+        ddp_local_rank (int): Local rank for GPU assignment
+        ddp_world_size (int): Total number of processes
+        master_process (bool): Whether this is the main process
+        device (str): Device to train on
+        run_evals (bool): Whether to run evaluations during training
+        run_core_evals (bool): Whether to run CORE benchmark evaluations
+        run_chatcore_evals (bool): Whether to run ChatCORE evaluations (runs after each epoch if enabled)
+        checkpoint_path (str): Path to mid-training checkpoint to resume from
+
+    Returns:
+        str: Path to the final checkpoint saved after SFT
+
+    Raises:
+        ValueError: If checkpoint_path is not provided
+        FileNotFoundError: If the checkpoint file doesn't exist
+    """
+    if master_process:
+        print("\n" + "=" * 80)
+        print("🎯 STARTING SFT PHASE")
+        print("=" * 80 + "\n")
+
+    # Validate checkpoint path
+    if not checkpoint_path:
+        raise ValueError("Checkpoint path is required for SFT. Use --checkpoint flag.")
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    # Create trainer with sft_training=True to use SFT configuration
+    # This loads the checkpoint and uses SFT hyperparameters/multiplex dataloader
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/sft_checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    trainer = Trainer(
+        ddp=ddp,
+        ddp_rank=ddp_rank,
+        ddp_local_rank=ddp_local_rank,
+        ddp_world_size=ddp_world_size,
+        master_process=master_process,
+        device=device,
+        run_evals=run_evals,
+        run_core_evals=run_core_evals,
+        run_chatcore_evals=run_chatcore_evals,
+        sft_training=True,  # Use SFT configuration
+        checkpoint_path=checkpoint_path,  # Rollover from mid-training checkpoint
+        checkpoint_dir=checkpoint_dir,
+        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        depth=depth,
+        aspect_ratio=aspect_ratio,
+        head_dim=head_dim,
+        eval_interval=eval_interval,
+        core_eval_interval=core_eval_interval,
+    )
+    trainer.train()
+
+    # Construct path to the final checkpoint
+    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/sft_checkpoints"
+    final_global_step = (trainer.max_steps * trainer.num_epochs) - 1
+    final_checkpoint = os.path.join(
+        checkpoint_dir, f"model_checkpoint_global{final_global_step}_sft.pt"
+    )
+
+    if master_process:
+        print(f"\n✅ SFT complete! Final checkpoint: {final_checkpoint}\n")
+
+    return final_checkpoint
+
+
 def run_trainer(args):
     """
     Main training orchestration function.
@@ -290,12 +410,13 @@ def run_trainer(args):
     This function handles the high-level training flow based on the selected mode:
         - pretraining: Train from scratch
         - mid-training: Continue from checkpoint on specialized data
-        - all: Run pretraining, then automatically continue to mid-training
+        - sft: Supervised fine-tuning from mid-training checkpoint
+        - all: Run pretraining, then mid-training, then SFT
 
     Args:
         args: Parsed command-line arguments containing:
-            - mode: Training mode (pretraining/mid-training/all)
-            - checkpoint: Path to checkpoint (for mid-training)
+            - mode: Training mode (pretraining/mid-training/sft/all)
+            - checkpoint: Path to checkpoint (for mid-training/sft)
             - run_evals: Whether to run evaluations
     """
     # Initialize distributed training environment
@@ -320,6 +441,12 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,  # Optional: resume from checkpoint
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                target_flops=args.target_flops,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
         # -----------------------------------------------------------------------
@@ -338,16 +465,44 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=args.checkpoint,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
+            )
+
+        # -----------------------------------------------------------------------
+        # Mode: SFT Only
+        # Continue from mid-training checkpoint with conversation data
+        # -----------------------------------------------------------------------
+        elif args.mode == "sft":
+            run_sft(
+                ddp,
+                ddp_rank,
+                ddp_local_rank,
+                ddp_world_size,
+                master_process,
+                device,
+                args.run_evals,
+                run_core_evals=args.run_core_evals,
+                run_chatcore_evals=args.run_chatcore_evals,
+                checkpoint_path=args.checkpoint,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
         # -----------------------------------------------------------------------
         # Mode: Full Pipeline
-        # Run pretraining, then automatically continue to mid-training
+        # Run pretraining, then mid-training, then SFT
         # -----------------------------------------------------------------------
         elif args.mode == "all":
             if master_process:
                 print("\n" + "=" * 80)
-                print("🎯 RUNNING FULL PIPELINE: PRETRAINING → MID-TRAINING")
+                print("🎯 RUNNING FULL PIPELINE: PRETRAINING → MID-TRAINING → SFT")
                 print("=" * 80 + "\n")
 
             # Phase 1: Pretraining
@@ -361,7 +516,13 @@ def run_trainer(args):
                 device,
                 args.run_evals,
                 run_core_evals=args.run_core_evals,
-                run_chatcore_evals=args.run_chatcore_evals,
+                run_chatcore_evals=False,  # Don't run chatcore in pretraining
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                target_flops=args.target_flops,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
             # Transition message
@@ -373,7 +534,34 @@ def run_trainer(args):
 
             # Phase 2: Mid-training
             # Uses the checkpoint from pretraining
-            run_midtraining(
+            checkpoint_path = run_midtraining(
+                ddp,
+                ddp_rank,
+                ddp_local_rank,
+                ddp_world_size,
+                master_process,
+                device,
+                args.run_evals,
+                run_core_evals=args.run_core_evals,
+                run_chatcore_evals=False,  # Don't run chatcore in midtraining for full pipeline
+                checkpoint_path=checkpoint_path,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
+            )
+
+            # Transition message
+            if master_process:
+                print("\n" + "=" * 80)
+                print("🔄 TRANSITIONING TO SFT")
+                print(f"📂 Using checkpoint: {checkpoint_path}")
+                print("=" * 80 + "\n")
+
+            # Phase 3: SFT
+            # Uses the checkpoint from mid-training
+            run_sft(
                 ddp,
                 ddp_rank,
                 ddp_local_rank,
@@ -384,6 +572,11 @@ def run_trainer(args):
                 run_core_evals=args.run_core_evals,
                 run_chatcore_evals=args.run_chatcore_evals,
                 checkpoint_path=checkpoint_path,
+                depth=args.depth,
+                aspect_ratio=args.aspect_ratio,
+                head_dim=args.head_dim,
+                eval_interval=args.eval_interval,
+                core_eval_interval=args.core_eval_interval,
             )
 
             if master_process:
@@ -393,7 +586,7 @@ def run_trainer(args):
 
         else:
             raise ValueError(
-                f"Invalid mode: {args.mode}. Choose from: pretraining, mid-training, all"
+                f"Invalid mode: {args.mode}. Choose from: pretraining, mid-training, sft, all"
             )
 
     finally:
@@ -413,7 +606,7 @@ if __name__ == "__main__":
     # Argument Parser Setup
     # -----------------------------------------------------------------------
     parser = argparse.ArgumentParser(
-        description="GPT-2 Training with DDP - Supports pretraining, mid-training, or both"
+        description="GPT-2 Training with DDP - Supports pretraining, mid-training, SFT, or full pipeline"
     )
 
     # Training mode selection
@@ -421,16 +614,16 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="pretraining",
-        choices=["pretraining", "mid-training", "all"],
-        help="Training mode: 'pretraining' (only pretrain), 'mid-training' (only mid-train), or 'all' (pretrain then mid-train)",
+        choices=["pretraining", "mid-training", "sft", "all"],
+        help="Training mode: 'pretraining' (only pretrain), 'mid-training' (only mid-train), 'sft' (only SFT), or 'all' (pretrain → mid-train → sft)",
     )
 
-    # Checkpoint path for resuming or mid-training
+    # Checkpoint path for resuming or continuing training
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
-        help="Path to checkpoint file (required for mid-training, optional for pretraining to resume)",
+        help="Path to checkpoint file (required for mid-training and SFT, optional for pretraining to resume)",
     )
 
     # Evaluation toggle (default: enabled)
@@ -451,7 +644,52 @@ if __name__ == "__main__":
     parser.add_argument(
         "--run-chatcore-evals",
         action="store_true",
-        help="Enable ChatCore evaluations during training",
+        help="Enable ChatCore evaluations during training (runs after each epoch)",
+    )
+
+    # Depth-based architecture (nanochat-style)
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Model depth (auto-calculates n_layer, n_embed, n_head from depth × aspect_ratio)",
+    )
+
+    parser.add_argument(
+        "--aspect-ratio",
+        type=int,
+        default=64,
+        help="Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default=64)",
+    )
+
+    parser.add_argument(
+        "--head-dim",
+        type=int,
+        default=128,
+        help="Target head dimension for depth mode (default=128 for Flash Attention efficiency)",
+    )
+
+    # Training horizon
+    parser.add_argument(
+        "--target-flops",
+        type=float,
+        default=None,
+        help="Target total FLOPs for training (overrides config.target_flops)",
+    )
+
+    # Evaluation frequency
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=None,
+        help="Run validation loss evaluations every N steps (default: adaptive, ~10 evals per run)",
+    )
+
+    parser.add_argument(
+        "--core-eval-interval",
+        type=int,
+        default=None,
+        help="Run CORE benchmark evaluations every N steps (default: adaptive, ~4 evals per run)",
     )
 
     # Parse and process arguments
@@ -460,10 +698,13 @@ if __name__ == "__main__":
 
     # -----------------------------------------------------------------------
     # Argument Validation
-    # Mid-training mode requires a checkpoint
+    # Mid-training and SFT modes require a checkpoint
     # -----------------------------------------------------------------------
     if args.mode == "mid-training" and not args.checkpoint:
         parser.error("--checkpoint is required when using --mode mid-training")
+
+    if args.mode == "sft" and not args.checkpoint:
+        parser.error("--checkpoint is required when using --mode sft")
 
     # Start training
     run_trainer(args)

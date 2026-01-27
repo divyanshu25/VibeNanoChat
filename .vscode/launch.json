@@ -33,5 +33,13 @@
             "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}"
         }
+        {
+            "name": "Python: Multiplex DataLoader",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/dataloaders/multiplex_dataloader.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        }
     ]
 }

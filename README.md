@@ -33,6 +33,29 @@ To chat with your trained model:
 uv run python scripts/chat.py --checkpoint /path/to/checkpoint.pt
 ```
 
+## Depth Parameterization (Scaling Laws)
+
+NanoGPT supports **depth-based parameterization** inspired by [nanochat](https://github.com/karpathy/nanochat), which simplifies model scaling using a single knob:
+
+```bash
+# Train models of different sizes with one parameter
+make ddp-train DEPTH=6 TARGET_FLOPS=1e18   # ~30M params
+make ddp-train DEPTH=12 TARGET_FLOPS=1e18  # ~150M params
+make ddp-train DEPTH=20 TARGET_FLOPS=1e18  # ~560M params
+```
+
+**Benefits:**
+- 🎯 **Single knob:** `DEPTH` controls both model width and depth
+- 📊 **Auto-scaling:** Learning rate and weight decay scale automatically
+- 🔬 **Easy sweeps:** Run scaling law experiments with simple loops
+
+**Run full scaling law experiments:**
+```bash
+make run-scaling-law  # Sweeps depths 6-14 and FLOP budgets 1e18-6e18
+```
+
+📖 **See [docs/DEPTH_PARAMETERIZATION.md](docs/DEPTH_PARAMETERIZATION.md) for full documentation**
+
 ## Reproducing GPT-2 (124M)
 
 This implementation reproduces GPT-2 (124M parameters) with the following architecture:
@@ -67,7 +90,26 @@ The repository supports three datasets:
 
 **TaskMixture** (~568K examples) - For mid-training/instruction tuning. Combines SmolTalk (conversational), MMLU (reasoning), and GSM8K (math). Formatted with chat special tokens.
 
-**OpenWebText** (~9B tokens) - Legacy support. The classic reproduction of OpenAI's WebText dataset used in GPT-2.
+### TaskMixture Data Breakdown
+
+**Training Split** (567,315 examples | 460.3M tokens):
+
+| Dataset | Examples | Percentage | Description |
+|---------|----------|------------|-------------|
+| SmolTalk | 460,000 | 81.1% | General conversations |
+| MMLU auxiliary_train | 99,842 | 17.6% | Multiple choice (ARC, MC_TEST, OBQA, RACE) |
+| GSM8K | 7,473 | 1.3% | Grade school math problems |
+| **TOTAL** | **567,315** | **100%** | **460.3M tokens** |
+
+**Validation Split** (7,850 examples | 5.0M tokens):
+
+| Dataset | Examples | Percentage | Description |
+|---------|----------|------------|-------------|
+| SmolTalk | 5,000 | 63.7% | Sampled conversations |
+| MMLU | 1,531 | 19.5% | Validation subset ("all" config) |
+| GSM8K | 1,319 | 16.8% | Test split for validation |
+| **TOTAL** | **7,850** | **100%** | **5.0M tokens** |
+
 
 All datasets are tokenized with GPT-2's BPE tokenizer and stored as binary `.bin` files (memory-mapped uint16 arrays) for fast loading.
 

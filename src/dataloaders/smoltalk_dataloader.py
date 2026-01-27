@@ -76,6 +76,7 @@ class SmolTalkDataLoader:
 
         Returns:
             List of examples, each with 'messages' key containing the conversation
+            and 'raw_data' key with the original dataset item.
 
         Note:
             Requires 'datasets' package: pip install datasets
@@ -132,6 +133,8 @@ class SmolTalkDataLoader:
             if not valid:
                 continue
 
+            # SmolTalk data is already in the correct format
+            # format_as_conversation parameter kept for API consistency
             examples.append(
                 {
                     "messages": messages,
@@ -140,51 +143,6 @@ class SmolTalkDataLoader:
             )
 
         return examples
-
-    def format_conversation(self, messages: List[Dict]) -> Dict:
-        """
-        Format a SmolTalk conversation with special tokens for training.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content' keys
-                     Example: [
-                         {'role': 'user', 'content': 'Hello'},
-                         {'role': 'assistant', 'content': 'Hi there!'}
-                     ]
-
-        Returns:
-            Formatted conversation dict with 'text' key containing the formatted string
-
-        Example output:
-            {
-                'text': '<|bos|><|user_start|>Hello<|user_end|><|assistant_start|>Hi there!<|assistant_end|>'
-            }
-        """
-        formatted_parts = ["<|bos|>"]  # Start with beginning-of-sequence token
-
-        for msg in messages:
-            role = msg["role"].lower()
-            content = msg["content"]
-
-            # Extract text content if it's structured
-            if isinstance(content, str):
-                text_content = content
-            elif isinstance(content, dict):
-                text_content = content.get("text", str(content))
-            else:
-                text_content = str(content)
-
-            if role == "user":
-                formatted_parts.append(f"<|user_start|>{text_content}<|user_end|>")
-            elif role == "assistant":
-                formatted_parts.append(
-                    f"<|assistant_start|>{text_content}<|assistant_end|>"
-                )
-            else:
-                # Handle other roles (system, etc.) as user for consistency
-                formatted_parts.append(f"<|user_start|>{text_content}<|user_end|>")
-
-        return {"text": "".join(formatted_parts)}
 
     @staticmethod
     def validate_conversation(messages: List[Dict]) -> bool:
@@ -246,3 +204,19 @@ class SmolTalkDataLoader:
             "max_turns": max(turn_counts) if turn_counts else 0,
             "role_distribution": role_counts,
         }
+
+
+if __name__ == "__main__":
+    import json
+
+    # Generate examples
+    loader = SmolTalkDataLoader(config="all", split="train")
+    examples = loader.load_data(max_examples=3)
+
+    # Pretty-print the JSON
+    for i, example in enumerate(examples, 1):
+        print(f"\n{'='*80}")
+        print(f"Example {i}")
+        print(f"{'='*80}\n")
+        print(json.dumps(example, indent=2, ensure_ascii=False))
+        print()

@@ -14,14 +14,7 @@ import torch
 
 
 def get_special_tokens():
-    """
-    Define special tokens for chat format and tool calling.
-
-    Token IDs start at 50257 (right after GPT-2's vocab which ends at 50256).
-
-    Returns:
-        dict: Mapping of special token strings to their token IDs
-    """
+    """Define special tokens for chat format and tool calling."""
     return {
         "<|bos|>": 50257,  # Beginning of sequence - marks start of conversation
         "<|user_start|>": 50258,  # Marks start of user message
@@ -66,6 +59,132 @@ def get_custom_tokenizer():
     )
 
     return enc, special_tokens
+
+
+def calculate_num_iterations(
+    model,
+    config,
+    master_process: bool = True,
+) -> tuple[int, float, int]:
+    """
+    Calculate the number of training iterations based on nanochat-style logic.
+
+    Priority order (first available is used):
+    1. config.num_iterations (if > 0): explicit number of steps
+    2. config.target_flops (if > 0): calculate from target FLOPs
+    3. config.target_param_data_ratio (if > 0): calculate from data:param ratio
+
+    Args:
+        model: The GPT model (needs estimate_flops() and num_scaling_params() methods)
+        config: Configuration object with training parameters
+        master_process: If True, print logging information (default: True)
+
+    Returns:
+        tuple: (num_iterations, num_flops_per_token, num_scaling_params)
+
+    Raises:
+        ValueError: If no training horizon is specified
+    """
+    num_flops_per_token = model.estimate_flops()
+    num_scaling_params = model.num_scaling_params()
+
+    # Priority 1: Explicit num_iterations
+    if config.num_iterations > 0:
+        num_iterations = config.num_iterations
+        if master_process:
+            print(f"Using user-provided number of iterations: {num_iterations:,}")
+
+    # Priority 2: Target FLOPs
+    elif config.target_flops > 0:
+        num_iterations = round(
+            config.target_flops / (num_flops_per_token * config.total_batch_size)
+        )
+        if master_process:
+            print(
+                f"Calculated number of iterations from target FLOPs: {num_iterations:,}"
+            )
+
+    # Priority 3: Data:param ratio (default for nanochat)
+    elif config.target_param_data_ratio > 0:
+        target_tokens = config.target_param_data_ratio * num_scaling_params
+        num_iterations = target_tokens // config.total_batch_size
+        if master_process:
+            print(
+                f"Calculated number of iterations from target data:param ratio: {num_iterations:,}"
+            )
+
+    else:
+        raise ValueError(
+            "No training horizon specified. Set one of: num_iterations, target_flops, or target_param_data_ratio"
+        )
+
+    return num_iterations, num_flops_per_token, num_scaling_params
+
+
+def get_lr_multiplier(
+    global_step: int,
+    max_steps: int,
+    num_epochs: int,
+    training_phase: str = "pretrain",
+    warmup_ratio: float = 0.0,
+    warmdown_ratio: float = 0.4,
+    final_lr_frac: float = 0.0,
+) -> float:
+    """
+    Compute learning rate multiplier for separate learning rates (nanochat-style).
+
+    This returns a multiplier that gets applied to each parameter group's base
+    learning rate, preserving the relative ratios between groups while following
+    a schedule appropriate for the training phase.
+
+    Training Phase Schedules (matching nanochat exactly):
+    - pretrain: warmup -> constant -> warmdown to final_lr_frac
+    - midtrain: constant for 80% of training -> linear decay to 0
+    - sft/rl: linear decay from 1.0 to 0 (no warmup)
+
+    Args:
+        global_step: Current global training step (across all epochs)
+        max_steps: Maximum steps per epoch
+        num_epochs: Total number of epochs
+        training_phase: One of "pretrain", "midtrain", "sft", "rl"
+        warmup_ratio: Ratio of iterations for LR warmup (pretrain only, default 0.0)
+        warmdown_ratio: Ratio of iterations for LR warmdown (pretrain only, default 0.4)
+        final_lr_frac: Final LR as fraction of initial LR (pretrain only, default 0.0)
+
+    Returns:
+        float: Learning rate multiplier for current step
+    """
+    total_steps = max_steps * num_epochs
+
+    if training_phase == "pretrain":
+        # Nanochat base_train logic: warmup -> constant -> warmdown
+        warmup_iters = round(warmup_ratio * total_steps)
+        warmdown_iters = round(warmdown_ratio * total_steps)
+
+        if global_step < warmup_iters:
+            # Linear warmup
+            return (global_step + 1) / warmup_iters
+        elif global_step <= total_steps - warmdown_iters:
+            # Constant LR
+            return 1.0
+        else:
+            # Linear warmdown to final_lr_frac
+            progress = (total_steps - global_step) / warmdown_iters
+            return progress * 1.0 + (1 - progress) * final_lr_frac
+
+    elif training_phase == "midtrain":
+        # Nanochat mid_train logic: constant for 80%, then linear decay to 0
+        progress = global_step / total_steps
+        return 1.0 if progress < 0.8 else 1.0 - (progress - 0.8) / 0.2
+
+    elif training_phase in ["sft", "rl"]:
+        # Nanochat chat_sft/chat_rl logic: linear decay from 1.0 to 0
+        return 1.0 - global_step / total_steps
+
+    else:
+        raise ValueError(
+            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, midtrain, sft, rl"
+        )
 
 
 def get_lr(
@@ -117,58 +236,63 @@ def load_checkpoint(
     device: str,
     optimizer: torch.optim.Optimizer = None,
     master_process: bool = True,
+    print_resume_info: bool = True,
 ) -> dict:
     """
     Load model weights and optionally optimizer state from a checkpoint.
 
+    Expects canonical format with clean state_dict (no 'module.' prefix).
+    Model should be the raw unwrapped model (e.g., self.raw_model from trainer).
+
     Args:
         checkpoint_path: Path to the checkpoint file
-        model: The model to load weights into
-        device: Device to map the checkpoint to
-        optimizer: Optional optimizer to load state into (for resuming training)
+        model: Raw unwrapped model (not DDP/compile wrapped)
+        device: Device to map the checkpoint to ('cuda', 'cpu', etc.)
+        optimizer: Optional optimizer to load state into
         master_process: Whether this is the master process (for logging)
+        print_resume_info: Whether to print resume info (False for rollover scenarios)
 
     Returns:
-        dict: Dictionary with 'start_step', 'start_epoch', 'start_global_step', 'config', 'val_loss'
+        dict: Training state with 'start_step', 'start_epoch', 'start_global_step',
+              'config', and 'val_loss' keys
+
+    Raises:
+        ValueError: If checkpoint has 'module.' prefix or vocabulary size mismatch
+        KeyError: If checkpoint is missing required keys
     """
     if master_process:
         print(f"\n{'='*80}")
         print(f"📂 Loading checkpoint from: {checkpoint_path}")
         print(f"{'='*80}\n")
 
-    # weights_only=False required for loading custom classes like GPTConfig
-    # (PyTorch 2.6+ defaults to weights_only=True for security)
+    # Load checkpoint (weights_only=False needed for GPTConfig and other custom objects)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # Check for vocabulary size mismatch
     checkpoint_state = checkpoint["model"]
-    checkpoint_vocab_size = checkpoint_state["transformer.wte.weight"].shape[0]
+
+    # Validate vocabulary size compatibility
+    wte_key = "transformer.wte.weight"
+    if wte_key not in checkpoint_state:
+        raise KeyError(
+            f"Missing word token embedding weights in checkpoint.\n"
+            f"Expected key: '{wte_key}'\n"
+            f"Available keys (first 5): {list(checkpoint_state.keys())[:5]}"
+        )
+
+    checkpoint_vocab_size = checkpoint_state[wte_key].shape[0]
     model_vocab_size = model.transformer.wte.weight.shape[0]
 
     if checkpoint_vocab_size != model_vocab_size:
-        error_msg = (
-            f"\n{'='*80}\n"
-            f"❌ VOCABULARY SIZE MISMATCH ERROR\n"
-            f"{'='*80}\n"
-            f"Checkpoint vocab size: {checkpoint_vocab_size}\n"
-            f"Model vocab size:      {model_vocab_size}\n"
-            f"Difference:            {abs(model_vocab_size - checkpoint_vocab_size)} tokens\n"
-            f"\n"
-            f"The checkpoint was saved with a different vocabulary size than the\n"
-            f"current model configuration. This will cause index out of bounds errors.\n"
-            f"\n"
-            f"Possible solutions:\n"
-            f"1. Use a checkpoint with matching vocab_size={model_vocab_size}\n"
-            f"2. Modify your model config to use vocab_size={checkpoint_vocab_size}\n"
-            f"3. Retrain from scratch with the correct vocabulary size\n"
-            f"{'='*80}\n"
+        raise ValueError(
+            f"Vocabulary size mismatch - "
+            f"Checkpoint: {checkpoint_vocab_size}, Model: {model_vocab_size}"
         )
-        raise ValueError(error_msg)
 
-    # Load model state
+    # Load model weights
     model.load_state_dict(checkpoint_state)
+    if master_process:
+        print("✅ Model weights loaded")
 
-    # Load optimizer state if provided and available
+    # Load optimizer state (optional, for resuming training)
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
         if master_process:
@@ -191,7 +315,8 @@ def load_checkpoint(
     if "global_step" in checkpoint:
         result["start_global_step"] = checkpoint["global_step"] + 1
 
-    if master_process:
+    # Only print resume info if requested (skip for rollover scenarios)
+    if master_process and print_resume_info:
         print(
             f"✅ Resuming from epoch {result['start_epoch']}, step {result['start_step']}"
         )
@@ -217,24 +342,29 @@ def save_checkpoint(
     num_epochs: int = 3,
     master_process: bool = True,
     mid_training: bool = False,
+    sft_training: bool = False,
 ) -> None:
     """
     Save model checkpoint at specified intervals.
 
+    Model should be the raw unwrapped model (e.g., self.raw_model from trainer)
+    to ensure clean state_dict without 'module.' or other wrapper prefixes.
+
     Args:
-        model: The model to save (can be DDP wrapped)
-        optimizer: The optimizer to save state from
+        model: Raw unwrapped model to save (not DDP/compile wrapped)
+        optimizer: Optimizer to save state from
         step: Current step within epoch
-        epoch: Current epoch
+        epoch: Current epoch number
         global_step: Global step across all epochs
         val_loss: Validation loss for this checkpoint
         checkpoint_dir: Directory to save checkpoints
-        ddp: Whether using distributed data parallel
+        ddp: Unused (kept for API compatibility)
         checkpoint_interval: Save checkpoint every N steps
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
         master_process: Whether this is the master process
         mid_training: Whether this is mid-training mode
+        sft_training: Whether this is SFT training mode
     """
     total_steps = max_steps * num_epochs
     should_save = (global_step > 0 and global_step % checkpoint_interval == 0) or (
@@ -244,12 +374,11 @@ def save_checkpoint(
     if not (master_process and should_save):
         return
 
-    # Get the underlying model (unwrap DDP if needed)
-    model_to_save = model.module if ddp else model
+    # Save model state_dict (model should already be unwrapped)
     checkpoint = {
-        "model": model_to_save.state_dict(),
+        "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
-        "config": model_to_save.config,
+        "config": model.config,
         "step": step,
         "epoch": epoch,
         "global_step": global_step,
@@ -258,7 +387,13 @@ def save_checkpoint(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    checkpoint_suffix = "_midtraining" if mid_training else "_pretraining"
+    if sft_training:
+        checkpoint_suffix = "_sft"
+    elif mid_training:
+        checkpoint_suffix = "_midtraining"
+    else:
+        checkpoint_suffix = "_pretraining"
+
     checkpoint_path = (
         f"{checkpoint_dir}/model_checkpoint_global{global_step}{checkpoint_suffix}.pt"
     )
@@ -281,7 +416,10 @@ def accumulate_bpb(per_token_loss, targets, token_bytes):
         token_bytes: Tensor mapping token ID to byte length, shape (vocab_size,)
 
     Returns:
-        tuple: (nats_sum, bytes_sum) to add to running totals
+        tuple: (nats_sum, bytes_sum, valid_mask) where:
+            - nats_sum: sum of losses for valid tokens
+            - bytes_sum: sum of byte lengths for valid tokens
+            - valid_mask: boolean mask of shape (B*T,) indicating valid tokens (num_bytes > 0)
     """
     y = targets.view(-1)
 
@@ -299,7 +437,94 @@ def accumulate_bpb(per_token_loss, targets, token_bytes):
         num_bytes = token_bytes[y]
 
     # Exclude special tokens (num_bytes == 0) from loss sum
-    nats_sum = (per_token_loss * (num_bytes > 0)).sum()
+    valid_mask = num_bytes > 0
+    nats_sum = (per_token_loss * valid_mask).sum()
     bytes_sum = num_bytes.sum()
 
-    return nats_sum, bytes_sum
+    return nats_sum, bytes_sum, valid_mask
+
+
+def get_peak_flops(device_name: str) -> float:
+    """
+    Get theoretical peak FLOPs for bfloat16 on various GPU architectures.
+
+    Returns the theoretical peak FLOPS (floating point operations per second)
+    for bfloat16 computation on the specified device. Used to calculate MFU
+    (Model FLOPs Utilization).
+
+    Inspired by:
+    - torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
+    - nanochat: https://github.com/karpathy/nanochat
+
+    Args:
+        device_name: Name of the GPU device (e.g., "NVIDIA H100")
+
+    Returns:
+        float: Peak FLOPS for bfloat16 operations. Returns inf if unknown device
+               (so MFU shows as 0% rather than an incorrect value)
+    """
+    name = device_name.lower()
+
+    # --- NVIDIA Blackwell ---
+    if "gb200" in name or "grace blackwell" in name:
+        return 2.5e15
+    if "b200" in name:
+        return 2.25e15
+    if "b100" in name:
+        return 1.8e15
+
+    # --- NVIDIA Hopper (H100/H200/H800) ---
+    if "h200" in name:
+        if "nvl" in name or "pcie" in name:
+            return 836e12
+        return 989e12  # H200 SXM
+    if "h100" in name:
+        if "nvl" in name:
+            return 835e12
+        if "pcie" in name:
+            return 756e12
+        return 989e12  # H100 SXM
+    if "h800" in name:
+        if "nvl" in name:
+            return 989e12
+        return 756e12  # H800 PCIe
+
+    # --- NVIDIA Ampere data center ---
+    if "a100" in name or "a800" in name:
+        return 312e12
+    if "a40" in name:
+        return 149.7e12
+    if "a30" in name:
+        return 165e12
+
+    # --- NVIDIA Ada data center ---
+    if "l40s" in name or "l40-s" in name or "l40 s" in name:
+        return 362e12
+    if "l4" in name:
+        return 121e12
+
+    # --- AMD CDNA accelerators ---
+    if "mi355" in name:
+        return 2.5e15
+    if "mi325" in name or "mi300x" in name:
+        return 1.3074e15
+    if "mi300a" in name:
+        return 980.6e12
+    if "mi250x" in name:
+        return 383e12
+    if "mi250" in name:
+        return 362.1e12
+
+    # --- Consumer RTX (for hobbyists) ---
+    if "5090" in name:
+        return 209.5e12
+    if "4090" in name:
+        return 165.2e12
+    if "3090" in name:
+        return 71e12
+
+    # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
+    print(
+        f"WARNING: Peak FLOPS undefined for device: {device_name}, MFU will show as 0%"
+    )
+    return float("inf")

@@ -53,6 +53,15 @@ def generate(
     # Initialize the custom tokenizer with special tokens for chat format
     enc, _ = get_custom_tokenizer()
 
+    # CRITICAL: Check tokenizer vocab size matches model
+    tokenizer_vocab_size = enc.max_token_value + 1
+    model_vocab_size = model.config.vocab_size
+    if tokenizer_vocab_size != model_vocab_size:
+        print("\n⚠️  WARNING: Vocab size mismatch!")
+        print(f"  - Tokenizer vocab: {tokenizer_vocab_size}")
+        print(f"  - Model vocab: {model_vocab_size}")
+        print("  - This will cause decoding failures!\n")
+
     # Encode the context string to token indices (allow special tokens in context)
     tokens = enc.encode(context, allowed_special="all")
     tokens = torch.tensor(tokens, dtype=torch.long)
@@ -205,11 +214,41 @@ def generate(
     print(f"  - Final length: {x.size(1)} tokens")
     print(f"{'='*60}\n")
 
+    print("Starting decoding...")
     all_decoded = []
+
+    # Get vocab size from the encoder
+    vocab_size = enc.max_token_value + 1
+
     for i in range(num_sequences):
+        print(f"  Decoding sequence {i+1}/{num_sequences}...")
         tokens = x[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        all_decoded.append(decoded)
+
+        # Validate tokens are in valid range
+        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
+        if invalid_tokens:
+            print(
+                f"  ⚠️  WARNING: Found {len(invalid_tokens)} invalid tokens (vocab_size={vocab_size})"
+            )
+            print(f"      Invalid token examples: {invalid_tokens[:5]}")
+            # Clip invalid tokens to valid range
+            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
+
+        # Decode (fail fast if there's an error)
+        try:
+            decoded = enc.decode(tokens)
+            all_decoded.append(decoded)
+            print(f"  ✓ Sequence {i+1} decoded ({len(decoded)} chars)")
+        except Exception as e:
+            print(f"\n  ✗ ERROR decoding sequence {i+1}:")
+            print(f"     Error type: {type(e).__name__}")
+            print(f"     Error message: {e}")
+            print(f"     Tokens length: {len(tokens)}")
+            print(f"     First 10 tokens: {tokens[:10]}")
+            print(f"     Last 10 tokens: {tokens[-10:]}")
+            raise  # Re-raise to fail the generation
+
+    print("All sequences decoded successfully!\n")
     return all_decoded
 
 
@@ -258,7 +297,7 @@ class TrainingEvaluator:
         else:
             raise ValueError("token_bytes_path is required for BPB calculation")
 
-    def estimate_validation_loss(self, step, global_step=None):
+    def estimate_validation_loss(self, step, global_step=None, total_flops=None):
         """
         Estimate average loss on validation set and compute bits per byte (BPB).
         BPB is tokenization-independent: normalized by actual byte length of tokens.
@@ -266,6 +305,7 @@ class TrainingEvaluator:
         Args:
             step: Current step within epoch
             global_step: Global step across all epochs (for wandb logging)
+            total_flops: Total training FLOPs so far (for wandb logging)
 
         Returns:
             float: Validation loss
@@ -278,7 +318,9 @@ class TrainingEvaluator:
 
         token_bytes = self._token_bytes
         # Accumulators for loss and BPB
-        val_loss_accumulator = torch.tensor(0.0, device=self.device)
+        # Track sum of losses and count of valid tokens (excluding special tokens)
+        total_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        total_valid_tokens = torch.tensor(0, dtype=torch.int64, device=self.device)
         total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
 
@@ -292,26 +334,36 @@ class TrainingEvaluator:
                         X, Y, loss_reduction="none"
                     )  # (B*T,)
 
-                # Compute mean loss from per-token losses
-                val_loss_accumulator += per_token_loss.mean() / val_loss_steps
-
-                # BPB calculation
-                nats, bytes = accumulate_bpb(per_token_loss, Y, token_bytes)
+                # BPB calculation (also used for consistent val_loss calculation)
+                # accumulate_bpb returns the valid_mask, which we reuse for val_loss
+                nats, bytes, valid_mask = accumulate_bpb(per_token_loss, Y, token_bytes)
                 total_nats += nats
                 total_bytes += bytes
+
+                # Use the same valid_mask for val_loss (excludes special tokens and ignored tokens)
+                total_loss_sum += (per_token_loss * valid_mask).sum()
+                total_valid_tokens += valid_mask.sum()
 
         self.model.train()
 
         # Reduce across ranks
         if self.ddp_world_size > 1:
-            dist.all_reduce(val_loss_accumulator, op=dist.ReduceOp.AVG)
+            dist.all_reduce(total_loss_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_valid_tokens, op=dist.ReduceOp.SUM)
             dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
             dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
 
         elapsed_time = time.time() - start_time
 
+        # Calculate val_loss (average loss per valid token, excluding special tokens)
+        total_loss_sum_val = total_loss_sum.item()
+        total_valid_tokens_val = total_valid_tokens.item()
+        if total_valid_tokens_val == 0:
+            val_loss = float("inf")
+        else:
+            val_loss = total_loss_sum_val / total_valid_tokens_val
+
         # Calculate BPB
-        val_loss = val_loss_accumulator.item()
         total_nats_val = total_nats.item()
         total_bytes_val = total_bytes.item()
         if total_bytes_val == 0:
@@ -325,13 +377,18 @@ class TrainingEvaluator:
                 f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss:.4f} | BPB: {val_bpb:.4f} | Time: {elapsed_time:.2f}s"
             )
             print(f"{'='*80}\n")
-            wandb.log(
-                {
-                    "val_loss": val_loss,
-                    "val_bpb": val_bpb,
-                    "step": global_step if global_step is not None else step,
-                }
-            )
+
+            log_dict = {
+                "val_loss": val_loss,
+                "val_bpb": val_bpb,
+                "step": global_step if global_step is not None else step,
+            }
+
+            # Add FLOPs for validation BPB vs FLOPs plot
+            if total_flops is not None:
+                log_dict["total_training_flops_val"] = total_flops
+
+            wandb.log(log_dict)
 
         return val_loss
 
@@ -388,9 +445,14 @@ class TrainingEvaluator:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 step_info = f"Step {step}" if step is not None else "Unknown Step"
                 f.write(f"\n{'='*80}\n")
-                f.write(f"Timestamp: {timestamp} | {step_info}\n")
+                f.write(f"[{timestamp}] {step_info}\n")
                 f.write(f"Context: {context}\n")
-                f.write(f"{'='*80}\n")
+                f.write(f"{'-'*80}\n")
                 for i, decoded_seq in enumerate(decoded, 1):
-                    f.write(f"\nGeneration {i}:\n{decoded_seq}\n")
-                f.write(f"\n{'='*80}\n")
+                    f.write(f"\nGeneration {i}:\n")
+                    f.write(f"{decoded_seq}\n")
+                    if i < len(
+                        decoded
+                    ):  # Add separator between generations, but not after last one
+                        f.write(f"{'-'*80}\n")
+                f.write(f"{'='*80}\n")
