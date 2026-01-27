@@ -12,6 +12,9 @@ Supported tasks:
 
 """
 
+import os
+# Import KVCache from the model package (where it belongs as a core component)
+import sys
 import time
 from typing import Dict, List, Optional
 
@@ -23,6 +26,9 @@ import wandb
 from .kv_cache_utils import (create_kv_cache, forward_pass, get_model_config,
                              prefill_prompt, sample_next_token)
 from .tools import use_calculator
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
+from gpt_2.kv_cache import KVCache
 
 
 class ChatCoreEvaluator:
