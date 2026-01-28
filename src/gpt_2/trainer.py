@@ -55,7 +55,6 @@ class Trainer:
         eval_interval=None,
         core_eval_interval=None,
         use_muon=False,
-        muon_lr=0.02,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -99,7 +98,6 @@ class Trainer:
         self.aspect_ratio_override = aspect_ratio
         self.head_dim_override = head_dim
         self.use_muon = use_muon
-        self.muon_lr = muon_lr
         self.target_flops_override = target_flops
         self.eval_interval_override = eval_interval
         self.core_eval_interval_override = core_eval_interval
@@ -711,7 +709,7 @@ class Trainer:
             weight_decay=weight_decay,
             device=self.device,
             use_muon=self.use_muon,
-            muon_lr=self.muon_lr,
+            muon_lr=self.config.muon_lr,
             ddp=self.ddp,
         )
 

@@ -70,13 +70,18 @@ class GPTConfig:
     # target_flops, or num_iterations (see "Training horizon" section above).
     # The trainer computes steps dynamically for all phases (pretrain/midtrain/sft).
 
-    max_learning_rate: float = 6e-4  # Peak learning rate
+    max_learning_rate: float = 6e-4  # Peak learning rate (for AdamW optimizer)
     min_lr_ratio: float = 0.1  # Minimum LR as fraction of peak (0.1 = 10% of peak)
 
     # Warmup steps for each training phase (as fraction of max_steps)
     lr_warmup_ratio_pretrain: float = 0.1  # Warmup as fraction of total steps (10%)
     lr_warmup_ratio_midtrain: float = 0.2  # Warmup as fraction of total steps (10%)
     lr_warmup_ratio_sft: float = 0.4  # Warmup as fraction of total steps (10%)
+
+    # ========================================================================
+    # Optimizer Configuration
+    # ========================================================================
+    muon_lr: float = 0.02  # Learning rate for Muon optimizer (nanochat default: 0.02)
 
     # ========================================================================
     # Weight Tying
