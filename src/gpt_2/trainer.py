@@ -54,6 +54,8 @@ class Trainer:
         target_flops=None,
         eval_interval=None,
         core_eval_interval=None,
+        use_muon=False,
+        muon_lr=0.02,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -96,6 +98,8 @@ class Trainer:
         self.depth_override = depth
         self.aspect_ratio_override = aspect_ratio
         self.head_dim_override = head_dim
+        self.use_muon = use_muon
+        self.muon_lr = muon_lr
         self.target_flops_override = target_flops
         self.eval_interval_override = eval_interval
         self.core_eval_interval_override = core_eval_interval
@@ -157,9 +161,7 @@ class Trainer:
             # Small models can use larger batch sizes for faster training
             # Large models need smaller batch sizes to fit in memory
             # Reference: tuned on 2x H100 80GB
-            if self.depth_override <= 8:
-                auto_batch_size = 64  # ~30M-60M params: maximize throughput
-            elif self.depth_override <= 10:
+            if self.depth_override <= 10:
                 auto_batch_size = 32  # ~100M params: high throughput
             elif self.depth_override <= 14:
                 auto_batch_size = 16  # ~150M-210M params: balanced
@@ -257,6 +259,7 @@ class Trainer:
         self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
 
         # Apply nanochat-style depth-aware scaling if using depth mode
+        # DISABLED: Testing without LR scaling
         if self.config._depth_mode:
             # Learning rate scaling: LR ∝ 1/√model_dim
             # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
@@ -685,7 +688,8 @@ class Trainer:
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
         # Apply nanochat-style depth-aware weight decay scaling if using depth mode
-        if self.config._depth_mode:
+        # DISABLED: Testing without weight decay scaling
+        if False and self.config._depth_mode:
             # Weight decay scaling: WD ∝ 1/depth²
             # Reference: tuned at depth=12 with WD=0.10
             reference_depth = 12
@@ -702,11 +706,22 @@ class Trainer:
         else:
             weight_decay = self.config.weight_decay
 
-        self.optimizer = self.raw_model.configure_optimizers(
+        optimizer_result = self.raw_model.configure_optimizers(
             learning_rate=self.max_learning_rate,
             weight_decay=weight_decay,
             device=self.device,
+            use_muon=self.use_muon,
+            muon_lr=self.muon_lr,
+            ddp=self.ddp,
         )
+
+        # Handle both single optimizer and list of optimizers
+        if isinstance(optimizer_result, list):
+            self.optimizers = optimizer_result  # List of optimizers (AdamW + Muon)
+            self.optimizer = optimizer_result[0]  # Keep for backward compatibility
+        else:
+            self.optimizer = optimizer_result
+            self.optimizers = [optimizer_result]
 
         if self.checkpoint_path:
             # Determine checkpoint source
@@ -950,7 +965,9 @@ class Trainer:
             # Unified training loop for all modes (pretrain/midtrain/sft)
             for step in range(epoch_start_step, self.max_steps):
                 start_time = time.time()  # Track step timing
-                self.optimizer.zero_grad()
+                # Zero gradients for all optimizers
+                for opt in self.optimizers:
+                    opt.zero_grad()
                 loss_accumulator = torch.tensor(0.0, device=self.device)
                 # # BPB accumulators
                 # torch.tensor(0.0, dtype=torch.float32, device=self.device)
@@ -1023,11 +1040,20 @@ class Trainer:
                     max_learning_rate=self.max_learning_rate,
                     min_learning_rate=self.min_learning_rate,
                 )
-                for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr
+                # Update LR for all optimizers
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        # Scale LR based on initial_lr if available
+                        if "initial_lr" in param_group:
+                            param_group["lr"] = lr * (
+                                param_group["initial_lr"] / self.max_learning_rate
+                            )
+                        else:
+                            param_group["lr"] = lr
 
                 # Apply gradients to update model parameters
-                self.optimizer.step()
+                for opt in self.optimizers:
+                    opt.step()
 
                 # Synchronize CUDA operations for accurate timing
                 if self.device == "cuda":

@@ -67,21 +67,27 @@ def parse_log_file(log_file):
 
 
 # Log files to parse
-log_files = [
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b3e18.log",
+# Option 1: Manually specify log files
+log_files_manual = [
     "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b1e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b1e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b1e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b3e18.log",
 ]
+
+# Option 2: Auto-discover all scaling law log files (uncomment to use)
+# log_files = sorted(glob("/mnt/localssd/NanoGPT/logs/scaling_law_n*_b*.log"))
+
+# Use manual list for now (easier to control which files to include)
+log_files = log_files_manual
 
 # Group data by budget
 data_by_budget = defaultdict(dict)
@@ -131,30 +137,62 @@ print("=" * 80)
 print()
 
 # ============================================================================
-# PLOT 1: Training Time and MFU vs Model Size (Multiple Budgets)
+# PLOT 1: Training Time and MFU vs Model Size (Separate Budgets)
 # ============================================================================
-
-fig, ax1 = plt.subplots(figsize=(14, 8))
-
-# Color schemes for different budgets
-budget_colors = {1e18: "#FF6B6B", 3e18: "#4ECDC4"}
-budget_markers = {1e18: "o", 3e18: "s"}
 
 # Sort budgets for consistent plotting
 sorted_budgets = sorted(data_by_budget.keys())
 
-# Track all times and MFUs for axis limits
+# Color schemes for different budgets - dynamically generate colors
+available_colors = [
+    "#FF6B6B",
+    "#4ECDC4",
+    "#45B7D1",
+    "#96CEB4",
+    "#FFEAA7",
+    "#DFE6E9",
+    "#A29BFE",
+    "#FD79A8",
+]
+available_markers = ["o", "s", "D", "^", "v", "<", ">", "p", "*", "h"]
+
+budget_colors = {}
+budget_markers = {}
+for i, budget in enumerate(sorted_budgets):
+    budget_colors[budget] = available_colors[i % len(available_colors)]
+    budget_markers[budget] = available_markers[i % len(available_markers)]
+
+# Create separate subplots for each budget
+num_budgets = len(sorted_budgets)
+fig, axes = plt.subplots(1, num_budgets, figsize=(14 * num_budgets / 2, 8))
+
+# If only one budget, convert axes to list
+if num_budgets == 1:
+    axes = [axes]
+
+# Track all times and MFUs for consistent axis limits
 all_times = []
 all_mfus = []
+all_params = []
 
-lines_time = []
-lines_mfu = []
-
-# Create secondary y-axis for MFU
-ax2 = ax1.twinx()
-
-# Plot for each budget
+# First pass: collect all data for consistent axis limits
 for budget in sorted_budgets:
+    models = data_by_budget[budget]
+    if not models:
+        continue
+
+    model_names = sorted(models.keys(), key=lambda x: int(x[1:]))
+    params = np.array([models[k]["params"] for k in model_names])
+    times_minutes = np.array([models[k]["total_minutes"] for k in model_names])
+    avg_mfus = np.array([models[k]["avg_mfu"] for k in model_names])
+
+    all_params.extend(params / 1e6)
+    all_times.extend(times_minutes)
+    all_mfus.extend(avg_mfus)
+
+# Plot each budget in separate subplot
+for idx, budget in enumerate(sorted_budgets):
+    ax1 = axes[idx]
     models = data_by_budget[budget]
     if not models:
         continue
@@ -166,11 +204,11 @@ for budget in sorted_budgets:
 
     params_M = params / 1e6
 
-    all_times.extend(times_minutes)
-    all_mfus.extend(avg_mfus)
-
     color = budget_colors.get(budget, "#45B7D1")
     marker = budget_markers.get(budget, "D")
+
+    # Create secondary y-axis for MFU
+    ax2 = ax1.twinx()
 
     # Plot training time on primary axis
     scatter1 = ax1.scatter(
@@ -193,9 +231,8 @@ for budget in sorted_budgets:
         alpha=0.6,
         color=color,
         zorder=2,
-        label=f"Time ({budget:.1e} FLOPs)",
+        label="Training Time",
     )[0]
-    lines_time.append(line1)
 
     # Plot MFU on secondary axis
     scatter2 = ax2.scatter(
@@ -218,9 +255,8 @@ for budget in sorted_budgets:
         alpha=0.5,
         color=color,
         zorder=2,
-        label=f"MFU ({budget:.1e} FLOPs)",
+        label="MFU",
     )[0]
-    lines_mfu.append(line2)
 
     # Annotate each point
     for i, name in enumerate(model_names):
@@ -239,46 +275,58 @@ for budget in sorted_budgets:
             ),
         )
 
-# Formatting for left y-axis (Training Time)
-ax1.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
-ax1.set_ylabel(
-    "Training Time (Minutes)", fontsize=14, fontweight="bold", color="darkblue"
-)
-ax1.tick_params(axis="y", labelcolor="darkblue")
+    # Formatting for left y-axis (Training Time)
+    ax1.set_xlabel("Model Parameters (Millions)", fontsize=12, fontweight="bold")
+    ax1.set_ylabel(
+        "Training Time (Minutes)", fontsize=12, fontweight="bold", color="darkblue"
+    )
+    ax1.tick_params(axis="y", labelcolor="darkblue")
 
-# Formatting for right y-axis (MFU)
-ax2.set_ylabel("Average MFU (%)", fontsize=14, fontweight="bold", color="darkred")
-ax2.tick_params(axis="y", labelcolor="darkred")
+    # Formatting for right y-axis (MFU)
+    ax2.set_ylabel("Average MFU (%)", fontsize=12, fontweight="bold", color="darkred")
+    ax2.tick_params(axis="y", labelcolor="darkred")
 
-# Title
-ax1.set_title(
-    "Training Time and MFU vs Model Size\nComparing Different Compute Budgets",
+    # Title
+    ax1.set_title(
+        f"Budget: {budget:.1e} FLOPs",
+        fontsize=14,
+        fontweight="bold",
+        pad=15,
+    )
+
+    # Grid
+    ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    # Set consistent axis limits
+    ax1.set_xlim(min(all_params) * 0.9, max(all_params) * 1.1)
+    ax1.set_ylim(min(all_times) * 0.8, max(all_times) * 1.2)
+    ax2.set_ylim(min(all_mfus) * 0.9, max(all_mfus) * 1.1)
+
+    # Combined legend
+    lines = [line1, line2]
+    labels = [line.get_label() for line in lines]
+    ax1.legend(lines, labels, fontsize=9, loc="upper left", framealpha=0.9)
+
+    # Add text box with insights
+    info_text = f"Time: {min(times_minutes):.1f} - {max(times_minutes):.1f} min\n"
+    info_text += f"MFU: {min(avg_mfus):.1f}% - {max(avg_mfus):.1f}%"
+
+    ax1.text(
+        0.02,
+        0.30,
+        info_text,
+        transform=ax1.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.7),
+    )
+
+# Overall title
+fig.suptitle(
+    "Training Time and MFU vs Model Size - Separate Budgets",
     fontsize=16,
     fontweight="bold",
-    pad=20,
-)
-
-# Grid
-ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
-
-# Combined legend
-all_lines = lines_time + lines_mfu
-all_labels = [line.get_label() for line in all_lines]
-ax1.legend(all_lines, all_labels, fontsize=10, loc="upper left", framealpha=0.9, ncol=2)
-
-# Add text box with insights
-info_text = f"Budgets: {', '.join([f'{b:.1e}' for b in sorted_budgets])} FLOPs\n"
-info_text += f"Time range: {min(all_times):.1f} - {max(all_times):.1f} min\n"
-info_text += f"MFU range: {min(all_mfus):.1f}% - {max(all_mfus):.1f}%"
-
-ax1.text(
-    0.02,
-    0.30,
-    info_text,
-    transform=ax1.transAxes,
-    fontsize=10,
-    verticalalignment="top",
-    bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.7),
+    y=1.02,
 )
 
 plt.tight_layout()
@@ -291,15 +339,21 @@ print(f"\n✅ Training time plot saved to: {output_path}")
 plt.close()
 
 # ============================================================================
-# PLOT 2: Average Time per Step vs Model Size (Multiple Budgets)
+# PLOT 2: Average Time per Step vs Model Size (Separate Budgets)
 # ============================================================================
 
-fig, ax = plt.subplots(figsize=(12, 8))
+# Create separate subplots for each budget
+fig, axes = plt.subplots(1, num_budgets, figsize=(12 * num_budgets / 2, 8))
 
-# Track all step times for axis limits
+# If only one budget, convert axes to list
+if num_budgets == 1:
+    axes = [axes]
+
+# Track all step times for consistent axis limits
 all_step_times = []
+all_params_step = []
 
-# Plot for each budget
+# First pass: collect all data for consistent axis limits
 for budget in sorted_budgets:
     models = data_by_budget[budget]
     if not models:
@@ -309,8 +363,21 @@ for budget in sorted_budgets:
     params = np.array([models[k]["params"] for k in model_names])
     avg_times = np.array([models[k]["avg_time_per_step"] for k in model_names])
 
-    params_M = params / 1e6
+    all_params_step.extend(params / 1e6)
     all_step_times.extend(avg_times)
+
+# Plot each budget in separate subplot
+for idx, budget in enumerate(sorted_budgets):
+    ax = axes[idx]
+    models = data_by_budget[budget]
+    if not models:
+        continue
+
+    model_names = sorted(models.keys(), key=lambda x: int(x[1:]))
+    params = np.array([models[k]["params"] for k in model_names])
+    avg_times = np.array([models[k]["avg_time_per_step"] for k in model_names])
+
+    params_M = params / 1e6
 
     color = budget_colors.get(budget, "#45B7D1")
     marker = budget_markers.get(budget, "D")
@@ -349,39 +416,49 @@ for budget in sorted_budgets:
             ),
         )
 
-# Formatting
-ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
-ax.set_ylabel("Average Time per Step (Seconds)", fontsize=14, fontweight="bold")
-ax.set_title(
-    "Training Step Time vs Model Size\n2 x H100 GPUs, Batch Size = 524K tokens",
+    # Formatting
+    ax.set_xlabel("Model Parameters (Millions)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Average Time per Step (Seconds)", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"Budget: {budget:.1e} FLOPs",
+        fontsize=14,
+        fontweight="bold",
+        pad=15,
+    )
+
+    # Grid
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    # Set consistent axis limits
+    ax.set_xlim(min(all_params_step) * 0.9, max(all_params_step) * 1.1)
+    ax.set_ylim(min(all_step_times) * 0.9, max(all_step_times) * 1.1)
+
+    # Legend
+    ax.legend(fontsize=10, loc="upper left", framealpha=0.9)
+
+    # Add text box with insights
+    info_text = "Hardware: 2 x H100 80GB\n"
+    info_text += "Batch: 524,288 tokens\n"
+    info_text += f"Range: {min(avg_times):.2f}s - {max(avg_times):.2f}s\n"
+    slowdown = ((max(avg_times) / min(avg_times)) - 1) * 100
+    info_text += f"Slowdown: +{slowdown:.1f}%"
+
+    ax.text(
+        0.02,
+        0.98,
+        info_text,
+        transform=ax.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.7),
+    )
+
+# Overall title
+fig.suptitle(
+    "Training Step Time vs Model Size - Separate Budgets",
     fontsize=16,
     fontweight="bold",
-    pad=20,
-)
-
-# Grid
-ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
-
-# Legend
-ax.legend(fontsize=11, loc="upper left", framealpha=0.9)
-
-# Add text box with insights
-info_text = "Hardware: 2 x H100 80GB\n"
-info_text += "Total batch: 524,288 tokens\n"
-info_text += (
-    f"Step time range: {min(all_step_times):.2f}s - {max(all_step_times):.2f}s\n"
-)
-slowdown = ((max(all_step_times) / min(all_step_times)) - 1) * 100
-info_text += f"Max slowdown: +{slowdown:.1f}%"
-
-ax.text(
-    0.02,
-    0.98,
-    info_text,
-    transform=ax.transAxes,
-    fontsize=11,
-    verticalalignment="top",
-    bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.7),
+    y=1.02,
 )
 
 plt.tight_layout()

@@ -65,21 +65,33 @@ def parse_log_file(log_path):
 
 
 # Parse all log files
-log_files = [
+# Option 1: Manually specify log files
+log_files_manual = [
     "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b1e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b1e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b1e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b3e18.log",
     "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b3e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b2e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b2e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b2e18.log",
+    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b2e18.log",
 ]
+
+# Option 2: Auto-discover all scaling law log files (uncomment to use)
+# log_files = sorted(glob("/mnt/localssd/NanoGPT/logs/scaling_law_n*_b*.log"))
+
+# Use manual list for now (easier to control which files to include)
+log_files = log_files_manual
 
 # Group data by budget
 data_by_budget = defaultdict(dict)
@@ -133,9 +145,24 @@ for budget, models in data_by_budget.items():
 # Create figure with good styling
 fig, ax = plt.subplots(figsize=(12, 8))
 
-# Color schemes for different budgets
-budget_colors = {1e18: "#FF6B6B", 3e18: "#4ECDC4"}
-budget_markers = {1e18: "o", 3e18: "s"}
+# Color schemes for different budgets - dynamically generate colors
+available_colors = [
+    "#FF6B6B",
+    "#4ECDC4",
+    "#45B7D1",
+    "#96CEB4",
+    "#FFEAA7",
+    "#DFE6E9",
+    "#A29BFE",
+    "#FD79A8",
+]
+available_markers = ["o", "s", "D", "^", "v", "<", ">", "p", "*", "h"]
+
+budget_colors = {}
+budget_markers = {}
+for i, budget in enumerate(sorted(data_by_budget.keys())):
+    budget_colors[budget] = available_colors[i % len(available_colors)]
+    budget_markers[budget] = available_markers[i % len(available_markers)]
 
 # Sort budgets for consistent plotting
 sorted_budgets = sorted(data_by_budget.keys())
@@ -363,6 +390,238 @@ plt.tight_layout()
 bpb_output_path = "/mnt/localssd/NanoGPT/scripts/graphs/validation_bpb_curve.png"
 plt.savefig(bpb_output_path, dpi=300, bbox_inches="tight")
 print(f"✅ BPB plot saved to: {bpb_output_path}")
+
+plt.close()
+
+# ============================================================================
+# PLOT 3: Optimal Model Parameters and Tokens vs FLOPs
+# ============================================================================
+
+# Collect optimal models for each budget
+optimal_data = []
+for budget in sorted_budgets:
+    models = data_by_budget[budget]
+    models_with_val = {
+        k: v for k, v in models.items() if v["final_val_bpb"] is not None
+    }
+    if models_with_val:
+        # Find the model with lowest validation BPB for this budget
+        best_model_name, best_model_data = min(
+            models_with_val.items(), key=lambda x: x[1]["final_val_bpb"]
+        )
+        optimal_data.append(
+            {
+                "budget": budget,
+                "params": best_model_data["params"],
+                "tokens": best_model_data["tokens"],
+                "val_bpb": best_model_data["final_val_bpb"],
+                "model_name": best_model_name,
+            }
+        )
+
+if optimal_data:
+    # Sort by budget
+    optimal_data.sort(key=lambda x: x["budget"])
+
+    budgets = np.array([d["budget"] for d in optimal_data])
+    optimal_params = np.array([d["params"] for d in optimal_data])
+    optimal_tokens = np.array([d["tokens"] for d in optimal_data])
+    model_names = [d["model_name"] for d in optimal_data]
+
+    # Convert to millions/billions
+    optimal_params_M = optimal_params / 1e6
+    optimal_tokens_B = optimal_tokens / 1e9
+
+    # Create figure with two subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+
+    # ========== LEFT PLOT: Optimal Parameters vs FLOPs ==========
+
+    # Plot the data points
+    ax1.scatter(
+        budgets,
+        optimal_params_M,
+        s=300,
+        c="#FF6B6B",
+        marker="D",
+        alpha=0.8,
+        edgecolors="black",
+        linewidth=2.5,
+        label="Optimal Model",
+        zorder=3,
+    )
+
+    # Connect points with a line if there are multiple budgets
+    if len(optimal_data) > 1:
+        ax1.plot(
+            budgets,
+            optimal_params_M,
+            "-",
+            linewidth=2.5,
+            alpha=0.7,
+            color="#FF6B6B",
+            zorder=2,
+        )
+
+    # Annotate each point with model name and BPB
+    for i, opt in enumerate(optimal_data):
+        label_text = f"{opt['model_name'].upper()}\nBPB: {opt['val_bpb']:.4f}"
+        ax1.annotate(
+            label_text,
+            (budgets[i], optimal_params_M[i]),
+            xytext=(12, 12),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor="white",
+                edgecolor="#FF6B6B",
+                alpha=0.9,
+                linewidth=2,
+            ),
+            ha="left",
+        )
+
+    # Formatting
+    ax1.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
+    ax1.set_ylabel(
+        "Optimal Model Parameters (Millions)", fontsize=14, fontweight="bold"
+    )
+    ax1.set_title(
+        "Compute-Optimal Model Size\nOptimal Parameters vs Compute Budget",
+        fontsize=15,
+        fontweight="bold",
+        pad=15,
+    )
+
+    # Use log scale for x-axis to better show different budget scales
+    ax1.set_xscale("log")
+
+    # Grid
+    ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    # Legend
+    ax1.legend(fontsize=11, loc="upper left", framealpha=0.9)
+
+    # Add info text
+    info_text = "Optimal Model Definition:\n"
+    info_text += "For each compute budget,\n"
+    info_text += "the model with the lowest\n"
+    info_text += "validation BPB\n\n"
+    info_text += f"Total Budgets: {len(optimal_data)}\n"
+    info_text += (
+        f"Param Range:\n{optimal_params_M.min():.1f}M - {optimal_params_M.max():.1f}M"
+    )
+
+    ax1.text(
+        0.98,
+        0.02,
+        info_text.strip(),
+        transform=ax1.transAxes,
+        fontsize=9,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.7),
+    )
+
+    # ========== RIGHT PLOT: Optimal Tokens vs FLOPs ==========
+
+    # Plot the data points
+    ax2.scatter(
+        budgets,
+        optimal_tokens_B,
+        s=300,
+        c="#4ECDC4",
+        marker="D",
+        alpha=0.8,
+        edgecolors="black",
+        linewidth=2.5,
+        label="Optimal Training Tokens",
+        zorder=3,
+    )
+
+    # Connect points with a line if there are multiple budgets
+    if len(optimal_data) > 1:
+        ax2.plot(
+            budgets,
+            optimal_tokens_B,
+            "-",
+            linewidth=2.5,
+            alpha=0.7,
+            color="#4ECDC4",
+            zorder=2,
+        )
+
+    # Annotate each point with model name and tokens
+    for i, opt in enumerate(optimal_data):
+        label_text = f"{opt['model_name'].upper()}\n{optimal_tokens_B[i]:.2f}B tokens"
+        ax2.annotate(
+            label_text,
+            (budgets[i], optimal_tokens_B[i]),
+            xytext=(12, 12),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor="white",
+                edgecolor="#4ECDC4",
+                alpha=0.9,
+                linewidth=2,
+            ),
+            ha="left",
+        )
+
+    # Formatting
+    ax2.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
+    ax2.set_ylabel("Optimal Training Tokens (Billions)", fontsize=14, fontweight="bold")
+    ax2.set_title(
+        "Compute-Optimal Training Data\nOptimal Tokens vs Compute Budget",
+        fontsize=15,
+        fontweight="bold",
+        pad=15,
+    )
+
+    # Use log scale for x-axis to better show different budget scales
+    ax2.set_xscale("log")
+
+    # Grid
+    ax2.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+    # Legend
+    ax2.legend(fontsize=11, loc="upper right", framealpha=0.9)
+
+    # Add info text
+    info_text2 = "Chinchilla suggests:\n"
+    info_text2 += "tokens ≈ 20 × parameters\n\n"
+    info_text2 += f"Total Budgets: {len(optimal_data)}\n"
+    info_text2 += (
+        f"Token Range:\n{optimal_tokens_B.min():.2f}B - {optimal_tokens_B.max():.2f}B"
+    )
+
+    ax2.text(
+        0.98,
+        0.02,
+        info_text2.strip(),
+        transform=ax2.transAxes,
+        fontsize=9,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        bbox=dict(boxstyle="round", facecolor="lightgreen", alpha=0.7),
+    )
+
+    # Tight layout
+    plt.tight_layout()
+
+    # Save figure
+    optimal_output_path = (
+        "/mnt/localssd/NanoGPT/scripts/graphs/optimal_model_vs_flops.png"
+    )
+    plt.savefig(optimal_output_path, dpi=300, bbox_inches="tight")
+    print(f"✅ Optimal model vs FLOPs plot saved to: {optimal_output_path}")
+else:
+    print("⚠️  No optimal model data available to plot (no models with validation BPB)")
 
 plt.close()
 

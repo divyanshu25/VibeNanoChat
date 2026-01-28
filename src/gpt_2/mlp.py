@@ -1,13 +1,19 @@
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class MLP(nn.Module):
     """
-    Multi-Layer Perceptron (MLP) module used in GPT-2 transformer blocks.
+    Multi-Layer Perceptron (MLP) module used in transformer blocks.
 
     This implements the feed-forward network that follows the multi-head attention
     in each transformer block. It consists of two linear transformations with a
-    GELU activation in between, following the standard transformer architecture.
+    Squared ReLU activation in between (nanochat-style).
+
+    Squared ReLU: relu(x)^2
+    - More expressive than standard ReLU
+    - Smoother gradients than ReLU
+    - Used in modern architectures (PaLM, nanochat)
     """
 
     def __init__(self, config):
@@ -22,27 +28,22 @@ class MLP(nn.Module):
 
         # First linear layer: expand from n_embed to 4 * n_embed
         # This expansion is standard in transformer architectures
-        self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
-
-        # GELU activation function with tanh approximation
-        # GELU (Gaussian Error Linear Unit) is preferred over ReLU in transformers
-        # as it provides smoother gradients and better performance
-        self.gelu = nn.GELU(
-            approximate="tanh"
-        )  # GELU is a non-linear activation function that is used in the feed-forward network.
+        # No bias (nanochat-style)
+        self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed, bias=False)
 
         # Second linear layer: project back from 4 * n_embed to n_embed
         # This creates a bottleneck that helps with feature learning
-        self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
+        # No bias (nanochat-style)
+        self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed, bias=False)
 
         # Custom attribute for initialization scaling
         # This flag is used by the model's weight initialization routine
-        # to apply special scaling to this layer's weights
+        # to apply zero-initialization to this layer's weights (residual projection)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         """
-        Forward pass through the MLP.
+        Forward pass through the MLP with Squared ReLU activation.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, n_embed)
@@ -53,8 +54,9 @@ class MLP(nn.Module):
         # Expand: n_embed -> 4 * n_embed
         x = self.c_fc(x)
 
-        # Apply non-linear activation
-        x = self.gelu(x)
+        # Apply Squared ReLU activation: relu(x)^2 (nanochat-style)
+        # This provides smoother gradients and more expressivity than standard ReLU
+        x = F.relu(x).square()
 
         # Project back: 4 * n_embed -> n_embed
         x = self.c_proj(x)

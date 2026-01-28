@@ -195,6 +195,8 @@ def run_pretraining(
         target_flops=target_flops,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
+        use_muon=args.use_muon,
+        muon_lr=args.muon_lr,
     )
     trainer.train()
 
@@ -293,6 +295,8 @@ def run_midtraining(
         head_dim=head_dim,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
+        use_muon=args.use_muon,
+        muon_lr=args.muon_lr,
     )
     trainer.train()
 
@@ -387,6 +391,8 @@ def run_sft(
         head_dim=head_dim,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
+        use_muon=args.use_muon,
+        muon_lr=args.muon_lr,
     )
     trainer.train()
 
@@ -690,6 +696,20 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Run CORE benchmark evaluations every N steps (default: adaptive, ~4 evals per run)",
+    )
+
+    # Optimizer settings
+    parser.add_argument(
+        "--use-muon",
+        action="store_true",
+        help="Use hybrid AdamW+Muon optimizer (nanochat-style, Muon for transformer blocks)",
+    )
+
+    parser.add_argument(
+        "--muon-lr",
+        type=float,
+        default=0.02,
+        help="Learning rate for Muon optimizer (default: 0.02)",
     )
 
     # Parse and process arguments

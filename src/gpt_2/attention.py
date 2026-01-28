@@ -1,5 +1,15 @@
+# Add gpt_2 to python path
+import os
+import sys
+
 import torch.nn as nn
 import torch.nn.functional as F
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
+from gpt_2.rope import apply_rotary_emb
 
 
 class CausalSelfAttention(nn.Module):
@@ -33,20 +43,21 @@ class CausalSelfAttention(nn.Module):
         # For GQA: Q has n_head, but K and V have n_kv_head
         kv_dim = self.head_dim * self.n_kv_head
 
-        # key, query, value projections
+        # key, query, value projections (nanochat-style: no bias)
         # Q: n_embed, K: kv_dim, V: kv_dim
-        self.c_attn = nn.Linear(config.n_embed, config.n_embed + 2 * kv_dim)
+        self.c_attn = nn.Linear(config.n_embed, config.n_embed + 2 * kv_dim, bias=False)
 
-        # output projection
-        self.c_proj = nn.Linear(config.n_embed, config.n_embed)
+        # output projection (nanochat-style: no bias, zero-initialized)
+        self.c_proj = nn.Linear(config.n_embed, config.n_embed, bias=False)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
-    def forward(self, x, kv_cache=None):
+    def forward(self, x, cos_sin=None, kv_cache=None):
         """
-        Forward pass with optional KV caching for efficient generation.
+        Forward pass with RoPE and optional KV caching for efficient generation.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, n_embed)
+            cos_sin: Tuple of (cos, sin) tensors for RoPE, shape (1, seq_len, 1, head_dim//2)
             kv_cache: Optional KVCache object for efficient autoregressive generation
 
         Returns:
@@ -67,18 +78,32 @@ class CausalSelfAttention(nn.Module):
         kv_dim = self.head_dim * self.n_kv_head
         q, k, v = qkv.split([self.n_embed, kv_dim, kv_dim], dim=2)
 
-        # Reshape Q with n_head
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(
-            1, 2
-        )  # (B, n_head, T, head_dim)
+        # Reshape to (B, T, n_head, head_dim) for RoPE application
+        q = q.view(B, T, self.n_head, self.head_dim)  # (B, T, n_head, head_dim)
+        k = k.view(B, T, self.n_kv_head, self.head_dim)  # (B, T, n_kv_head, head_dim)
+        v = v.view(B, T, self.n_kv_head, self.head_dim)  # (B, T, n_kv_head, head_dim)
 
-        # Reshape K and V with n_kv_head
-        k = k.view(B, T, self.n_kv_head, self.head_dim).transpose(
-            1, 2
-        )  # (B, n_kv_head, T, head_dim)
-        v = v.view(B, T, self.n_kv_head, self.head_dim).transpose(
-            1, 2
-        )  # (B, n_kv_head, T, head_dim)
+        # =====================================================================
+        # STEP 1.5: Apply RoPE to Q and K (nanochat-style)
+        # =====================================================================
+        if cos_sin is not None:
+            cos, sin = cos_sin
+            q = apply_rotary_emb(q, cos, sin)  # (B, T, n_head, head_dim)
+            k = apply_rotary_emb(k, cos, sin)  # (B, T, n_kv_head, head_dim)
+
+        # =====================================================================
+        # STEP 1.6: QK Normalization (nanochat-style, critical for stability!)
+        # =====================================================================
+        # Normalize Q and K to prevent attention logits from exploding
+        # This is especially important for deeper models (depth 8+)
+        # RMSNorm is applied over the head_dim dimension
+        q = F.rms_norm(q, (q.size(-1),))  # (B, T, n_head, head_dim)
+        k = F.rms_norm(k, (k.size(-1),))  # (B, T, n_kv_head, head_dim)
+
+        # Transpose to (B, n_head, T, head_dim) for attention computation
+        q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+        k = k.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
+        v = v.transpose(1, 2)  # (B, n_kv_head, T, head_dim)
 
         # =====================================================================
         # STEP 2: Apply KV cache if provided

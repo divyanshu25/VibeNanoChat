@@ -178,18 +178,21 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep
 	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
 	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
-	@for FLOPS in 1e18 3e18 6e18; do \
+	@for FLOPS in 2e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 6 8 10 12 14; do \
+		for DEPTH in 6 8 10 12 14 16 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
 			$(MAKE) ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100|| exit 1; \
 			echo "  🧹 Cleaning up GPUs..."; \
 			$(MAKE) kill-gpu; \
-			sleep 2; \
+			sleep 20; \
+			echo "  🧹 Cleaning up GPUs..."; \
+			$(MAKE) kill-gpu; \
+			sleep 20; \
 		done; \
 	done
 	@echo "✅ All scaling law experiments complete!"

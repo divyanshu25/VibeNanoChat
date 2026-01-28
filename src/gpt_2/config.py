@@ -81,7 +81,7 @@ class GPTConfig:
     # ========================================================================
     # Weight Tying
     # ========================================================================
-    tie_embeddings: bool = True  # Tie input (wte) and output (lm_head) embeddings
+    tie_embeddings: bool = False  # Tie input (wte) and output (lm_head) embeddings
     # Setting to False allows independent weights for embedding/unembedding
 
     # ========================================================================
