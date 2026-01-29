@@ -749,7 +749,7 @@ class Trainer:
                 checkpoint_path=self.checkpoint_path,
                 model=self.raw_model,
                 device=self.device,
-                optimizer=self.optimizer if should_load_optimizer else None,
+                optimizer=self.optimizers if should_load_optimizer else None,
                 master_process=self.master_process,
                 print_resume_info=should_print_resume_info,
             )
@@ -830,7 +830,7 @@ class Trainer:
                 project_name = "gpt2-midtraining"
                 training_mode = "mid-training"
             else:
-                project_name = "gpt2-pretraining-scaling-law"  # TODO: Change to gpt2-pretraining when done running scaling law experiments
+                project_name = "gpt2-pretraining-scaling-law-muon"  # TODO: Change to gpt2-pretraining when done running scaling law experiments
                 training_mode = "pretraining"
 
             # Calculate total FLOPs budget for this run
@@ -1121,7 +1121,7 @@ class Trainer:
 
                 save_checkpoint(
                     model=self.raw_model,  # Pass unwrapped model for clean state_dict
-                    optimizer=self.optimizer,
+                    optimizer=self.optimizers,  # Pass all optimizers (AdamW + Muon if enabled)
                     step=step,
                     epoch=epoch,
                     global_step=global_step,

@@ -205,11 +205,13 @@ class GPT(nn.Module):
         """
         nparams = self.num_scaling_params()
 
-        # Exclude embedding parameters if weight tying is enabled
-        # (embeddings are lookups, not matrix multiplications)
-        nparams_exclude = 0
-        if getattr(self.config, "tie_embeddings", False):
-            nparams_exclude = self.transformer.wte.weight.numel()
+        # Exclude embedding parameters (always just a lookup, not a matmul)
+        # Note: num_scaling_params() counts parameters via self.parameters(),
+        # which yields tied weights TWICE (once from wte, once from lm_head).
+        # Whether tied or not, we always want to exclude wte once to get:
+        # - Tied: counted 2x, exclude 1x → counts lm_head matmul once ✓
+        # - Not tied: wte + lm_head counted, exclude wte → counts lm_head only ✓
+        nparams_exclude = self.transformer.wte.weight.numel()
 
         # Attention FLOPs calculation
         h = self.config.n_head  # Number of attention heads
@@ -371,6 +373,7 @@ class GPT(nn.Module):
                 adam_groups,
                 betas=(0.9, 0.95),
                 eps=1e-8,
+                weight_decay=0.0,  # Muon handles weight decay for transformer blocks
                 fused=use_fused,
             )
 

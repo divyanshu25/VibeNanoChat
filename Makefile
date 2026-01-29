@@ -22,7 +22,16 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+.PHONY: help uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+
+.DEFAULT_GOAL := help
+
+help: ## Show this help message
+	@echo "📚 Available targets:"
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "💡 Usage: make <target>"
 
 
 dotenv: ## Initialize .env file
@@ -136,7 +145,7 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	TARGET_FLOPS=$${TARGET_FLOPS:-}; \
 	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	LOG_FILE="logs/scaling_laws_$${TIMESTAMP}.log"; \
+	LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
 	echo "📝 Logging to: $$LOG_FILE"; \
@@ -178,7 +187,7 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep
 	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
 	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
-	@for FLOPS in 2e18; do \
+	@for FLOPS in 1e18 3e18 6e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
