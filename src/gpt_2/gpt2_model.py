@@ -84,7 +84,7 @@ class GPT(nn.Module):
             self.rotary_seq_len,
             head_dim,
             base=10000,
-            device=None,  # Device assignment happens in _init_weights
+            device="cpu",  # Will be moved to GPU via .to(device) in trainer
             dtype=torch.bfloat16,
         )  # Shape: (1, seq_len, 1, head_dim//2)
 
@@ -140,21 +140,6 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             # Use std=1.0 for richer initial token representations (nanochat-style)
             torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
-
-        # ===== RoPE Buffer Recomputation =====
-        # After all modules are initialized, move RoPE buffers to correct device
-        if hasattr(self, "cos") and module is self:
-            head_dim = self.config.n_embed // self.config.n_head
-            device = next(self.parameters()).device
-            cos, sin = precompute_rotary_embeddings(
-                self.rotary_seq_len,
-                head_dim,
-                base=10000,
-                device=device,
-                dtype=torch.bfloat16,
-            )
-            self.cos.copy_(cos)
-            self.sin.copy_(sin)
 
     def estimate_flops(self):
         """
