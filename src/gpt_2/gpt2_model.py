@@ -44,7 +44,7 @@ class GPT(nn.Module):
     - Embedding weight tying enabled by default
     """
 
-    def __init__(self, config):
+    def __init__(self, config, master_process=True):
         """
         Initialize GPT model with specified configuration.
 
@@ -56,6 +56,7 @@ class GPT(nn.Module):
                 - n_head: Number of attention heads per block
                 - block_size: Maximum sequence length (context window)
                 - tie_embeddings: Share input/output embedding weights (default: True)
+            master_process (bool): Whether this is the master process (for printing)
         """
         super().__init__()
         self.config = config
@@ -101,9 +102,13 @@ class GPT(nn.Module):
         # Reduces parameters and often improves performance
         if getattr(config, "tie_embeddings", True):
             self.transformer.wte.weight = self.lm_head.weight
-            print("Weight tying: ENABLED (wte <-> lm_head share weights)")
+            if master_process:
+                print("Weight tying: ENABLED (wte <-> lm_head share weights)")
         else:
-            print("Weight tying: DISABLED (wte and lm_head have independent weights)")
+            if master_process:
+                print(
+                    "Weight tying: DISABLED (wte and lm_head have independent weights)"
+                )
 
         # ===== Weight Initialization =====
         self.apply(self._init_weights)
@@ -241,6 +246,7 @@ class GPT(nn.Module):
         use_muon=False,
         muon_lr=0.02,
         ddp=False,
+        master_process=True,
     ):
         """
         Configure optimizer(s) with proper parameter grouping and weight decay.
@@ -282,17 +288,19 @@ class GPT(nn.Module):
             # Log parameter counts
             num_decay_params = sum(p.numel() for p in decay_params)
             num_nodecay_params = sum(p.numel() for p in nodecay_params)
-            print(
-                f"Num decay parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
-            )
-            print(
-                f"Num nodecay parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
-            )
+            if master_process:
+                print(
+                    f"Num decay parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
+                )
+                print(
+                    f"Num nodecay parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
+                )
 
             # Use fused kernel if available (faster on CUDA)
             fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device.startswith("cuda")
-            print(f"Using fused AdamW: {use_fused}")
+            if master_process:
+                print(f"Using fused AdamW: {use_fused}")
 
             optimizer = torch.optim.AdamW(
                 optim_groups,
@@ -332,18 +340,19 @@ class GPT(nn.Module):
                     other_params.append(param)
 
             # Log parameter distribution
-            print(
-                f"Muon: {len(matrix_params)} matrix params, {sum(p.numel() for p in matrix_params):,} parameters"
-            )
-            print(
-                f"AdamW: {len(embedding_params)} embedding params, {sum(p.numel() for p in embedding_params):,} parameters"
-            )
-            print(
-                f"AdamW: {len(lm_head_params)} lm_head params, {sum(p.numel() for p in lm_head_params):,} parameters"
-            )
-            print(
-                f"AdamW: {len(other_params)} other params, {sum(p.numel() for p in other_params):,} parameters"
-            )
+            if master_process:
+                print(
+                    f"Muon: {len(matrix_params)} matrix params, {sum(p.numel() for p in matrix_params):,} parameters"
+                )
+                print(
+                    f"AdamW: {len(embedding_params)} embedding params, {sum(p.numel() for p in embedding_params):,} parameters"
+                )
+                print(
+                    f"AdamW: {len(lm_head_params)} lm_head params, {sum(p.numel() for p in lm_head_params):,} parameters"
+                )
+                print(
+                    f"AdamW: {len(other_params)} other params, {sum(p.numel() for p in other_params):,} parameters"
+                )
 
             # Configure AdamW for embeddings, output head, and 1D params
             # Note: weight decay handled by Muon for transformer blocks
@@ -355,7 +364,8 @@ class GPT(nn.Module):
 
             fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device.startswith("cuda") and not ddp
-            print(f"Using fused AdamW: {use_fused}")
+            if master_process:
+                print(f"Using fused AdamW: {use_fused}")
 
             adamw_optimizer = torch.optim.AdamW(
                 adam_groups,

@@ -105,13 +105,16 @@ def setup_distributed():
         # -----------------------------------------------------------------------
         # DDP Mode: Initialize process group for multi-GPU training
         # -----------------------------------------------------------------------
-        print(f"Initializing DDP at rank: {os.environ['RANK']}")
         assert torch.cuda.is_available(), "CUDA is not available"
 
         # Extract rank information from environment
         ddp_rank = int(os.environ["RANK"])  # Global rank across all nodes
         ddp_local_rank = int(os.environ["LOCAL_RANK"])  # Rank within this node
         ddp_world_size = int(os.environ.get("WORLD_SIZE", 1))  # Total processes
+
+        # Only master process prints initialization message
+        if ddp_rank == 0:
+            print(f"Initializing DDP at rank: {ddp_rank}")
 
         # Assign this process to a specific GPU based on local rank
         # e.g., rank 0 → cuda:0, rank 1 → cuda:1, etc.

@@ -124,7 +124,7 @@ gpu-status: ## Show current GPU utilization and memory usage
 ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
-	@NGPUS=$${NGPUS:-2}; \
+	@NGPUS=$${NGPUS:-4}; \
 	MODE=$${MODE:-pretraining}; \
 	CHECKPOINT=$${CHECKPOINT:-}; \
 	VAL_EVALS=$${VAL_EVALS:-true}; \
@@ -183,10 +183,10 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 14 16 18; do \
+		for DEPTH in 6 8 10 12 14 16 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
-			$(MAKE) ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100|| exit 1; \
+			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100|| exit 1; \
 			echo "  🧹 Cleaning up GPUs..."; \
 			$(MAKE) kill-gpu; \
 			sleep 20; \

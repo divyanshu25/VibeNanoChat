@@ -205,7 +205,7 @@ class Trainer:
 
         # Create raw model and keep reference BEFORE any wrapping
         # This reference will always point to the unwrapped model with updated weights
-        self.raw_model = GPT(self.config)
+        self.raw_model = GPT(self.config, master_process=self.master_process)
         self.raw_model.to(self.device)
 
         # Wrap with torch.compile for faster training
@@ -711,6 +711,7 @@ class Trainer:
             use_muon=self.use_muon,
             muon_lr=self.config.muon_lr,
             ddp=self.ddp,
+            master_process=self.master_process,
         )
 
         # Handle both single optimizer and list of optimizers
