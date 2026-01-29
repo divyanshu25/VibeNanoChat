@@ -8,22 +8,18 @@ sys.path.append(parent_dir)
 
 import random
 import time
-from datetime import datetime
 
 import torch
 
 import wandb
 # from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
-from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
-from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
-from eval_tasks import CoreEvaluator
-from eval_tasks.training import TrainingEvaluator
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
-from gpt_2.utils import (calculate_num_iterations, get_custom_tokenizer,
-                         get_lr, get_peak_flops, load_checkpoint,
-                         save_checkpoint)
+from gpt_2.training_utilities import (setup_dataloaders, setup_logging,
+                                      setup_wandb)
+from gpt_2.utils import (calculate_num_iterations, get_lr, get_peak_flops,
+                         load_checkpoint, save_checkpoint)
 
 
 class Trainer:
@@ -118,26 +114,42 @@ class Trainer:
             )
 
         # Setup components
-        self._setup_logging()
+        self.generation_log_file = setup_logging(self.master_process)
         self._setup_model()
         self._setup_hyperparameters()
-        self._setup_dataloaders()
+        self._setup_dataloaders_wrapper()
         self._setup_optimizer_and_checkpoint()
-        self._setup_wandb()
+        self._setup_wandb_wrapper()
         # self._setup_token_bytes()
 
-    def _setup_logging(self):
-        """Setup generation log file for tracking model outputs."""
-        if self.master_process:
-            log_dir = "logs"
-            os.makedirs(log_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.generation_log_file = os.path.join(
-                log_dir, f"generations_{timestamp}.txt"
-            )
-            print(f"📝 Saving generations to: {self.generation_log_file}")
-        else:
-            self.generation_log_file = None
+    def get_muon_momentum(self, step):
+        """
+        Muon momentum scheduler (nanochat-style).
+        Warms up from 0.85 to 0.95 over first 300 steps.
+
+        Args:
+            step: Current training step
+
+        Returns:
+            float: Momentum value for Muon optimizer
+        """
+        frac = min(step / 300, 1.0)
+        momentum = (1 - frac) * 0.85 + frac * 0.95
+        return momentum
+
+    def get_muon_weight_decay(self, step):
+        """
+        Muon weight decay scheduler (nanochat-style).
+        Linearly decays from initial value to 0 over the course of training.
+
+        Args:
+            step: Current training step
+
+        Returns:
+            float: Weight decay value for Muon optimizer
+        """
+        total_steps = self.max_steps * self.num_epochs
+        return self.weight_decay_scaled * (1 - step / total_steps)
 
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
@@ -159,7 +171,9 @@ class Trainer:
             # Small models can use larger batch sizes for faster training
             # Large models need smaller batch sizes to fit in memory
             # Reference: tuned on 2x H100 80GB
-            if self.depth_override <= 10:
+            if self.depth_override <= 8:
+                auto_batch_size = 32  # ~100M params: high throughput
+            elif self.depth_override <= 10:
                 auto_batch_size = 32  # ~100M params: high throughput
             elif self.depth_override <= 14:
                 auto_batch_size = 16  # ~150M-210M params: balanced
@@ -209,7 +223,10 @@ class Trainer:
         self.raw_model.to(self.device)
 
         # Wrap with torch.compile for faster training
-        self.model = torch.compile(self.raw_model)
+        # DISABLED: torch.compile + Muon + DDP causes none_dealloc crashes
+        # TODO: Re-enable when PyTorch fixes reference counting with compiled optimizers
+        # self.model = torch.compile(self.raw_model)
+        self.model = self.raw_model
 
         # Wrap with DDP for distributed training
         if self.ddp:
@@ -256,8 +273,8 @@ class Trainer:
         self.max_learning_rate = self.config.max_learning_rate
         self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
 
-        # Apply nanochat-style depth-aware scaling if using depth mode
-        # DISABLED: Testing without LR scaling
+        # Apply nanochat-style depth-aware LR scaling if using depth mode
+        # LR ∝ 1/√model_dim (tuned at model_dim=768, depth=12)
         if self.config._depth_mode:
             # Learning rate scaling: LR ∝ 1/√model_dim
             # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
@@ -349,360 +366,75 @@ class Trainer:
             )  # at least 2 evals
             self.run_core_evals_after = adaptive_core_interval
 
-    def _create_evaluator(self, eval_dataloader):
-        """Create a TrainingEvaluator with standard configuration.
-
-        Args:
-            eval_dataloader: The evaluation dataloader to use
-
-        Returns:
-            TrainingEvaluator instance
-        """
-        return TrainingEvaluator(
-            model=self.model,
-            eval_dataloader=eval_dataloader,
-            device=self.device,
-            master_process=self.master_process,
-            ddp=self.ddp,
-            ddp_rank=self.ddp_rank,
+    def _setup_dataloaders_wrapper(self):
+        """Wrapper to setup dataloaders using utility functions."""
+        results = setup_dataloaders(
+            sft_training=self.sft_training,
+            mid_training=self.mid_training,
+            config=self.config,
             ddp_world_size=self.ddp_world_size,
+            ddp_rank=self.ddp_rank,
+            master_process=self.master_process,
+            run_evals=self.run_evals,
+            run_core_evals=self.run_core_evals,
+            run_chatcore_evals=self.run_chatcore_evals,
+            raw_model=self.raw_model,
+            device=self.device,
+            ddp=self.ddp,
+            model=self.model,
+            eval_dataloader=None,  # Will be set by setup_dataloaders
             generation_log_file=self.generation_log_file,
             token_bytes_path=self.token_bytes_path,
-            val_loss_steps=self.config.val_loss_eval_batches,
-            sample_seed=self.config.generation_seed,
-            use_kv_cache=self.config.use_kv_cache,
         )
-
-    def _setup_dataloaders(self):
-        """Initialize train and eval dataloaders based on training mode."""
-        if self.sft_training:
-            self._setup_sft_dataloaders()
-        elif self.mid_training:
-            self._setup_midtraining_dataloaders()
-        else:
-            self._setup_pretraining_dataloaders()
-
-        # Unified evaluator creation for all modes
-        if self.run_evals:
-            self.evaluator = self._create_evaluator(self.eval_dataloader)
-        else:
-            self.evaluator = None
-            if self.master_process:
-                print("Evaluations disabled - skipping eval dataloader initialization")
-
-        # Initialize CORE evaluator if requested
-        if self.run_core_evals:
-            enc, _ = get_custom_tokenizer()
-            self.core_evaluator = CoreEvaluator(
-                model=self.raw_model,
-                tokenizer=enc,
-                device=self.device,
-                master_process=self.master_process,
-                ddp=self.ddp,
-                ddp_rank=self.ddp_rank,
-                ddp_world_size=self.ddp_world_size,
-                eval_bundle_path="/mnt/localssd/NanoGPT/resources/eval_bundle",
-                # tasks_to_run=core_tasks_subset,
-                max_examples_per_task=self.config.core_eval_max_examples,
-            )
-        else:
-            self.core_evaluator = None
-
-        # Initialize ChatCORE evaluator if requested (for generative evaluation)
-        if self.run_chatcore_evals:
-            from eval_tasks.chat_core.arc_challenge import \
-                setup_arc_challenge_task
-            from eval_tasks.chat_core.arc_easy import setup_arc_task
-            from eval_tasks.chat_core.evaluator import ChatCoreEvaluator
-            from eval_tasks.chat_core.gsm8k import setup_gsm8k_task
-            from eval_tasks.chat_core.humaneval import setup_humaneval_task
-            from eval_tasks.chat_core.mmlu import setup_mmlu_task
-
-            enc, _ = get_custom_tokenizer()
-            self.chatcore_evaluator = ChatCoreEvaluator(
-                model=self.raw_model,
-                tokenizer=enc,
-                device=self.device,
-                master_process=self.master_process,
-                ddp=self.ddp,
-                ddp_rank=self.ddp_rank,
-                ddp_world_size=self.ddp_world_size,
-                max_examples=self.config.chat_core_max_examples,  # Use full test set for final evaluation
-                num_samples=self.config.chat_core_num_samples,
-                max_tokens=self.config.chat_core_max_tokens,
-                temperature=self.config.chat_core_temperature,
-                top_k=self.config.chat_core_top_k,
-                use_kv_cache=self.config.use_kv_cache,
-            )
-
-            # Register evaluation tasks
-            setup_gsm8k_task(
-                self.chatcore_evaluator,
-                enc,
-                split="test",
-                cache_dir=self.config.chat_core_hf_cache_dir,
-            )
-            setup_humaneval_task(
-                self.chatcore_evaluator,
-                enc,
-                cache_dir=self.config.chat_core_hf_cache_dir,
-                shuffle_seed=42,
-            )
-            setup_arc_task(
-                self.chatcore_evaluator,
-                enc,
-                subset="ARC-Easy",
-                split="test",
-                cache_dir=self.config.chat_core_hf_cache_dir,
-            )
-            setup_arc_challenge_task(
-                self.chatcore_evaluator,
-                enc,
-                subset="ARC-Challenge",
-                split="test",
-                cache_dir=self.config.chat_core_hf_cache_dir,
-            )
-            setup_mmlu_task(
-                self.chatcore_evaluator,
-                enc,
-                subset="all",
-                split="test",
-                cache_dir=self.config.chat_core_hf_cache_dir,
-            )
-        else:
-            self.chatcore_evaluator = None
-
-    def _setup_sft_dataloaders(self):
-        """Setup dataloaders for SFT training mode."""
-        if self.master_process:
-            print("\n" + "=" * 80)
-            print("🎯 SFT TRAINING MODE: Using Multiplex datasets")
-            print("=" * 80 + "\n")
-
-        # Import required dataloaders
-        from dataloaders.arc_dataloader import ARCDataLoader
-        from dataloaders.gsm8k_dataloader import GSM8KDataLoader
-        from dataloaders.multiplex_dataloader import (
-            create_multiplex_dataloader, create_sft_collate_fn)
-        from dataloaders.simplespelling_dataloader import \
-            SimpleSpellingDataLoader
-        from dataloaders.smoltalk_dataloader import SmolTalkDataLoader
-        from dataloaders.spellingbee_dataloader import SpellingBeeDataLoader
-
-        cache_dir = self.config.sft_cache_dir
-
-        if self.master_process:
-            print("Loading SFT training datasets...")
-
-        # Load datasets exactly as specified in lines 558-619 of multiplex_dataloader.py
-        # 1. ARC-Easy
-        arc_easy_data = ARCDataLoader(
-            subset="ARC-Easy", split="train", cache_dir=cache_dir
-        ).load_data(format_as_conversation=True)
-
-        # 2. ARC-Challenge
-        arc_challenge_data = ARCDataLoader(
-            subset="ARC-Challenge", split="train", cache_dir=cache_dir
-        ).load_data(format_as_conversation=True)
-
-        # 3. GSM8K
-        gsm8k_data = GSM8KDataLoader(split="train", cache_dir=cache_dir).load_data(
-            format_as_conversation=True
-        )
-
-        # 4. SmolTalk
-        smoltalk_data = SmolTalkDataLoader(
-            split="train", cache_dir=cache_dir
-        ).load_data(max_examples=10000)
-
-        # 5. SpellingBee
-        spelling_bee_data = SpellingBeeDataLoader(
-            size=300, split="train", cache_dir=cache_dir
-        ).load_data()
-
-        # 6. SimpleSpelling
-        simple_spelling_data = SimpleSpellingDataLoader(
-            size=300, split="train", cache_dir=cache_dir
-        ).load_data()
-
-        if self.master_process:
-            print(f"✓ Loaded {len(arc_easy_data)} ARC-Easy examples")
-            print(f"✓ Loaded {len(arc_challenge_data)} ARC-Challenge examples")
-            print(f"✓ Loaded {len(gsm8k_data)} GSM8K examples")
-            print(f"✓ Loaded {len(smoltalk_data)} SmolTalk examples")
-            print(f"✓ Loaded {len(spelling_bee_data)} SpellingBee examples")
-            print(f"✓ Loaded {len(simple_spelling_data)} SimpleSpelling examples\n")
-
-        # Setup tokenizer and collate function
-        enc, _ = get_custom_tokenizer()
-        pad_token_id = enc.encode("<|assistant_end|>", allowed_special="all")[0]
-        collate_fn = create_sft_collate_fn(
-            enc, pad_token_id, return_metadata=False, max_length=self.config.block_size
-        )
-
-        # Create multiplex dataloader for training
-        self.train_dataloader = create_multiplex_dataloader(
-            datasets=[
-                ("arc_easy", arc_easy_data),
-                ("arc_challenge", arc_challenge_data),
-                ("gsm8k", gsm8k_data),
-                ("smoltalk", smoltalk_data),
-                ("spelling_bee", spelling_bee_data),
-                ("simple_spelling", simple_spelling_data),
-            ],
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=4,  # Parallel data loading workers
-            pin_memory=True,  # Faster GPU transfer
-            prefetch_factor=2,  # Prefetch 2 batches per worker
-            persistent_workers=True,  # Keep workers alive between epochs
-            sampling_strategy="proportional",
-            collate_fn=collate_fn,
-            ddp_rank=self.ddp_rank,  # DDP rank for sharding
-            ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
-        )
-
-        # Validation: Multiple task validation sets to match training distribution
-        if self.run_evals:
-            if self.master_process:
-                print("Loading SFT validation datasets...")
-
-            # Load validation splits from all training tasks
-            # Note: ARC has 'train'/'validation'/'test', but GSM8K and SmolTalk only have 'train'/'test'
-            # We use 'validation' for ARC (proper dev set) and 'test' for others (no validation split exists)
-            arc_easy_val_data = ARCDataLoader(
-                subset="ARC-Easy", split="validation", cache_dir=cache_dir
-            ).load_data(format_as_conversation=True)
-
-            arc_challenge_val_data = ARCDataLoader(
-                subset="ARC-Challenge", split="validation", cache_dir=cache_dir
-            ).load_data(format_as_conversation=True)
-
-            # GSM8K only has train/test splits, so use test for validation
-            gsm8k_val_data = GSM8KDataLoader(
-                split="test", cache_dir=cache_dir
-            ).load_data(format_as_conversation=True, max_examples=1000)
-
-            # SmolTalk only has train/test splits, so use test for validation
-            smoltalk_val_data = SmolTalkDataLoader(
-                split="test", cache_dir=cache_dir
-            ).load_data(max_examples=2000)
-
-            # Note: No validation splits for SpellingBee/SimpleSpelling
-            # (they're generated, so train=test essentially)
-
-            if self.master_process:
-                print(f"✓ Loaded {len(arc_easy_val_data)} ARC-Easy validation examples")
-                print(
-                    f"✓ Loaded {len(arc_challenge_val_data)} ARC-Challenge validation examples"
-                )
-                print(f"✓ Loaded {len(gsm8k_val_data)} GSM8K validation examples")
-                print(
-                    f"✓ Loaded {len(smoltalk_val_data)} SmolTalk validation examples\n"
-                )
-
-            self.eval_dataloader = create_multiplex_dataloader(
-                datasets=[
-                    ("arc_easy_val", arc_easy_val_data),
-                    ("arc_challenge_val", arc_challenge_val_data),
-                    ("gsm8k_val", gsm8k_val_data),
-                    ("smoltalk_val", smoltalk_val_data),
-                ],
-                batch_size=self.config.batch_size,
-                shuffle=False,
-                num_workers=2,  # Fewer workers for validation (less frequent)
-                pin_memory=True,  # Faster GPU transfer
-                prefetch_factor=2,  # Prefetch 2 batches per worker
-                persistent_workers=True,  # Keep workers alive between epochs
-                sampling_strategy="proportional",  # Match training distribution
-                collate_fn=collate_fn,
-                ddp_rank=self.ddp_rank,  # DDP rank for sharding
-                ddp_world_size=self.ddp_world_size,  # DDP world size for sharding
-            )
-        else:
-            self.eval_dataloader = None
-
-    def _setup_midtraining_dataloaders(self):
-        """Setup dataloaders for mid-training mode."""
-        DataloaderClass = TaskMixtureDataloader
-        data_dir = self.config.data_dir_midtrain
-
-        if self.master_process:
-            print("\n" + "=" * 80)
-            print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
-            print("=" * 80 + "\n")
-
-        self.train_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="train",
-            master_process=self.master_process,
-        )
-
-        if self.run_evals:
-            self.eval_dataloader = DataloaderClass(
-                data_dir=data_dir,
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="val",
-                master_process=self.master_process,
-            )
-        else:
-            self.eval_dataloader = None
-
-    def _setup_pretraining_dataloaders(self):
-        """Setup dataloaders for pretraining mode."""
-        DataloaderClass = FinewebEduDataloader
-        data_dir = self.config.data_dir_pretrain
-
-        self.train_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=self.config.batch_size,
-            block_size=self.config.block_size,
-            ddp_world_size=self.ddp_world_size,
-            ddp_rank=self.ddp_rank,
-            split="train",
-            master_process=self.master_process,
-        )
-
-        if self.run_evals:
-            self.eval_dataloader = DataloaderClass(
-                data_dir=data_dir,
-                batch_size=self.config.batch_size,
-                block_size=self.config.block_size,
-                ddp_world_size=self.ddp_world_size,
-                ddp_rank=self.ddp_rank,
-                split="val",
-                master_process=self.master_process,
-            )
-        else:
-            self.eval_dataloader = None
+        (
+            self.train_dataloader,
+            self.eval_dataloader,
+            self.evaluator,
+            self.core_evaluator,
+            self.chatcore_evaluator,
+        ) = results
 
     def _setup_optimizer_and_checkpoint(self):
         """Initialize optimizer and load checkpoint if provided."""
-        # Apply nanochat-style depth-aware weight decay scaling if using depth mode
-        # DISABLED: Testing without weight decay scaling
-        if False and self.config._depth_mode:
-            # Weight decay scaling: WD ∝ 1/depth²
-            # Reference: tuned at depth=12 with WD=0.10
+        # ===== Nanochat-style Batch Size Scaling (sqrt rule) =====
+        # Learning rates are tuned at reference batch size 2^19 (524288)
+        batch_lr_scale = 1.0
+        reference_batch_size = 2**19
+        batch_ratio = self.total_batch_size / reference_batch_size
+        if batch_ratio != 1.0:
+            # Muon: sqrt scaling (second-order-ish optimizer)
+            # AdamW: sqrt scaling is standard
+            batch_lr_scale = batch_ratio**0.5
+            if self.master_process:
+                print("\n📐 BATCH SIZE SCALING")
+                print(
+                    f"   Batch ratio: {batch_ratio:.4f} ({self.total_batch_size:,} / {reference_batch_size:,})"
+                )
+                print(f"   LR scale: {batch_lr_scale:.4f} (sqrt rule)")
+
+        # ===== Nanochat-style Weight Decay Scaling by Depth =====
+        # Weight decay is tuned at depth=12, scales as ∝ 1/depth²
+        weight_decay = self.config.weight_decay
+        if self.config._depth_mode and self.use_muon:
             reference_depth = 12
             wd_scale = (reference_depth / self.config.depth) ** 2
             weight_decay = self.config.weight_decay * wd_scale
 
             if self.master_process:
+                print("\n📐 WEIGHT DECAY SCALING")
+                print(f"   Depth: {self.config.depth} (reference: {reference_depth})")
                 print(
-                    f"   WD scaling: {wd_scale:.6f} (∝ ({reference_depth}/{self.config.depth})²)"
+                    f"   WD scale: {wd_scale:.6f} (∝ ({reference_depth}/{self.config.depth})²)"
                 )
                 print(
-                    f"   Weight decay: {self.config.weight_decay:.6f} → {weight_decay:.6f}\n"
+                    f"   Weight decay: {self.config.weight_decay:.6f} → {weight_decay:.6f}"
                 )
-        else:
-            weight_decay = self.config.weight_decay
+
+        # ===== Apply Batch Size Scaling to Learning Rates =====
+        embedding_lr = self.config.embedding_lr * batch_lr_scale
+        unembedding_lr = self.config.unembedding_lr * batch_lr_scale
+        matrix_lr = self.config.matrix_lr * batch_lr_scale
+        scalar_lr = self.config.scalar_lr * batch_lr_scale
 
         optimizer_result = self.raw_model.configure_optimizers(
             learning_rate=self.max_learning_rate,
@@ -712,7 +444,16 @@ class Trainer:
             muon_lr=self.config.muon_lr,
             ddp=self.ddp,
             master_process=self.master_process,
+            embedding_lr=embedding_lr,
+            unembedding_lr=unembedding_lr,
+            matrix_lr=matrix_lr,
+            scalar_lr=scalar_lr,
+            adam_beta1=self.config.adam_beta1,
+            adam_beta2=self.config.adam_beta2,
         )
+
+        # Store scaled weight decay for scheduler
+        self.weight_decay_scaled = weight_decay
 
         # Handle both single optimizer and list of optimizers
         if isinstance(optimizer_result, list):
@@ -820,52 +561,26 @@ class Trainer:
                 self.start_step = 0
                 self.start_epoch += 1
 
-    def _setup_wandb(self):
-        """Initialize Weights & Biases for experiment tracking."""
-        if self.master_process:
-            if self.sft_training:
-                project_name = "gpt2-sft"
-                training_mode = "SFT"
-            elif self.mid_training:
-                project_name = "gpt2-midtraining"
-                training_mode = "mid-training"
-            else:
-                project_name = "gpt2-pretraining-scaling-law-muon"  # TODO: Change to gpt2-pretraining when done running scaling law experiments
-                training_mode = "pretraining"
-
-            # Calculate total FLOPs budget for this run
-            total_flops = self.flops_per_token * self.total_batch_size * self.max_steps
-
-            # Format FLOPs in scientific notation (e.g., "7.9e18" -> "7.9e18")
-            flops_str = f"{total_flops:.1e}"
-
-            # Create run name: L{layers}-{flops}
-            # Example: "L12-7.9e18" for 12 layers and 7.9e18 FLOPs
-            run_name = f"model_L{self.config.n_layer}-{flops_str}"
-
-            wandb.init(
-                project=project_name,
-                name=run_name,
-                config={
-                    "model_type": "GPT-2",
-                    "training_mode": training_mode,
-                    "batch_size": self.config.batch_size,
-                    "block_size": self.config.block_size,
-                    "max_learning_rate": self.max_learning_rate,
-                    "min_learning_rate": self.min_learning_rate,
-                    "warmup_steps": self.warmup_steps,
-                    "max_steps": self.max_steps,
-                    "num_epochs": self.num_epochs,
-                    "weight_decay": self.config.weight_decay,
-                    "gradient_clip_norm": self.config.gradient_clip_norm,
-                    "run_evals": self.run_evals,
-                    "run_core_evals": self.run_core_evals,
-                    "run_chatcore_evals": self.run_chatcore_evals,
-                    "start_step": self.start_step,
-                    "n_layers": self.config.n_layer,
-                    "total_flops": total_flops,
-                },
-            )
+    def _setup_wandb_wrapper(self):
+        """Wrapper to setup wandb using utility function."""
+        setup_wandb(
+            master_process=self.master_process,
+            sft_training=self.sft_training,
+            mid_training=self.mid_training,
+            config=self.config,
+            max_learning_rate=self.max_learning_rate,
+            min_learning_rate=self.min_learning_rate,
+            warmup_steps=self.warmup_steps,
+            max_steps=self.max_steps,
+            num_epochs=self.num_epochs,
+            run_evals=self.run_evals,
+            run_core_evals=self.run_core_evals,
+            run_chatcore_evals=self.run_chatcore_evals,
+            start_step=self.start_step,
+            flops_per_token=self.flops_per_token,
+            total_batch_size=self.total_batch_size,
+            use_muon=self.use_muon,
+        )
 
     def _setup_token_bytes(self):
         """Load pre-computed token_bytes tensor for BPB calculation."""
@@ -1031,24 +746,64 @@ class Trainer:
                 )
 
                 # Update learning rate based on global step (continuous across epochs)
-                lr = get_lr(
-                    global_step=global_step,
-                    warmup_steps=self.warmup_steps,
-                    max_steps=self.max_steps,
-                    num_epochs=self.num_epochs,
-                    max_learning_rate=self.max_learning_rate,
-                    min_learning_rate=self.min_learning_rate,
-                )
-                # Update LR for all optimizers
-                for opt in self.optimizers:
-                    for param_group in opt.param_groups:
-                        # Scale LR based on initial_lr if available
-                        if "initial_lr" in param_group:
-                            param_group["lr"] = lr * (
-                                param_group["initial_lr"] / self.max_learning_rate
-                            )
-                        else:
-                            param_group["lr"] = lr
+                if self.use_muon:
+                    # Nanochat-style: Use get_lr_multiplier to get a multiplier for all param groups
+                    from gpt_2.utils import get_lr_multiplier
+
+                    # Determine training phase
+                    if self.sft_training:
+                        training_phase = "sft"
+                    elif self.mid_training:
+                        training_phase = "midtrain"
+                    else:
+                        training_phase = "pretrain"
+
+                    lrm = get_lr_multiplier(
+                        global_step=global_step,
+                        max_steps=self.max_steps,
+                        num_epochs=self.num_epochs,
+                        training_phase=training_phase,
+                        warmup_ratio=self.config.warmup_ratio,
+                        warmdown_ratio=self.config.warmdown_ratio,
+                        final_lr_frac=self.config.final_lr_frac,
+                    )
+
+                    # Get Muon schedulers
+                    muon_momentum = self.get_muon_momentum(global_step)
+                    muon_weight_decay = self.get_muon_weight_decay(global_step)
+
+                    # Update all optimizers with nanochat-style scheduling
+                    for opt in self.optimizers:
+                        for param_group in opt.param_groups:
+                            # Apply LR multiplier to initial_lr
+                            param_group["lr"] = param_group["initial_lr"] * lrm
+
+                            # Update Muon-specific params
+                            if param_group.get("kind") == "muon":
+                                param_group["momentum"] = muon_momentum
+                                param_group["weight_decay"] = muon_weight_decay
+
+                    lr = lrm  # For logging
+                else:
+                    # Standard cosine schedule for AdamW-only
+                    lr = get_lr(
+                        global_step=global_step,
+                        warmup_steps=self.warmup_steps,
+                        max_steps=self.max_steps,
+                        num_epochs=self.num_epochs,
+                        max_learning_rate=self.max_learning_rate,
+                        min_learning_rate=self.min_learning_rate,
+                    )
+                    # Update LR for all optimizers
+                    for opt in self.optimizers:
+                        for param_group in opt.param_groups:
+                            # Scale LR based on initial_lr if available
+                            if "initial_lr" in param_group:
+                                param_group["lr"] = lr * (
+                                    param_group["initial_lr"] / self.max_learning_rate
+                                )
+                            else:
+                                param_group["lr"] = lr
 
                 # Apply gradients to update model parameters
                 for opt in self.optimizers:
@@ -1146,22 +901,76 @@ class Trainer:
                     # else:
                     #     train_bpb = float("inf")
 
-                    wandb.log(
-                        {
-                            # "epoch": epoch,
-                            # "epoch_step": step,
-                            "step": global_step,
-                            "train_loss": train_loss,
-                            # "train_bpb": train_bpb,
-                            "learning_rate": lr,
-                            "tokens_per_second": tokens_per_second,
-                            "time_taken": end_time - start_time,
-                            "gradient_norm": norm,
-                            "flops_per_second": flops_per_second,
-                            "total_training_flops_train": flops_so_far,
-                            "mfu": mfu,
-                        }
-                    )
+                    # Build logging dict with base metrics
+                    log_dict = {
+                        # "epoch": epoch,
+                        # "epoch_step": step,
+                        "step": global_step,
+                        "train_loss": train_loss,
+                        # "train_bpb": train_bpb,
+                        "lr_multiplier": lr,  # LR schedule multiplier (for reference)
+                        "tokens_per_second": tokens_per_second,
+                        "time_taken": end_time - start_time,
+                        "gradient_norm": norm,
+                        "flops_per_second": flops_per_second,
+                        "total_training_flops_train": flops_so_far,
+                        "mfu": mfu,
+                    }
+
+                    # ===== Log Learning Rates =====
+                    # We use separate LRs for different parameter types (nanochat-style):
+                    # - Embeddings: Fast learning (default 0.3) - adapts token representations quickly
+                    # - Unembedding: Slow learning (default 0.004) - stable output distribution
+                    # - Matrices: Medium learning (default 0.02) - core transformer weights with Muon
+                    # - Scalars/Biases: Fast learning (default 0.5) - small params adjust quickly
+
+                    if self.use_muon and len(self.optimizers) > 1:
+                        # When using Muon, we have 2 optimizers:
+                        # - optimizers[0] = AdamW (for embeddings, output head, biases)
+                        # - optimizers[1] = Muon (for transformer weight matrices)
+
+                        # Log AdamW learning rates (3 parameter groups)
+                        adamw_opt = self.optimizers[0]
+                        log_dict["lr/unembedding"] = adamw_opt.param_groups[0][
+                            "lr"
+                        ]  # Output projection (lm_head)
+                        log_dict["lr/embedding"] = adamw_opt.param_groups[1][
+                            "lr"
+                        ]  # Token embeddings (wte)
+                        log_dict["lr/scalar"] = adamw_opt.param_groups[2][
+                            "lr"
+                        ]  # Bias terms (attention, MLP biases)
+
+                        # Log Muon learning rate (all matrix params share same LR)
+                        # Muon handles: Q, K, V projections + attention output + MLP up/down projections
+                        muon_opt = self.optimizers[1]
+                        if len(muon_opt.param_groups) > 0:
+                            log_dict["lr/matrix"] = muon_opt.param_groups[0][
+                                "lr"
+                            ]  # All 2D transformer matrices
+
+                            # Log Muon-specific hyperparameters (interesting for analysis)
+                            if "momentum" in muon_opt.param_groups[0]:
+                                # Momentum: 0.85 → 0.95 over first 300 steps (warmup for stability)
+                                log_dict["muon/momentum"] = muon_opt.param_groups[0][
+                                    "momentum"
+                                ]
+                            if "weight_decay" in muon_opt.param_groups[0]:
+                                # Weight decay: scales by 1/depth² and decays linearly to 0 over training
+                                log_dict["muon/weight_decay"] = muon_opt.param_groups[
+                                    0
+                                ]["weight_decay"]
+                    else:
+                        # For standard AdamW-only training (no Muon), just log main LR
+                        if (
+                            len(self.optimizers) > 0
+                            and len(self.optimizers[0].param_groups) > 0
+                        ):
+                            log_dict["lr/main"] = self.optimizers[0].param_groups[0][
+                                "lr"
+                            ]
+
+                    wandb.log(log_dict)
 
                     # Print comprehensive training statistics
                     progress = (global_step + 1) / total_steps * 100

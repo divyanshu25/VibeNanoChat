@@ -215,6 +215,12 @@ class GPT(nn.Module):
         muon_lr=0.02,
         ddp=False,
         master_process=True,
+        embedding_lr=None,
+        unembedding_lr=None,
+        matrix_lr=None,
+        scalar_lr=None,
+        adam_beta1=0.8,
+        adam_beta2=0.95,
     ):
         """
         Configure optimizer(s) with proper parameter grouping and weight decay.
@@ -233,6 +239,12 @@ class GPT(nn.Module):
             use_muon (bool): Enable hybrid AdamW+Muon optimization
             muon_lr (float): Learning rate for Muon optimizer (if enabled)
             ddp (bool): Distributed training flag
+            embedding_lr (float): Learning rate for embeddings (nanochat-style)
+            unembedding_lr (float): Learning rate for output head (nanochat-style)
+            matrix_lr (float): Learning rate for Muon matrix params (nanochat-style)
+            scalar_lr (float): Learning rate for scalars (nanochat-style)
+            adam_beta1 (float): Adam beta1 parameter
+            adam_beta2 (float): Adam beta2 parameter
 
         Returns:
             Single optimizer (AdamW) or list of optimizers [AdamW, Muon]
@@ -249,8 +261,18 @@ class GPT(nn.Module):
             nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
 
             optim_groups = [
-                {"params": decay_params, "weight_decay": weight_decay},
-                {"params": nodecay_params, "weight_decay": 0.0},
+                {
+                    "params": decay_params,
+                    "weight_decay": weight_decay,
+                    "initial_lr": learning_rate,
+                    "kind": "adamw",
+                },
+                {
+                    "params": nodecay_params,
+                    "weight_decay": 0.0,
+                    "initial_lr": learning_rate,
+                    "kind": "adamw",
+                },
             ]
 
             # Log parameter counts
@@ -273,7 +295,7 @@ class GPT(nn.Module):
             optimizer = torch.optim.AdamW(
                 optim_groups,
                 lr=learning_rate,
-                betas=(0.9, 0.95),
+                betas=(adam_beta1, adam_beta2),
                 eps=1e-8,
                 fused=use_fused,
             )
@@ -322,22 +344,49 @@ class GPT(nn.Module):
                     f"AdamW: {len(other_params)} other params, {sum(p.numel() for p in other_params):,} parameters"
                 )
 
-            # Configure AdamW for embeddings, output head, and 1D params
+            # Use nanochat-style learning rates if provided, otherwise fall back to defaults
+            _unembedding_lr = (
+                unembedding_lr if unembedding_lr is not None else learning_rate
+            )
+            _embedding_lr = embedding_lr if embedding_lr is not None else learning_rate
+            _matrix_lr = matrix_lr if matrix_lr is not None else muon_lr
+            _scalar_lr = scalar_lr if scalar_lr is not None else learning_rate
+
+            # Configure AdamW for embeddings, output head, and 1D params (nanochat-style)
             # Note: weight decay handled by Muon for transformer blocks
             adam_groups = [
-                {"params": lm_head_params, "lr": learning_rate},
-                {"params": embedding_params, "lr": learning_rate},
-                {"params": other_params, "lr": learning_rate, "weight_decay": 0.0},
+                {
+                    "params": lm_head_params,
+                    "lr": _unembedding_lr,
+                    "initial_lr": _unembedding_lr,
+                    "kind": "adamw",
+                },
+                {
+                    "params": embedding_params,
+                    "lr": _embedding_lr,
+                    "initial_lr": _embedding_lr,
+                    "kind": "adamw",
+                },
+                {
+                    "params": other_params,
+                    "lr": _scalar_lr,
+                    "initial_lr": _scalar_lr,
+                    "weight_decay": 0.0,
+                    "kind": "adamw",
+                },
             ]
 
             fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device.startswith("cuda") and not ddp
             if master_process:
                 print(f"Using fused AdamW: {use_fused}")
+                print(
+                    f"Learning rates: unembedding={_unembedding_lr:.4f}, embedding={_embedding_lr:.4f}, matrix={_matrix_lr:.4f}, scalar={_scalar_lr:.4f}"
+                )
 
             adamw_optimizer = torch.optim.AdamW(
                 adam_groups,
-                betas=(0.9, 0.95),
+                betas=(adam_beta1, adam_beta2),
                 eps=1e-8,
                 weight_decay=0.0,  # Muon handles weight decay for transformer blocks
                 fused=use_fused,
@@ -347,15 +396,15 @@ class GPT(nn.Module):
             MuonFactory = DistMuon if ddp else Muon
             muon_optimizer = MuonFactory(
                 matrix_params,
-                lr=muon_lr,
+                lr=_matrix_lr,
                 momentum=0.95,
                 weight_decay=weight_decay,  # Muon handles weight decay
             )
 
-            # Store initial learning rates for scheduler compatibility
-            for opt in [adamw_optimizer, muon_optimizer]:
-                for group in opt.param_groups:
-                    group["initial_lr"] = group["lr"]
+            # Mark Muon param groups with 'kind' for scheduler
+            for group in muon_optimizer.param_groups:
+                group["initial_lr"] = group["lr"]
+                group["kind"] = "muon"
 
             return [adamw_optimizer, muon_optimizer]
 

@@ -64,7 +64,7 @@ class GPTConfig:
     target_param_data_ratio: int = -1  # Data:param ratio (Chinchilla optimal = 20)
 
     # ========================================================================
-    # Learning Rate Schedule
+    # Learning Rate Schedule (Nanochat-style)
     # ========================================================================
     # NOTE: Training steps are automatically calculated from target_param_data_ratio,
     # target_flops, or num_iterations (see "Training horizon" section above).
@@ -79,8 +79,24 @@ class GPTConfig:
     lr_warmup_ratio_sft: float = 0.4  # Warmup as fraction of total steps (10%)
 
     # ========================================================================
-    # Optimizer Configuration
+    # Optimizer Configuration (Nanochat-style per-parameter-group LRs)
     # ========================================================================
+    # Separate learning rates for different parameter groups (nanochat-style)
+    embedding_lr: float = 0.3  # Learning rate for embedding parameters (Adam)
+    unembedding_lr: float = 0.004  # Learning rate for unembedding parameters (Adam)
+    matrix_lr: float = 0.02  # Learning rate for matrix parameters (Muon)
+    scalar_lr: float = 0.5  # Learning rate for scalars (if any)
+
+    # Adam optimizer hyperparameters (for embeddings/unembedding)
+    adam_beta1: float = 0.8  # Adam beta1 for embedding/unembedding
+    adam_beta2: float = 0.95  # Adam beta2 for embedding/unembedding
+
+    # Learning rate schedule (nanochat-style warmup/warmdown)
+    warmup_ratio: float = 0.0  # Ratio of iterations for LR warmup
+    warmdown_ratio: float = 0.4  # Ratio of iterations for LR warmdown
+    final_lr_frac: float = 0.0  # Final LR as fraction of initial LR
+
+    # Legacy parameter (for backward compatibility)
     muon_lr: float = 0.02  # Learning rate for Muon optimizer (nanochat default: 0.02)
 
     # ========================================================================
