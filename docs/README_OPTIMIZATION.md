@@ -80,7 +80,7 @@ make ddp-train NGPUS=2 DEPTH=12 TARGET_FLOPS=1e18 CORE_EVALS=true
 | Problem | Solutions |
 |---------|-----------|
 | **Loss explodes** | ✅ Reduce `matrix_lr` (0.02 → 0.01)<br>✅ Increase gradient clipping<br>✅ Check gradient norm (<5.0) |
-| **Training slow** | ✅ Check MFU (>30%)<br>✅ Increase batch size<br>✅ Verify Flash Attention 3 active |
+| **Training slow** | ✅ Check MFU (>30%)<br>✅ Increase batch size<br>✅ Verify Flash Attention active |
 | **Loss plateaus** | ✅ Decrease weight decay<br>✅ Check LR not too low<br>✅ Verify warmdown timing |
 
 ---
@@ -626,7 +626,7 @@ Our schedules (momentum warmup, weight decay decay) try to get the best of both 
 
 **Code**:
 - PyTorch optimizers: `torch.optim`
-- Our implementation: `gpt_2/muon.py`
+- Our implementation: `src/gpt_2/muon.py`
 
 ---
 
