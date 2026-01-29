@@ -84,12 +84,6 @@ class GPTConfig:
     muon_lr: float = 0.02  # Learning rate for Muon optimizer (nanochat default: 0.02)
 
     # ========================================================================
-    # Weight Tying
-    # ========================================================================
-    tie_embeddings: bool = False  # Tie input (wte) and output (lm_head) embeddings
-    # Setting to False allows independent weights for embedding/unembedding
-
-    # ========================================================================
     # Data Directories
     # ========================================================================
     data_dir_pretrain: str = "/sensei-fs/users/divgoyal/fineweb_edu"

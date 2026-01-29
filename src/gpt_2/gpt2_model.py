@@ -28,7 +28,7 @@ class GPT(nn.Module):
 
     Architecture Components:
     ------------------------
-    - Token embeddings (optional weight tying with output head)
+    - Token embeddings
     - RoPE (Rotary Position Embeddings) for positional encoding
     - Stack of transformer blocks (attention + feedforward)
     - Functional RMSNorm (no learnable parameters)
@@ -41,7 +41,6 @@ class GPT(nn.Module):
     - RoPE instead of learned position embeddings
     - Functional RMSNorm instead of LayerNorm (no params)
     - Zero-initialized residual projections (pure skip connections at init)
-    - Embedding weight tying enabled by default
     """
 
     def __init__(self, config, master_process=True):
@@ -55,7 +54,6 @@ class GPT(nn.Module):
                 - n_layer: Number of transformer blocks (depth)
                 - n_head: Number of attention heads per block
                 - block_size: Maximum sequence length (context window)
-                - tie_embeddings: Share input/output embedding weights (default: True)
             master_process (bool): Whether this is the master process (for printing)
         """
         super().__init__()
@@ -96,19 +94,6 @@ class GPT(nn.Module):
 
         # ===== Language Modeling Head =====
         self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
-
-        # ===== Weight Tying (Optional) =====
-        # Share weights between input embeddings and output projection
-        # Reduces parameters and often improves performance
-        if getattr(config, "tie_embeddings", True):
-            self.transformer.wte.weight = self.lm_head.weight
-            if master_process:
-                print("Weight tying: ENABLED (wte <-> lm_head share weights)")
-        else:
-            if master_process:
-                print(
-                    "Weight tying: DISABLED (wte and lm_head have independent weights)"
-                )
 
         # ===== Weight Initialization =====
         self.apply(self._init_weights)
@@ -206,11 +191,7 @@ class GPT(nn.Module):
         nparams = self.num_scaling_params()
 
         # Exclude embedding parameters (always just a lookup, not a matmul)
-        # Note: num_scaling_params() counts parameters via self.parameters(),
-        # which yields tied weights TWICE (once from wte, once from lm_head).
-        # Whether tied or not, we always want to exclude wte once to get:
-        # - Tied: counted 2x, exclude 1x → counts lm_head matmul once ✓
-        # - Not tied: wte + lm_head counted, exclude wte → counts lm_head only ✓
+        # We exclude wte to count only the lm_head matmul in FLOP calculations
         nparams_exclude = self.transformer.wte.weight.numel()
 
         # Attention FLOPs calculation
