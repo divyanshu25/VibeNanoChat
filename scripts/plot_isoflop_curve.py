@@ -15,6 +15,8 @@ from glob import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.interpolate import UnivariateSpline
+from scipy.optimize import minimize_scalar
 
 
 def parse_log_file(log_path):
@@ -64,7 +66,7 @@ def parse_log_file(log_path):
 
 
 # Define FLOP budgets to analyze
-FLOP_BUDGETS = ["1e18"]  # Add or modify as needed (3e18 and 6e18 still running)
+FLOP_BUDGETS = ["1e18", "3e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
 log_dir = "/mnt/localssd/NanoGPT/logs"
@@ -271,11 +273,14 @@ print(f"\n✅ ISOFlop curve plot saved to: {output_path}")
 plt.close()
 
 # ============================================================================
-# PLOT 2: Validation BPB vs Model Parameters (Multiple Budgets)
+# PLOT 2: Validation BPB vs Model Parameters (with Curve Fitting)
 # ============================================================================
 
 # Create second figure
 fig, ax = plt.subplots(figsize=(12, 8))
+
+# Store optimal points from curve fitting
+fitted_optima = {}
 
 # Plot for each budget
 for budget in sorted_budgets:
@@ -310,13 +315,8 @@ for budget in sorted_budgets:
         alpha=0.8,
         edgecolors="black",
         linewidth=2,
-        label=f"Budget = {budget:.1e} FLOPs",
+        label=f"Data: Budget = {budget:.1e} FLOPs",
         zorder=3,
-    )
-
-    # Connect points with a line
-    ax.plot(
-        val_params_M, val_bpb, "--", linewidth=1.5, alpha=0.5, color=color, zorder=2
     )
 
     # Annotate each point
@@ -326,7 +326,7 @@ for budget in sorted_budgets:
             (val_params_M[i], val_bpb[i]),
             xytext=(8, 8),
             textcoords="offset points",
-            fontsize=9,
+            fontsize=8,
             fontweight="bold",
             bbox=dict(
                 boxstyle="round,pad=0.3",
@@ -336,11 +336,94 @@ for budget in sorted_budgets:
             ),
         )
 
+    # Fit a smooth curve to the data (in log space for better fitting)
+    # Use log(params) as x-axis for more stable fitting
+    if len(val_params_M) >= 4:  # Need at least 4 points for good fit
+        log_params = np.log(val_params_M)
+
+        # Use UnivariateSpline with smoothing
+        # s parameter controls smoothing (lower = closer fit, higher = smoother)
+        spline = UnivariateSpline(log_params, val_bpb, k=3, s=0.0001)
+
+        # Create dense points for smooth curve
+        log_params_dense = np.linspace(log_params.min(), log_params.max(), 500)
+        params_dense = np.exp(log_params_dense)
+        bpb_dense = spline(log_params_dense)
+
+        # Plot the fitted curve
+        ax.plot(
+            params_dense,
+            bpb_dense,
+            "-",
+            linewidth=2.5,
+            alpha=0.7,
+            color=color,
+            label=f"Fit: Budget = {budget:.1e} FLOPs",
+            zorder=2,
+        )
+
+        # Find minimum of the fitted curve
+        result = minimize_scalar(
+            spline, bounds=(log_params.min(), log_params.max()), method="bounded"
+        )
+        optimal_log_params = result.x
+        optimal_params_M = np.exp(optimal_log_params)
+        optimal_bpb = spline(optimal_log_params)
+
+        # Calculate optimal tokens from FLOP budget: C = 6 * N * D => D = C / (6 * N)
+        optimal_tokens = budget / (6 * optimal_params_M * 1e6)
+        optimal_tokens_per_param = optimal_tokens / (optimal_params_M * 1e6)
+
+        # Store optimal point
+        fitted_optima[budget] = {
+            "params_M": optimal_params_M,
+            "bpb": optimal_bpb,
+            "tokens": optimal_tokens,
+            "tokens_per_param": optimal_tokens_per_param,
+        }
+
+        # Mark the optimal point with a star
+        ax.scatter(
+            [optimal_params_M],
+            [optimal_bpb],
+            s=600,
+            c=color,
+            marker="*",
+            alpha=1.0,
+            edgecolors="black",
+            linewidth=3,
+            zorder=5,
+        )
+
+        # Annotate the optimal point with tokens/param ratio
+        ax.annotate(
+            f"Optimal\n{optimal_params_M:.1f}M params\n{optimal_tokens_per_param:.1f} tok/param",
+            (optimal_params_M, optimal_bpb),
+            xytext=(15, 40),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold",
+            color="white",
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor=color,
+                edgecolor="black",
+                alpha=0.95,
+                linewidth=2.5,
+            ),
+            arrowprops=dict(
+                arrowstyle="->",
+                connectionstyle="arc3,rad=0.3",
+                color="black",
+                lw=2,
+            ),
+        )
+
 # Formatting
 ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
 ax.set_ylabel("Validation BPB (Bits Per Byte)", fontsize=14, fontweight="bold")
 ax.set_title(
-    "Scaling Law: Validation BPB vs Model Size\nComparing Different Compute Budgets",
+    "Scaling Law: Validation BPB vs Model Size (with Curve Fitting)\nComparing Different Compute Budgets",
     fontsize=16,
     fontweight="bold",
     pad=20,
@@ -353,10 +436,10 @@ ax.set_xscale("log")
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
 # Legend
-ax.legend(fontsize=12, loc="upper right", framealpha=0.9)
+ax.legend(fontsize=10, loc="upper right", framealpha=0.9, ncol=1)
 
-# Find best models for each budget
-info_text = "Best Models per Budget:\n"
+# Find best models for each budget (both empirical and fitted)
+info_text = "Empirical Best vs Fitted Optimal:\n\n"
 for budget in sorted_budgets:
     models = data_by_budget[budget]
     models_with_val = {
@@ -364,20 +447,45 @@ for budget in sorted_budgets:
     }
     if models_with_val:
         best_model = min(models_with_val.items(), key=lambda x: x[1]["final_val_bpb"])
-        info_text += f"  {budget:.1e}: {best_model[0].upper()} ({best_model[1]['final_val_bpb']:.4f} BPB)\n"
+        empirical_params_M = best_model[1]["params"] / 1e6
+        empirical_bpb = best_model[1]["final_val_bpb"]
+
+        info_text += f"{budget:.1e} FLOPs:\n"
+
+        # Calculate empirical tokens/param ratio
+        empirical_tokens = best_model[1]["tokens"]
+        empirical_params = best_model[1]["params"]
+        empirical_ratio = empirical_tokens / empirical_params
+
+        info_text += f"  Empirical: {best_model[0].upper()}\n"
+        info_text += (
+            f"    {empirical_params_M:.1f}M params, {empirical_ratio:.1f} tok/param\n"
+        )
+        info_text += f"    BPB: {empirical_bpb:.4f}\n"
+
+        if budget in fitted_optima:
+            opt = fitted_optima[budget]
+            info_text += "  Fitted Optimal:\n"
+            info_text += f"    {opt['params_M']:.1f}M params, {opt['tokens_per_param']:.1f} tok/param\n"
+            info_text += f"    BPB: {opt['bpb']:.4f}\n"
+            improvement = (empirical_bpb - opt["bpb"]) * 1000  # in millibits
+            info_text += f"    Gain: {improvement:.2f} millibits\n"
+        info_text += "\n"
 
 ax.text(
-    0.02,
-    0.98,
+    1.02,
+    0.5,
     info_text.strip(),
     transform=ax.transAxes,
-    fontsize=10,
-    verticalalignment="top",
-    bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.6),
+    fontsize=9,
+    verticalalignment="center",
+    horizontalalignment="left",
+    family="monospace",
+    bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
 )
 
-# Tight layout
-plt.tight_layout()
+# Tight layout with extra space for the text box
+plt.tight_layout(rect=[0, 0, 0.85, 1])
 
 # Save figure
 bpb_output_path = "/mnt/localssd/NanoGPT/scripts/graphs/validation_bpb_curve.png"
@@ -386,29 +494,37 @@ print(f"✅ BPB plot saved to: {bpb_output_path}")
 
 plt.close()
 
+# Print fitted optima to console
+print("\n" + "=" * 80)
+print("FITTED CURVE OPTIMA")
+print("=" * 80)
+for budget in sorted_budgets:
+    if budget in fitted_optima:
+        opt = fitted_optima[budget]
+        print(f"\nBudget {budget:.1e} FLOPs:")
+        print(f"  Optimal Parameters:  {opt['params_M']:.2f}M")
+        print(f"  Tokens/Param Ratio:  {opt['tokens_per_param']:.2f}")
+        print(f"  Optimal Tokens:      {opt['tokens']/1e9:.2f}B")
+        print(f"  Optimal BPB:         {opt['bpb']:.4f}")
+print("=" * 80 + "\n")
+
 # ============================================================================
-# PLOT 3: Optimal Model Parameters and Tokens vs FLOPs
+# PLOT 3: Optimal Model Parameters and Tokens vs FLOPs (Using Fitted Curves)
 # ============================================================================
 
-# Collect optimal models for each budget
+# Collect optimal models for each budget from fitted curves
 optimal_data = []
 for budget in sorted_budgets:
-    models = data_by_budget[budget]
-    models_with_val = {
-        k: v for k, v in models.items() if v["final_val_bpb"] is not None
-    }
-    if models_with_val:
-        # Find the model with lowest validation BPB for this budget
-        best_model_name, best_model_data = min(
-            models_with_val.items(), key=lambda x: x[1]["final_val_bpb"]
-        )
+    if budget in fitted_optima:
+        opt = fitted_optima[budget]
         optimal_data.append(
             {
                 "budget": budget,
-                "params": best_model_data["params"],
-                "tokens": best_model_data["tokens"],
-                "val_bpb": best_model_data["final_val_bpb"],
-                "model_name": best_model_name,
+                "params": opt["params_M"] * 1e6,  # Convert back to raw params
+                "tokens": opt["tokens"],
+                "val_bpb": opt["bpb"],
+                "model_name": f"Fitted_{opt['params_M']:.0f}M",
+                "tokens_per_param": opt["tokens_per_param"],
             }
         )
 
@@ -456,9 +572,9 @@ if optimal_data:
             zorder=2,
         )
 
-    # Annotate each point with model name and BPB
+    # Annotate each point with params and tokens/param ratio
     for i, opt in enumerate(optimal_data):
-        label_text = f"{opt['model_name'].upper()}\nBPB: {opt['val_bpb']:.4f}"
+        label_text = f"{optimal_params_M[i]:.1f}M params\n{opt['tokens_per_param']:.1f} tok/param\nBPB: {opt['val_bpb']:.4f}"
         ax1.annotate(
             label_text,
             (budgets[i], optimal_params_M[i]),
@@ -498,10 +614,10 @@ if optimal_data:
     ax1.legend(fontsize=11, loc="upper left", framealpha=0.9)
 
     # Add info text
-    info_text = "Optimal Model Definition:\n"
-    info_text += "For each compute budget,\n"
-    info_text += "the model with the lowest\n"
-    info_text += "validation BPB\n\n"
+    info_text = "Fitted Optimal Models:\n"
+    info_text += "Optimal points found by\n"
+    info_text += "fitting smooth curves to\n"
+    info_text += "validation BPB data\n\n"
     info_text += f"Total Budgets: {len(optimal_data)}\n"
     info_text += (
         f"Param Range:\n{optimal_params_M.min():.1f}M - {optimal_params_M.max():.1f}M"
@@ -546,9 +662,9 @@ if optimal_data:
             zorder=2,
         )
 
-    # Annotate each point with model name and tokens
+    # Annotate each point with tokens and tokens/param ratio
     for i, opt in enumerate(optimal_data):
-        label_text = f"{opt['model_name'].upper()}\n{optimal_tokens_B[i]:.2f}B tokens"
+        label_text = f"{optimal_tokens_B[i]:.2f}B tokens\n{opt['tokens_per_param']:.1f} tok/param\nBPB: {opt['val_bpb']:.4f}"
         ax2.annotate(
             label_text,
             (budgets[i], optimal_tokens_B[i]),
@@ -586,12 +702,14 @@ if optimal_data:
     ax2.legend(fontsize=11, loc="upper right", framealpha=0.9)
 
     # Add info text
-    info_text2 = "Chinchilla suggests:\n"
-    info_text2 += "tokens ≈ 20 × parameters\n\n"
-    info_text2 += f"Total Budgets: {len(optimal_data)}\n"
-    info_text2 += (
-        f"Token Range:\n{optimal_tokens_B.min():.2f}B - {optimal_tokens_B.max():.2f}B"
-    )
+    info_text2 = "Fitted Optimal Ratios:\n"
+    for opt in optimal_data:
+        info_text2 += (
+            f"  {opt['budget']:.1e}: {opt['tokens_per_param']:.1f} tok/param\n"
+        )
+    info_text2 += "\nChinchilla suggests:\n"
+    info_text2 += "  20 tok/param\n"
+    info_text2 += "\nOur optima are much lower!"
 
     ax2.text(
         0.98,

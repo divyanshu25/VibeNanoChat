@@ -66,7 +66,7 @@ def parse_log_file(log_file):
 
 
 # Define FLOP budgets to analyze
-FLOP_BUDGETS = ["1e18"]  # Add or modify as needed (3e18 and 6e18 still running)
+FLOP_BUDGETS = ["1e18", "3e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
 log_dir = "/mnt/localssd/NanoGPT/logs"
