@@ -201,12 +201,12 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 	else \
 		echo "⚡ Muon optimizer enabled for all runs"; \
 	fi; \
-	for FLOPS in 3e18 6e18; do \
+	for FLOPS in 1e18 3e18 6e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 14 16 18; do \
+		for DEPTH in 8 10 12 14 16 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
 			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100 $$NO_MUON_ARG || exit 1; \

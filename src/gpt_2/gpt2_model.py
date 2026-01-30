@@ -65,6 +65,7 @@ class GPT(nn.Module):
         # Pad vocab for efficiency (DDP, tensor cores). Outputs are cropped in forward().
         # This ensures embedding dimensions are divisible by common world_sizes
         # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
+        # This is a classical padding trick to make vocab_size scale to next number that is divisible by pad_vocab_size_to.
         self.padded_vocab_size = (
             (config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to
         ) * pad_vocab_size_to

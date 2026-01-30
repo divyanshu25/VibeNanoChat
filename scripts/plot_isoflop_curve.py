@@ -11,6 +11,7 @@ matplotlib.use("Agg")  # Use non-interactive backend for headless environments
 import os
 import re
 from collections import defaultdict
+from glob import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,24 +22,22 @@ def parse_log_file(log_path):
     with open(log_path, "r") as f:
         content = f.read()
 
-    # Extract parameters
-    param_match = re.search(
-        r"Num decay parameter tensors.*?with ([\d,]+) parameters", content
-    )
+    # Extract parameters - updated pattern for new log format
+    param_match = re.search(r"Model parameters:\s*([\d,]+)", content)
     if not param_match:
         return None
     params = int(param_match.group(1).replace(",", ""))
 
-    # Extract number of iterations (steps)
+    # Extract number of iterations (steps) - updated pattern
     iter_match = re.search(
-        r"Calculated number of iterations from target FLOPs: ([\d,]+)", content
+        r"Calculated number of iterations from target FLOPs:\s*([\d,]+)", content
     )
     if not iter_match:
         return None
     iterations = int(iter_match.group(1).replace(",", ""))
 
-    # Extract batch size
-    batch_match = re.search(r"Total batch size: ([\d,]+)", content)
+    # Extract batch size - updated pattern for "Total batch size"
+    batch_match = re.search(r"Total batch size:\s*([\d,]+)", content)
     if not batch_match:
         return None
     batch_size = int(batch_match.group(1).replace(",", ""))
@@ -46,11 +45,11 @@ def parse_log_file(log_path):
     # Calculate tokens
     tokens = iterations * batch_size
 
-    # Extract final validation BPB
-    val_matches = re.findall(r"VALIDATION.*?BPB: ([\d.]+)", content)
+    # Extract final validation BPB - updated pattern
+    val_matches = re.findall(r"VALIDATION.*?BPB:\s*([\d.]+)", content)
     final_val_bpb = float(val_matches[-1]) if val_matches else None
 
-    # Extract final step
+    # Extract final step - updated pattern
     step_matches = re.findall(r"VALIDATION.*?Step\s+(\d+)", content)
     final_step = int(step_matches[-1]) if step_matches else iterations
 
@@ -64,46 +63,34 @@ def parse_log_file(log_path):
     }
 
 
-# Parse all log files
-# Option 1: Manually specify log files
-log_files_manual = [
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b1e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n14_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n16_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n18_b3e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n6_b2e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n8_b2e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n10_b2e18.log",
-    "/mnt/localssd/NanoGPT/logs/scaling_law_n12_b2e18.log",
-]
+# Define FLOP budgets to analyze
+FLOP_BUDGETS = ["1e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
-# Option 2: Auto-discover all scaling law log files (uncomment to use)
-# log_files = sorted(glob("/mnt/localssd/NanoGPT/logs/scaling_law_n*_b*.log"))
+# Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
+log_dir = "/mnt/localssd/NanoGPT/logs"
+log_files = []
 
-# Use manual list for now (easier to control which files to include)
-log_files = log_files_manual
+print("Discovering log files...")
+for budget_str in FLOP_BUDGETS:
+    pattern = os.path.join(log_dir, f"scaling_laws_N*_F{budget_str}.log")
+    matching_files = sorted(glob(pattern))
+    log_files.extend(matching_files)
+    print(f"  Found {len(matching_files)} files for budget {budget_str}")
+
+log_files = sorted(log_files)
+print(f"\nTotal log files found: {len(log_files)}")
 
 # Group data by budget
 data_by_budget = defaultdict(dict)
 
-print("Parsing log files...")
+print("\nParsing log files...")
 for log_file in log_files:
     if not os.path.exists(log_file):
         print(f"Warning: {log_file} not found, skipping...")
         continue
 
-    # Extract n_layers and budget from filename
-    match = re.search(r"scaling_law_n(\d+)_b?([\de]+)\.log", log_file)
+    # Extract n_layers and budget from filename: scaling_laws_N<depth>_F<FLOPBudget>
+    match = re.search(r"scaling_laws_N(\d+)_F([\de]+)\.log", log_file)
     if not match:
         print(f"Warning: Could not parse filename {log_file}, skipping...")
         continue
@@ -250,6 +237,9 @@ ax.set_title(
     pad=20,
 )
 
+# Set log scale for x-axis
+ax.set_xscale("log")
+
 # Grid
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
@@ -355,6 +345,9 @@ ax.set_title(
     fontweight="bold",
     pad=20,
 )
+
+# Set log scale for x-axis
+ax.set_xscale("log")
 
 # Grid
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
