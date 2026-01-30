@@ -1,5 +1,5 @@
 """
-ASGI entry point for the NanoGPT Chat application.
+ASGI entry point for the VibeNanoChat application.
 
 This module provides the ASGI application interface for running the chat server
 using uvicorn or other ASGI servers.
@@ -11,7 +11,7 @@ Usage with gunicorn (production):
     gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
 
 Usage from project root:
-    cd /mnt/localssd/NanoGPT
+    cd /mnt/localssd/VibeNanoChat
     uv run gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
 """
 
@@ -29,6 +29,6 @@ if __name__ == "__main__":
     # For development/testing only
     import uvicorn
 
-    print("🚀 Starting NanoGPT Chat Server...")
+    print("🚀 Starting VibeNanoChat Server...")
     print(f"🌐 Server will be available at: http://0.0.0.0:{PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

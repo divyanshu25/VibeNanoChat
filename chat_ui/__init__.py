@@ -1,7 +1,7 @@
 """
-NanoGPT Chat UI Package
+VibeNanoChat UI Package
 
-A modular chat server for interacting with trained NanoGPT models.
+A modular chat server for interacting with trained VibeNanoChat models.
 
 Main components:
 - ChatConfig: Configuration settings

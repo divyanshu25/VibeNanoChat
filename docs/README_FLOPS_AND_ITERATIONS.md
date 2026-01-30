@@ -2,7 +2,7 @@
 
 ## Overview
 
-This implementation adds nanochat-style FLOPs estimation and automatic iteration calculation to NanoGPT, allowing you to specify training horizons based on computational budget or data:param ratios.
+This implementation adds nanochat-style FLOPs estimation and automatic iteration calculation to VibeNanoChat, allowing you to specify training horizons based on computational budget or data:param ratios.
 
 ## What Was Implemented
 

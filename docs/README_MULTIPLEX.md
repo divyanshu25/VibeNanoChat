@@ -80,7 +80,7 @@ No additional dependencies needed beyond PyTorch!
 
 ```bash
 # Requires Python >= 3.7 and PyTorch >= 1.7.0
-# Already included in /mnt/localssd/NanoGPT/src/dataloaders/
+# Already included in /mnt/localssd/VibeNanoChat/src/dataloaders/
 ```
 
 ---
@@ -462,7 +462,7 @@ num_workers=32  # Usually too many
 ### Run the Test Suite
 
 ```bash
-cd /mnt/localssd/NanoGPT/src/dataloaders
+cd /mnt/localssd/VibeNanoChat/src/dataloaders
 python3 test_multiplex.py
 ```
 
@@ -701,7 +701,7 @@ Works with any dataset that provides a list of dictionaries.
 
 ## License
 
-Same license as the parent NanoGPT project.
+Same license as the parent VibeNanoChat project.
 
 ---
 
@@ -728,5 +728,5 @@ Built to provide the same functionality with better performance through PyTorch'
 ---
 
 **Created**: 2026-01-23  
-**Location**: `/mnt/localssd/NanoGPT/src/dataloaders/`  
+**Location**: `/mnt/localssd/VibeNanoChat/src/dataloaders/`  
 **Purpose**: Efficient multi-dataset training with full PyTorch DataLoader support

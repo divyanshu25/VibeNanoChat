@@ -1,5 +1,5 @@
 """
-Shared utilities for NanoGPT project.
+Shared utilities for VibeNanoChat project.
 
 This module provides common functionality used across the project,
 including the custom tokenizer with special tokens for chat format,

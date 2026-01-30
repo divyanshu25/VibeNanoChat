@@ -1,8 +1,8 @@
-# Adding Vision to NanoGPT: A Practical Guide
+# Adding Vision to VibeNanoChat: A Practical Guide
 
 ## The Big Question
 
-**"I have a trained NanoGPT model. Can I add images to it without retraining everything from scratch?"**
+**"I have a trained VibeNanoChat model. Can I add images to it without retraining everything from scratch?"**
 
 **YES.** And it's actually pretty simple. This is how modern vision-language models like LLaVA work.
 
@@ -10,7 +10,7 @@
 
 ## The Core Idea (ELI5)
 
-Your NanoGPT already understands language. You're going to:
+Your VibeNanoChat already understands language. You're going to:
 
 1. **Plug in a "vision translator"** (CLIP) that converts images into vectors
 2. **Add a tiny bridge** (~2M parameters) that translates these vectors into your model's "language"
@@ -116,7 +116,7 @@ That's it. You now have a vision-language model.
 **What it is:** Load your checkpoint, add vision, train on instruction data with images.
 
 ```
-Your NanoGPT → + CLIP (frozen) + Projection (new) → Train 5-10K steps → VLM ✓
+Your VibeNanoChat → + CLIP (frozen) + Projection (new) → Train 5-10K steps → VLM ✓
 ```
 
 **When to use:** You want results fast and don't need absolute maximum quality.
@@ -1078,7 +1078,7 @@ config.vision_encoder_hidden_size = 768
 ### Q: What if I don't have 4-8 GPUs?
 
 **A:** You can train on 1 GPU, it'll just take longer (~40-80 hours instead of 10-20). Or use smaller models:
-- Smaller NanoGPT (256M params instead of 560M)
+- Smaller VibeNanoChat (256M params instead of 560M)
 - ViT-B instead of ViT-L
 - Batch size 2-4 with gradient accumulation
 
@@ -1120,7 +1120,7 @@ Just change `vision_encoder_name` and update the hidden size.
 ## Summary: What You Actually Need
 
 ✅ **DO THIS:**
-1. Load your existing NanoGPT checkpoint
+1. Load your existing VibeNanoChat checkpoint
 2. Add frozen CLIP + projection layer
 3. Train on 50K-150K instruction pairs with images
 4. Train for 5-10K iterations (~10-20 hours)

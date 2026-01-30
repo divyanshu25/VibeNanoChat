@@ -1,5 +1,5 @@
 """
-Configuration settings for the NanoGPT Chat Server.
+Configuration settings for the VibeNanoChat Server.
 """
 
 import os

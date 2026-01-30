@@ -20,7 +20,9 @@ num_proc_load_dataset = num_proc
 enc, _ = get_custom_tokenizer()
 
 # Directories
-output_dir = "/mnt/localssd/NanoGPT/data/fineweb_edu"  # Local disk (mmap compatible)
+output_dir = (
+    "/mnt/localssd/VibeNanoChat/data/fineweb_edu"  # Local disk (mmap compatible)
+)
 final_dir = "/sensei-fs/users/divgoyal/fineweb_edu"  # Final destination (network FS)
 cache_dir = "/sensei-fs/users/divgoyal/fineweb_edu/hf_cache"
 

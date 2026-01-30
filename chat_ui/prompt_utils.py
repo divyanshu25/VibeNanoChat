@@ -1,5 +1,5 @@
 """
-Prompt formatting utilities for the NanoGPT Chat Server.
+Prompt formatting utilities for the VibeNanoChat Server.
 
 Handles formatting conversation histories into prompts.
 """

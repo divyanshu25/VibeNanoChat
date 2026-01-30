@@ -396,7 +396,7 @@ def setup_dataloaders(
             ddp=ddp,
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
-            eval_bundle_path="/mnt/localssd/NanoGPT/resources/eval_bundle",
+            eval_bundle_path="/mnt/localssd/VibeNanoChat/resources/eval_bundle",
             max_examples_per_task=config.core_eval_max_examples,
         )
     else:
