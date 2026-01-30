@@ -1,20 +1,14 @@
 # VibeNanoChat
 
-> **Standing on the shoulders of giants**: This repo is built on top of Andrej Karpathy's excellent [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat). Most of the good ideas here (depth parameterization, training setup, elegant code structure) come directly from Andrej's work. What we've added: distributed training with ZeRO-style sharding, modern datasets, and evaluation tools. All credit for the foundation goes to @karpathy! 🙏
-
-Train your own GPT from scratch in ~4 days on 8 GPUs. Simple, hackable code. No enterprise complexity, just pure PyTorch.
+> **Standing on the shoulders of giants**: This repo is essentially Andrej Karpathy's excellent [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat) combined together with some organizational changes. All the good ideas (architecture, depth parameterization, training setup, optimizers, scaling laws) come directly from Andrej's work. This is a fork/reorganization for our own experiments. **All credit goes to @karpathy!** 🙏
 
 ## Why this repo?
 
-**For learners**: You want to understand how GPT works by training one yourself. The code is clean, well-commented, and each component does one thing well.
-
-**For researchers**: You want to run scaling law experiments or try new ideas without wading through production codebases. We have depth parameterization (thanks Andrej!), automatic scaling, and isoflop curves ready to go.
-
-**For tinkerers**: You want something that *just works* but is still easy to modify. Change the architecture, try new optimizers, plug in your own data - it's all straightforward.
+This repo is a reorganization attempt at the original nanoGPT and nanochat codebases. The goal is to bring a cleaner code structure with detailed comments to help beginners learn and not get lost in the code. While all the core ideas and implementation come from Andrej Karpathy's work, we've tried to make it more approachable for those new to transformer training.
 
 ## What you get
 
-- 🚀 Train GPT-2 (124M) in ~4 days on 8xA100 (or 30 days on 1 GPU if you're patient)
+- 🚀 Train GPT-2 (124M) 
 - 🎯 One-knob scaling: `DEPTH=12` controls everything, LR/WD auto-scale
 - 📊 Built-in evaluation: 35+ benchmarks (MMLU, HellaSwag, etc.)
 - 💬 Chat with your model: Web UI included
@@ -24,13 +18,13 @@ Train your own GPT from scratch in ~4 days on 8 GPUs. Simple, hackable code. No 
 ## Quick start: Train your first GPT
 
 ```bash
-# Install (takes ~2 min)
+# Install
 make environment
 
-# Get some data (~30-60 min download + tokenization)
+# Get some data
 cd data/fineweb_edu && uv run python prepare.py && cd ../..
 
-# Train! (4 days on 8 GPUs, or 30 days on 1 GPU)
+# Train
 make ddp-train NGPUS=8 MODE=pretraining
 
 # Chat with it
@@ -39,44 +33,41 @@ uv run python scripts/chat.py --checkpoint logs/pretraining/step_19531.pt
 
 That's it. You now have a GPT that understands language.
 
-**Pro tip**: Models checkpoint every few thousand steps, so you can stop early and still have something that works. A model trained for just 1 day is already pretty interesting!
+## What's in this repo?
 
-## What's actually new here?
+**Everything is from Andrej Karpathy's work:**
 
-Let's be honest about what we added vs what we borrowed:
-
-**From nanoGPT** (Andrej Karpathy):
+**From nanoGPT**:
 - The entire GPT-2 architecture and training loop
 - Clean, minimal code philosophy
 - Smart defaults that just work
+- DistMuon optimizer with ZeRO-2 style sharding
 
-**From nanochat** (also Andrej Karpathy):
+**From nanochat**:
 - Depth parameterization (the `DEPTH` knob that scales everything)
 - Scaling law experimental setup
 - Auto-scaling of learning rate and weight decay
+- Isoflop curve analysis and plotting
 
-**What we added**:
-- **DistMuon optimizer**: Hybrid Muon+AdamW with ZeRO-2 style sharding (train without DDP wrapper, save memory)
-- **Modern datasets**: FineWeb-Edu (much better than OpenWebText), TaskMixture for chat
-- **Evaluation suite**: 35+ benchmarks integrated into training
-- **Makefile helpers**: Because typing long commands is annoying
-- **Isoflop plotting**: Automatically generate Chinchilla-style curves from logs
-- **Documentation**: Deep dives on optimization, distributed training, and scaling
+**Our changes** (minimal):
+- Combined nanoGPT + nanochat into one repo
+- Added Makefile helpers for convenience
+- Some documentation and code organization
 
-So yeah, we're building on Andrej's foundation. The core insights are his. We just added some power tools.
+**Bottom line**: This is Andrej's code. We're just using it for our experiments and made it easier to work with for our workflow. All the clever ideas and hard work are his.
 
 ## The Depth Knob 🎛️
 
 This is Andrej's genius idea from nanochat: control model size with one parameter.
 
 ```bash
-# Small model (~30M params)
+# Small model
 make ddp-train DEPTH=6 TARGET_FLOPS=1e18
 
-# Medium model (~150M params) - this is roughly GPT-2 size
+# Medium model (roughly GPT-2 size)
 make ddp-train DEPTH=12 TARGET_FLOPS=1e18
 
-# Large model (~560M params)
+# Large model
 make ddp-train DEPTH=20 TARGET_FLOPS=1e18
 ```
 
@@ -104,7 +95,7 @@ You'll get beautiful Chinchilla-style plots showing optimal model size for your 
 
 Training setup:
 ```
-- DistMuonAdamW optimizer (our contribution: hybrid with ZeRO-2)
+- DistMuonAdamW optimizer (from Andrej's nanoGPT: hybrid Muon+AdamW with ZeRO-2)
 - Learning rate: 6e-4 → 6e-5 (cosine decay)
 - Batch size: 524,288 tokens (2^19)
 - Weight decay: 0.1
@@ -112,7 +103,7 @@ Training setup:
 - Total: 19,531 steps (10B tokens)
 ```
 
-**Optimizer note**: We use Muon (with gradient orthogonalization) for weight matrices, AdamW for embeddings. The optimizer state is sharded across GPUs to save memory. This is our main technical contribution - see [docs/README_DISTMUON.md](docs/README_DISTMUON.md) for details.
+**Optimizer note**: Uses Muon (with gradient orthogonalization) for weight matrices, AdamW for embeddings. The optimizer state is sharded across GPUs to save memory. See [docs/README_DISTMUON.md](docs/README_DISTMUON.md) for details.
 
 ## Datasets: What to train on?
 
@@ -172,11 +163,6 @@ make ddp-train NGPUS=8 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=...
 
 Evals run periodically during training on rank 0 (saves GPU time). Scores are rescaled: 0% = random guessing, 100% = perfect.
 
-**Expected numbers** for 124M pretraining:
-- Validation loss: 2.8-3.0 (perplexity ~16-20)
-- MMLU: Better than random, worse than GPT-3
-- HellaSwag: Actually pretty decent!
-
 📖 **Full details**: [resources/eval_bundle/EVAL_GAUNTLET.md](resources/eval_bundle/EVAL_GAUNTLET.md)
 
 ## Chat with your model
@@ -195,19 +181,19 @@ For base models you get raw text continuation. For mid-trained models you get pr
 
 ## Performance notes
 
-**Speed**: ~50K tokens/sec on 8xA100 (40GB)
-- Mixed precision (bfloat16): ~2x speedup
-- Flash Attention: Even faster
+**Speed optimizations**:
+- Mixed precision (bfloat16)
+- Flash Attention
 - Memory-mapped data loading: Zero-copy I/O
 
 **Memory**: DistMuon's ZeRO-2 sharding saves optimizer memory by `1/world_size`
-- 8 GPUs: 8x less optimizer state per GPU
-- Same-shape parameter batching: ~10x faster Muon updates
+- Optimizer state sharded across GPUs
+- Same-shape parameter batching for faster Muon updates
 - No DDP wrapper needed
 
 **Scaling**: Works with 1 to 8 GPUs out of the box
 - Gradient accumulation auto-adjusts to maintain batch size
-- Same final model regardless of GPU count (just faster with more GPUs)
+- Same final model regardless of GPU count
 
 ## Troubleshooting
 
