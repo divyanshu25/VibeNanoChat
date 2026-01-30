@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI Chat Server for NanoGPT
+FastAPI Chat Server for VibeNanoChat
 
 Serves a web interface to chat with trained checkpoints.
 
@@ -21,7 +21,7 @@ from .model_manager import ModelManager
 from .prompt_utils import format_chat_prompt
 from .session_manager import SessionManager
 
-app = FastAPI(title="NanoGPT Chat Server")
+app = FastAPI(title="VibeNanoChat Server")
 
 # Initialize managers
 model_manager = ModelManager()
@@ -264,7 +264,7 @@ if __name__ == "__main__":
     # In production, use: uvicorn chat_ui.server:app --host 0.0.0.0 --port 8003
     import uvicorn
 
-    print("🚀 Starting NanoGPT Chat Server...")
+    print("🚀 Starting VibeNanoChat Server...")
     print(f"📁 Checkpoint directory: {ChatConfig.CHECKPOINT_DIR}")
     print(
         f"🌐 Server will be available at: http://{ChatConfig.HOST}:{ChatConfig.DEFAULT_PORT}"

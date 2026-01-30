@@ -4,7 +4,7 @@
 
 Position information is critical for language models. Without it, "The cat chased the mouse" would be indistinguishable from "The mouse chased the cat". But *how* we encode position has evolved significantly.
 
-This document explains **RoPE (Rotary Position Embeddings)**, the modern approach to position encoding used in LLaMA, GPT-NeoX, PaLM, and this NanoGPT implementation. We'll start from the original GPT-2 approach, understand its limitations, and see why RoPE is a significant improvement.
+This document explains **RoPE (Rotary Position Embeddings)**, the modern approach to position encoding used in LLaMA, GPT-NeoX, PaLM, and this VibeNanoChat implementation. We'll start from the original GPT-2 approach, understand its limitations, and see why RoPE is a significant improvement.
 
 ## The Old Way: Learned Positional Embeddings (GPT-2 Style)
 
@@ -79,13 +79,19 @@ Rotating a complex number `z` by angle `θ`:
 z' = z · e^(iθ) = (x₁ + i·x₂) · (cos θ + i·sin θ)
 ```
 
-In Cartesian form:
+In Cartesian form (standard rotation by +θ):
 ```
 x₁' = x₁·cos(θ) - x₂·sin(θ)
 x₂' = x₁·sin(θ) + x₂·cos(θ)
 ```
 
-This is exactly a 2D rotation matrix!
+**Note**: Our implementation (following nanochat) uses rotation by -θ instead:
+```
+x₁' = x₁·cos(θ) + x₂·sin(θ)
+x₂' = x₁·(-sin(θ)) + x₂·cos(θ)
+```
+
+Both formulas encode relative position equivalently—the model learns the same patterns either way. The key property is that the attention score depends on relative distance `(m-n)`, not the sign of the rotation.
 
 **Step 3: Position-Dependent Rotation**
 
@@ -151,9 +157,9 @@ def apply_rotary_emb(x, cos, sin):
     d = x.shape[-1] // 2
     x1, x2 = x[..., :d], x[..., d:]
     
-    # Rotate each pair
-    y1 = x1 * cos - x2 * sin  # Real part
-    y2 = x1 * sin + x2 * cos  # Imaginary part
+    # Rotate each pair (using negative rotation, matching nanochat)
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
     
     return torch.cat([y1, y2], dim=-1)
 ```
@@ -346,6 +352,32 @@ The key insight: **position is not something you add to tokens; it's something y
 - **LLaMA paper**: Uses RoPE with various base frequencies
 - **nanochat codebase**: Reference implementation this code is inspired by
 - **Positional encoding comparison**: Analysis of different position encoding schemes
+
+## Implementation Note: Rotation Direction
+
+Our implementation uses **negative rotation** (rotation by -θ) rather than the standard positive rotation. This follows the nanochat codebase that we adapted from.
+
+**Why both work equally well:**
+
+The key insight is that RoPE encodes **relative position** through the phase difference between query and key:
+
+**Standard RoPE (rotation by +θ):**
+```
+q_m' = q_m · e^(i·m·θ)
+k_n' = k_n · e^(i·n·θ)
+score = q_m' · k_n'ᵀ = q_m · k_nᵀ · e^(i·(m-n)·θ)
+```
+
+**Nanochat RoPE (rotation by -θ):**
+```
+q_m' = q_m · e^(-i·m·θ)
+k_n' = k_n · e^(-i·n·θ)
+score = q_m' · k_n'ᵀ = q_m · k_nᵀ · e^(-i·(m-n)·θ)
+```
+
+Both encode the relative position `(m-n)`, just with opposite phase: `e^(i·Δ·θ)` vs `e^(-i·Δ·θ)`. The model learns equivalent representations under either convention—what matters is the consistency of relative positioning, not the sign.
+
+**Models trained with one formula cannot use the other** without retraining, so we maintain consistency with nanochat.
 
 ## Files in This Codebase
 

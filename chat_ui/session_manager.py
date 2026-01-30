@@ -1,5 +1,5 @@
 """
-Session management for the NanoGPT Chat Server.
+Session management for the VibeNanoChat Server.
 
 Handles session creation, retrieval, updates, and cleanup.
 """

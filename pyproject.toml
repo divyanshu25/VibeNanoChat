@@ -6,9 +6,9 @@ build-backend = "hatchling.build"
 packages=["src", "src/gpt2"]
 
 [project]
-name = "nanogpt"
+name = "vibenanochat"
 version = "0.1.0"
-description = "A PyTorch-based implementation of NanoGPT for training and inference."
+description = "A PyTorch-based implementation of VibeNanoChat for training and inference."
 authors = [
     { name = "Divyanshu Goyal", email = "divyanshu.g25@gmail.com" }
 ]

@@ -1,5 +1,5 @@
 """
-Gunicorn configuration for NanoGPT Chat Server.
+Gunicorn configuration for VibeNanoChat Server.
 
 This configuration provides production-ready settings for running the
 chat server with optimal performance and reliability.
@@ -108,7 +108,7 @@ preload_app = False
 
 def on_starting(server):
     """Called just before the master process is initialized."""
-    print("🚀 NanoGPT Chat Server (FastAPI) starting...")
+    print("🚀 VibeNanoChat Server (FastAPI) starting...")
     print(f"📍 Server binding to: {bind}")
     print(f"👷 Workers: {workers} (uvicorn async workers)")
     print(f"⏱️  Timeout: {timeout}s (for model inference)")

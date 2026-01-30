@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 # Service name
-SERVICE_NAME := nano-gpt
+SERVICE_NAME := vibe-nanochat
 
 # Define Python version
 PYTHON_VERSION := 3.10

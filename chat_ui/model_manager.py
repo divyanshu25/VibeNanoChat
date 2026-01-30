@@ -1,5 +1,5 @@
 """
-Model management for the NanoGPT Chat Server.
+Model management for the VibeNanoChat Server.
 
 Handles model loading, device management, and text generation.
 """

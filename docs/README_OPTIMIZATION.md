@@ -1,4 +1,4 @@
-# Optimization Guide for NanoGPT
+# Optimization Guide for VibeNanoChat
 ## Momentum, Nesterov, Weight Decay, and Muon Explained
 
 ---

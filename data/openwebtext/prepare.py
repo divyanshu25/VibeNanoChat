@@ -20,7 +20,9 @@ num_proc_load_dataset = num_proc
 enc, _ = get_custom_tokenizer()
 
 # Directories
-output_dir = "/mnt/localssd/NanoGPT/data/openwebtext"  # Local disk (mmap compatible)
+output_dir = (
+    "/mnt/localssd/VibeNanoChat/data/openwebtext"  # Local disk (mmap compatible)
+)
 final_dir = "/sensei-fs/users/divgoyal/openwebtext"  # Final destination (network FS)
 cache_dir = "/sensei-fs/users/divgoyal/openwebtext/hf_cache"
 

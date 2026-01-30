@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple Chat Script for NanoGPT
+Simple Chat Script for VibeNanoChat
 
 Load a checkpoint and chat with the model interactively.
 
@@ -102,7 +102,7 @@ def format_chat_prompt(messages):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Chat with a NanoGPT checkpoint")
+    parser = argparse.ArgumentParser(description="Chat with a VibeNanoChat checkpoint")
     parser.add_argument(
         "--checkpoint", "-c", type=str, required=True, help="Path to checkpoint (.pt)"
     )
@@ -125,7 +125,7 @@ def main():
     model.eval()
 
     print("\n" + "=" * 50)
-    print("🤖 NanoGPT Chat")
+    print("🤖 VibeNanoChat")
     print("Type /quit to exit, /clear to reset conversation")
     print("=" * 50 + "\n")
 

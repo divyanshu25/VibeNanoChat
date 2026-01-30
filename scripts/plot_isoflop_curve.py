@@ -69,7 +69,7 @@ def parse_log_file(log_path):
 FLOP_BUDGETS = ["1e18", "3e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
-log_dir = "/mnt/localssd/NanoGPT/logs"
+log_dir = "/mnt/localssd/VibeNanoChat/logs"
 log_files = []
 
 print("Discovering log files...")
@@ -266,7 +266,7 @@ ax.text(
 plt.tight_layout()
 
 # Save figure
-output_path = "/mnt/localssd/NanoGPT/scripts/graphs/isoflop_curve.png"
+output_path = "/mnt/localssd/VibeNanoChat/scripts/graphs/isoflop_curve.png"
 plt.savefig(output_path, dpi=300, bbox_inches="tight")
 print(f"\n✅ ISOFlop curve plot saved to: {output_path}")
 
@@ -488,7 +488,7 @@ ax.text(
 plt.tight_layout(rect=[0, 0, 0.85, 1])
 
 # Save figure
-bpb_output_path = "/mnt/localssd/NanoGPT/scripts/graphs/validation_bpb_curve.png"
+bpb_output_path = "/mnt/localssd/VibeNanoChat/scripts/graphs/validation_bpb_curve.png"
 plt.savefig(bpb_output_path, dpi=300, bbox_inches="tight")
 print(f"✅ BPB plot saved to: {bpb_output_path}")
 
@@ -727,7 +727,7 @@ if optimal_data:
 
     # Save figure
     optimal_output_path = (
-        "/mnt/localssd/NanoGPT/scripts/graphs/optimal_model_vs_flops.png"
+        "/mnt/localssd/VibeNanoChat/scripts/graphs/optimal_model_vs_flops.png"
     )
     plt.savefig(optimal_output_path, dpi=300, bbox_inches="tight")
     print(f"✅ Optimal model vs FLOPs plot saved to: {optimal_output_path}")

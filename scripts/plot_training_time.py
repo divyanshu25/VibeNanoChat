@@ -69,7 +69,7 @@ def parse_log_file(log_file):
 FLOP_BUDGETS = ["1e18", "3e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
-log_dir = "/mnt/localssd/NanoGPT/logs"
+log_dir = "/mnt/localssd/VibeNanoChat/logs"
 log_files = []
 
 print("=" * 80)
@@ -329,7 +329,9 @@ fig.suptitle(
 plt.tight_layout()
 
 # Save figure
-output_path = "/mnt/localssd/NanoGPT/scripts/graphs/training_time_vs_model_size.png"
+output_path = (
+    "/mnt/localssd/VibeNanoChat/scripts/graphs/training_time_vs_model_size.png"
+)
 plt.savefig(output_path, dpi=300, bbox_inches="tight")
 print(f"\n✅ Training time plot saved to: {output_path}")
 
@@ -461,7 +463,7 @@ fig.suptitle(
 plt.tight_layout()
 
 # Save figure
-output_path2 = "/mnt/localssd/NanoGPT/scripts/graphs/step_time_vs_model_size.png"
+output_path2 = "/mnt/localssd/VibeNanoChat/scripts/graphs/step_time_vs_model_size.png"
 plt.savefig(output_path2, dpi=300, bbox_inches="tight")
 print(f"✅ Step time plot saved to: {output_path2}")
 

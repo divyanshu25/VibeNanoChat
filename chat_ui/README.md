@@ -1,6 +1,6 @@
-# NanoGPT Chat UI
+# VibeNanoChat UI
 
-A modern web interface for chatting with NanoGPT model checkpoints.
+A modern web interface for chatting with VibeNanoChat model checkpoints.
 
 ## Features
 
@@ -17,13 +17,13 @@ Dependencies are managed through the project's `pyproject.toml` file. Install th
 
 **Using uv (recommended)**:
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 uv sync
 ```
 
 **Using pip**:
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 pip install -e .
 ```
 
@@ -33,7 +33,7 @@ This will install all required dependencies including FastAPI, Uvicorn, PyTorch,
 
 ### Start the Server
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 make chat-server
 ```
 
@@ -47,19 +47,19 @@ This will:
 
 **With gunicorn (recommended):**
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 uv run gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
 ```
 
 **With uvicorn (development with auto-reload):**
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 uv run uvicorn chat_ui.asgi:app --host 0.0.0.0 --port 8003 --reload
 ```
 
 **Direct Python execution:**
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 uv run python chat_ui/server.py
 ```
 
@@ -144,34 +144,34 @@ make chat-server
 
 1. Copy the service file:
 ```bash
-sudo cp chat_ui/nanogpt-chat.service /etc/systemd/system/
+sudo cp chat_ui/vibenanochat-chat.service /etc/systemd/system/
 ```
 
 2. Edit the service file if needed:
 ```bash
-sudo nano /etc/systemd/system/nanogpt-chat.service
+sudo nano /etc/systemd/system/vibenanochat-chat.service
 ```
 
 3. Enable and start the service:
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable nanogpt-chat
-sudo systemctl start nanogpt-chat
+sudo systemctl enable vibenanochat-chat
+sudo systemctl start vibenanochat-chat
 ```
 
 4. Check status:
 ```bash
-sudo systemctl status nanogpt-chat
+sudo systemctl status vibenanochat-chat
 ```
 
 5. View logs:
 ```bash
-sudo journalctl -u nanogpt-chat -f
+sudo journalctl -u vibenanochat-chat -f
 ```
 
 ### Option 2: Manual Run
 ```bash
-cd /mnt/localssd/NanoGPT
+cd /mnt/localssd/VibeNanoChat
 make chat-server
 ```
 

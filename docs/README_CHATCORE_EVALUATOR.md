@@ -887,9 +887,9 @@ If you use ChatCORE evaluator in your research, please cite:
 ```bibtex
 @software{chatcore_evaluator,
   title = {ChatCORE: Generative Evaluation for Chat Models},
-  author = {NanoGPT Team},
+  author = {VibeNanoChat Team},
   year = {2026},
-  url = {https://github.com/your-repo/NanoGPT}
+  url = {https://github.com/your-repo/VibeNanoChat}
 }
 ```
 
