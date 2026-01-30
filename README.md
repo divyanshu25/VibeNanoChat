@@ -54,7 +54,7 @@ make ddp-train DEPTH=20 TARGET_FLOPS=1e18  # ~560M params
 make run-scaling-law  # Sweeps depths 6-14 and FLOP budgets 1e18-6e18
 ```
 
-📖 **See [docs/DEPTH_PARAMETERIZATION.md](docs/DEPTH_PARAMETERIZATION.md) for full documentation**
+📖 **See [docs/README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) for full documentation**
 
 ## Reproducing GPT-2 (124M)
 
@@ -287,6 +287,24 @@ Datasets:
 
 Evaluation:
 - [Mosaic Eval Gauntlet](https://www.mosaicml.com/blog/llm-evaluation-for-icl) - Comprehensive benchmark suite
+
+## Documentation
+
+Comprehensive guides are available in the `docs/` folder:
+
+| Guide | Description |
+|-------|-------------|
+| [README_OPTIMIZATION.md](docs/README_OPTIMIZATION.md) | **Complete optimization guide**: Understanding momentum, Nesterov, weight decay, and Muon optimizer from first principles. Includes practical tips, hyperparameters, and debugging strategies. |
+| [README_MUON.md](docs/README_MUON.md) | **Muon optimizer**: Second-order-ish optimizer using Newton-Schulz orthogonalization. Explains why we use separate optimizers for matrix vs. embedding parameters. |
+| [README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) | **Depth-based scaling**: How the single `DEPTH` parameter controls model architecture, automatic LR/WD scaling, and running scaling law experiments. |
+| [README_FLOPS_AND_ITERATIONS.md](docs/README_FLOPS_AND_ITERATIONS.md) | **FLOPs calculation**: How we calculate training FLOPs, convert between tokens/steps/FLOPs, and use `TARGET_FLOPS` for reproducible experiments. |
+| [README_ROPE.md](docs/README_ROPE.md) | **Rotary Position Embeddings (RoPE)**: How RoPE works, why it's better than absolute positional encodings, implementation details. |
+| [README_STABILITY.md](docs/README_STABILITY.md) | **Training stability**: Gradient clipping, QK-Layernorm, Z-loss regularization, and other techniques for stable training at scale. |
+| [README_MULTIPLEX.md](docs/README_MULTIPLEX.md) | **Multiplex dataloader**: How we combine multiple datasets (SmolTalk, MMLU, GSM8K) with weighted sampling for mid-training. |
+| [README_CHATCORE_EVALUATOR.md](docs/README_CHATCORE_EVALUATOR.md) | **ChatCORE evaluation**: Specialized benchmarks for instruction-tuned models (MT-Bench, AlpacaEval, IFEval, FLASK). |
+| [README_VLM_GUIDE.md](docs/README_VLM_GUIDE.md) | **Vision-Language Models**: Future extension guide for adding vision capabilities to the GPT model. |
+
+**Getting started?** Read [README_OPTIMIZATION.md](docs/README_OPTIMIZATION.md) to understand the training hyperparameters, then check [README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) for running scaling experiments.
 
 ## License
 

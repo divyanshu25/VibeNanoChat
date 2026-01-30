@@ -234,7 +234,7 @@ def load_checkpoint(
     checkpoint_path: str,
     model: torch.nn.Module,
     device: str,
-    optimizer: torch.optim.Optimizer = None,
+    optimizer=None,  # Single optimizer or list of optimizers
     master_process: bool = True,
     print_resume_info: bool = True,
 ) -> dict:
@@ -248,7 +248,7 @@ def load_checkpoint(
         checkpoint_path: Path to the checkpoint file
         model: Raw unwrapped model (not DDP/compile wrapped)
         device: Device to map the checkpoint to ('cuda', 'cpu', etc.)
-        optimizer: Optional optimizer to load state into
+        optimizer: Optional single optimizer or list of optimizers to load state into
         master_process: Whether this is the master process (for logging)
         print_resume_info: Whether to print resume info (False for rollover scenarios)
 
@@ -293,10 +293,43 @@ def load_checkpoint(
         print("✅ Model weights loaded")
 
     # Load optimizer state (optional, for resuming training)
-    if optimizer is not None and "optimizer" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        if master_process:
-            print("✅ Optimizer state loaded")
+    if optimizer is not None:
+        # Check if checkpoint has multiple optimizers (new format)
+        if "optimizers" in checkpoint:
+            optimizer_states = checkpoint["optimizers"]
+            if isinstance(optimizer, list):
+                # Load all optimizer states
+                if len(optimizer) != len(optimizer_states):
+                    raise ValueError(
+                        f"Optimizer count mismatch - "
+                        f"Checkpoint has {len(optimizer_states)} optimizers, "
+                        f"but model has {len(optimizer)} optimizers"
+                    )
+                for opt, state in zip(optimizer, optimizer_states):
+                    opt.load_state_dict(state)
+                if master_process:
+                    print(f"✅ {len(optimizer)} optimizer states loaded")
+            else:
+                # Single optimizer but checkpoint has multiple - load first one
+                optimizer.load_state_dict(optimizer_states[0])
+                if master_process:
+                    print(
+                        f"⚠️ Checkpoint has {len(optimizer_states)} optimizers, loaded first one only"
+                    )
+        # Backward compatibility: old checkpoints with single optimizer
+        elif "optimizer" in checkpoint:
+            if isinstance(optimizer, list):
+                # Model uses multiple optimizers but checkpoint has only one
+                optimizer[0].load_state_dict(checkpoint["optimizer"])
+                if master_process:
+                    print(
+                        "⚠️ Old checkpoint format: loaded state into first optimizer only"
+                    )
+            else:
+                # Single optimizer, old format
+                optimizer.load_state_dict(checkpoint["optimizer"])
+                if master_process:
+                    print("✅ Optimizer state loaded")
 
     # Extract training state
     result = {
@@ -330,7 +363,7 @@ def load_checkpoint(
 
 def save_checkpoint(
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer,  # Single optimizer or list of optimizers
     step: int,
     epoch: int,
     global_step: int,
@@ -352,7 +385,7 @@ def save_checkpoint(
 
     Args:
         model: Raw unwrapped model to save (not DDP/compile wrapped)
-        optimizer: Optimizer to save state from
+        optimizer: Single optimizer or list of optimizers to save state from
         step: Current step within epoch
         epoch: Current epoch number
         global_step: Global step across all epochs
@@ -374,16 +407,30 @@ def save_checkpoint(
     if not (master_process and should_save):
         return
 
-    # Save model state_dict (model should already be unwrapped)
-    checkpoint = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "config": model.config,
-        "step": step,
-        "epoch": epoch,
-        "global_step": global_step,
-        "val_loss": val_loss,
-    }
+    # Handle single optimizer or list of optimizers
+    if isinstance(optimizer, list):
+        # Save all optimizers (e.g., AdamW + Muon)
+        optimizer_states = [opt.state_dict() for opt in optimizer]
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizers": optimizer_states,  # New key for multiple optimizers
+            "config": model.config,
+            "step": step,
+            "epoch": epoch,
+            "global_step": global_step,
+            "val_loss": val_loss,
+        }
+    else:
+        # Save single optimizer (backward compatible)
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "config": model.config,
+            "step": step,
+            "epoch": epoch,
+            "global_step": global_step,
+            "val_loss": val_loss,
+        }
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
