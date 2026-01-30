@@ -24,7 +24,7 @@ class GPTConfig:
         64  # Multiplier for model_dim (model_dim = depth × aspect_ratio)
     )
     head_dim: int = (
-        128  # Target dimension per attention head (for Flash Attention efficiency)
+        64  # Target dimension per attention head (for Flash Attention efficiency)
     )
 
     # ========================================================================
