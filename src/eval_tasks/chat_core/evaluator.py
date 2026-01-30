@@ -109,7 +109,7 @@ class ChatCoreEvaluator:
             if not hasattr(self.tokenizer, "_special_tokens"):
                 return False
 
-            # Try to get the required special tokens (NanoGPT format)
+            # Try to get the required special tokens (VibeNanoChat format)
             python_start = self.tokenizer._special_tokens["<|python|>"]
             python_end = self.tokenizer._special_tokens["<|python_end|>"]
             output_start = self.tokenizer._special_tokens["<|output_start|>"]

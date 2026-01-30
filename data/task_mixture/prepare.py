@@ -496,7 +496,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/mnt/localssd/NanoGPT/data/task_mixture",  # Local disk (mmap compatible)
+        default="/mnt/localssd/VibeNanoChat/data/task_mixture",  # Local disk (mmap compatible)
         help="Local directory to save processed data (must support mmap)",
     )
     parser.add_argument(

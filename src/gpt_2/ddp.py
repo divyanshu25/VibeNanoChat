@@ -243,7 +243,7 @@ def run_pretraining(
         mid_training=False,  # Use pretraining configuration
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
-        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
         depth=depth,
         aspect_ratio=aspect_ratio,
         head_dim=head_dim,
@@ -362,7 +362,7 @@ def run_midtraining(
         mid_training=True,  # Use mid-training configuration
         checkpoint_path=checkpoint_path,  # Resume from this checkpoint
         checkpoint_dir=checkpoint_dir,
-        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
         depth=depth,
         aspect_ratio=aspect_ratio,
         head_dim=head_dim,
@@ -476,7 +476,7 @@ def run_sft(
         sft_training=True,  # Use SFT configuration
         checkpoint_path=checkpoint_path,  # Rollover from mid-training checkpoint
         checkpoint_dir=checkpoint_dir,
-        token_bytes_path="/mnt/localssd/NanoGPT/data/token_bytes.pt",
+        token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
         depth=depth,
         aspect_ratio=aspect_ratio,
         head_dim=head_dim,

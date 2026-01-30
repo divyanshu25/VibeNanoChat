@@ -6,13 +6,13 @@ After=network.target
 Type=notify
 User=colligo
 Group=colligo
-WorkingDirectory=/mnt/localssd/NanoGPT
-Environment="PATH=/mnt/localssd/NanoGPT/.venv/bin:/usr/local/bin:/usr/bin"
+WorkingDirectory=/mnt/localssd/VibeNanoChat
+Environment="PATH=/mnt/localssd/VibeNanoChat/.venv/bin:/usr/local/bin:/usr/bin"
 Environment="LOG_LEVEL=info"
 Environment="CHAT_SERVER_PORT=8003"
 
 # Gunicorn with uvicorn workers for FastAPI/ASGI
-ExecStart=/mnt/localssd/NanoGPT/.venv/bin/gunicorn \
+ExecStart=/mnt/localssd/VibeNanoChat/.venv/bin/gunicorn \
     --config chat_ui/gunicorn_config.py \
     chat_ui.asgi:application
 
@@ -28,7 +28,7 @@ LimitNPROC=512
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=nanogpt-chat
+SyslogIdentifier=vibenanochat
 
 [Install]
 WantedBy=multi-user.target

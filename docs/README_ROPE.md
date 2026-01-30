@@ -4,7 +4,7 @@
 
 Position information is critical for language models. Without it, "The cat chased the mouse" would be indistinguishable from "The mouse chased the cat". But *how* we encode position has evolved significantly.
 
-This document explains **RoPE (Rotary Position Embeddings)**, the modern approach to position encoding used in LLaMA, GPT-NeoX, PaLM, and this NanoGPT implementation. We'll start from the original GPT-2 approach, understand its limitations, and see why RoPE is a significant improvement.
+This document explains **RoPE (Rotary Position Embeddings)**, the modern approach to position encoding used in LLaMA, GPT-NeoX, PaLM, and this VibeNanoChat implementation. We'll start from the original GPT-2 approach, understand its limitations, and see why RoPE is a significant improvement.
 
 ## The Old Way: Learned Positional Embeddings (GPT-2 Style)
 
