@@ -130,7 +130,7 @@ gpu-status: ## Show current GPU utilization and memory usage
 # Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=12 TARGET_FLOPS=1e18
 # Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
 # Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500]
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500] [NO_MUON=false]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
 	@NGPUS=$${NGPUS:-4}; \
@@ -139,6 +139,7 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	VAL_EVALS=$${VAL_EVALS:-true}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
 	CHATCORE_EVALS=$${CHATCORE_EVALS:-false}; \
+	NO_MUON=$${NO_MUON:-false}; \
 	DEPTH=$${DEPTH:-}; \
 	ASPECT_RATIO=$${ASPECT_RATIO:-64}; \
 	HEAD_DIM=$${HEAD_DIM:-128}; \
@@ -168,6 +169,12 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		echo "💬 ChatCore evaluations enabled"; \
 		CMD="$$CMD --run-chatcore-evals"; \
 	fi; \
+	if [ "$$NO_MUON" = "true" ]; then \
+		echo "🚫 Muon optimizer disabled (using AdamW-only)"; \
+		CMD="$$CMD --no-muon"; \
+	else \
+		echo "⚡ Muon optimizer enabled (hybrid AdamW+Muon)"; \
+	fi; \
 	if [ -n "$$DEPTH" ]; then \
 		echo "📐 Using depth-based architecture: depth=$$DEPTH (aspect_ratio=$$ASPECT_RATIO, head_dim=$$HEAD_DIM)"; \
 		CMD="$$CMD --depth $$DEPTH --aspect-ratio $$ASPECT_RATIO --head-dim $$HEAD_DIM"; \
@@ -184,18 +191,25 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	eval $$CMD 2>&1 | tee $$LOG_FILE
 
 
-run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep
+run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep. Usage: make run-scaling-law [NO_MUON=true]
 	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
 	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
-	@for FLOPS in 1e18 3e18 6e18; do \
+	@NO_MUON_ARG=""; \
+	if [ "$${NO_MUON}" = "true" ]; then \
+		NO_MUON_ARG="NO_MUON=true"; \
+		echo "🚫 Muon optimizer disabled for all runs"; \
+	else \
+		echo "⚡ Muon optimizer enabled for all runs"; \
+	fi; \
+	for FLOPS in 3e18 6e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 6 8 10 12 14 16 18; do \
+		for DEPTH in 14 16 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
-			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100|| exit 1; \
+			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100 $$NO_MUON_ARG || exit 1; \
 			echo "  🧹 Cleaning up GPUs..."; \
 			$(MAKE) kill-gpu; \
 			sleep 20; \

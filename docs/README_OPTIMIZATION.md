@@ -233,6 +233,48 @@ class MomentumSGD:
                 p.grad.zero_()
 ```
 
+### Two Momentum Conventions: Unnormalized vs Normalized
+
+**Important Note**: There are two common ways to implement momentum, and they behave differently!
+
+**Unnormalized (shown above - simpler to teach):**
+```python
+velocity = momentum * velocity + gradient
+theta = theta - lr * velocity
+```
+
+**Normalized (used in modern optimizers like PyTorch and our Muon implementation):**
+```python
+velocity = momentum * velocity + (1 - momentum) * gradient
+theta = theta - lr * velocity
+```
+
+**Why the difference matters:**
+
+The `(1 - momentum)` factor normalizes the velocity to keep it roughly the same magnitude regardless of the momentum value.
+
+- **Without normalization**: In steady state with constant gradients `g`, velocity grows to `g / (1 - β)`, which explodes as β → 1
+- **With normalization**: In steady state, velocity converges to `g`, independent of β
+
+This means:
+- **Unnormalized**: Changing momentum requires retuning learning rate (effective LR = lr / (1 - momentum))
+- **Normalized**: Learning rate stays roughly constant across different momentum values (more robust)
+
+**Example with momentum = 0.95:**
+```python
+# Unnormalized: velocity ≈ 20× the gradient in steady state (1/0.05 = 20)
+v = 0.95·v + g  →  v_steady ≈ 20g
+
+# Normalized: velocity ≈ 1× the gradient in steady state
+v = 0.95·v + 0.05·g  →  v_steady ≈ g
+```
+
+**Which to use?**
+- **Unnormalized**: Better for teaching concepts, used in older papers
+- **Normalized**: Better for practice, used in modern implementations
+
+Throughout the rest of this README, we use the **normalized** convention for actual code, since that's what PyTorch and Muon use.
+
 ### Typical Momentum Values
 
 - `momentum = 0.0`: No momentum (vanilla SGD)
@@ -318,13 +360,15 @@ class NesterovSGD:
             grad = p.grad.data
             v = self.velocity[p]
             
-            # Update velocity
-            v = self.momentum * v + grad
+            # Update velocity (normalized form)
+            # Note: This is (1-momentum)*grad for normalized momentum
+            v = self.momentum * v + (1 - self.momentum) * grad
             self.velocity[p] = v
             
             # Nesterov update: use combination of velocity and gradient
             # This is mathematically equivalent to the lookahead form
-            p.data = p.data - self.lr * (self.momentum * v + grad)
+            nesterov_grad = (1 - self.momentum) * grad + self.momentum * v
+            p.data = p.data - self.lr * nesterov_grad
 ```
 
 ### Why Nesterov is Better
@@ -437,7 +481,9 @@ Muon combines:
 
 ```python
 def muon_step(params, grads, state, lr=0.02, momentum=0.95, weight_decay=0.1):
-    # Step 1: Nesterov momentum
+    # Step 1: Nesterov momentum (normalized form)
+    # Note the (1 - momentum) factor - this keeps velocity magnitude stable
+    # regardless of momentum value. See "Two Momentum Conventions" above.
     velocity = momentum * velocity + (1 - momentum) * grads
     nesterov_grad = (1 - momentum) * grads + momentum * velocity
     
@@ -451,6 +497,16 @@ def muon_step(params, grads, state, lr=0.02, momentum=0.95, weight_decay=0.1):
     
     return params
 ```
+
+**Why (1 - momentum) in Muon?**
+
+Muon uses the **normalized momentum convention** for three key reasons:
+
+1. **Stable learning rate**: When we tune `lr=0.02`, it works across different momentum values (0.85 → 0.95 warmup)
+2. **Momentum warmup robustness**: As momentum increases from 0.85 to 0.95, the update magnitude stays consistent
+3. **PyTorch compatibility**: Matches the convention used in `torch.optim.SGD(nesterov=True)`
+
+Without the `(1 - momentum)` factor, increasing momentum from 0.85 to 0.95 would effectively reduce the learning rate by 3× (0.15 → 0.05), requiring complex LR compensation.
 
 ### Key Hyperparameters in Our Code
 
@@ -591,6 +647,7 @@ Our schedules (momentum warmup, weight decay decay) try to get the best of both 
 1. **Momentum = exponential moving average of gradients**
    - Smooths out noise, accelerates in consistent directions
    - Higher momentum = smoother but slower to adapt
+   - **Important**: We use normalized form `v = β·v + (1-β)·g` to keep effective LR stable
 
 2. **Nesterov = look before you leap**
    - Computes gradient at predicted next position

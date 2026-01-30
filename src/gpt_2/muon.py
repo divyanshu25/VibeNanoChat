@@ -64,15 +64,27 @@ def muon_step_fused(
     # Update the momentum buffer with a weighted average of current gradient
     # momentum_buffer = momentum * momentum_buffer + (1 - momentum) * grad
     # Then compute Nesterov-style update: g = (1-momentum)*grad + momentum*momentum_buffer
+    #
+    # This expands to: g = G(1 - M²) + M² * V_old
+    # With M=0.95: ~10% current gradient, ~90% accumulated history
+    #
+    # NOTE: .float() cast on lerp_ weight parameter is required for torch.compile with inductor backend
+    # in PyTorch 2.6+. The 'weight' parameter in lerp_(x, weight) must be float32, even when tensors are bfloat16.
+    # Performance impact: Negligible (~0 overhead, just scalar dtype conversions, not on critical path).
+    # To avoid .float(): (1) Don't use torch.compile, OR (2) Use eager mode with torch._dynamo.config.suppress_errors=True,
+    # OR (3) Wait for PyTorch to relax this dtype restriction in future versions.
     momentum = momentum_t.to(stacked_grads.dtype)
-    momentum_buffer.lerp_(stacked_grads, 1 - momentum)  # lerp(a, b, w) = a + w*(b - a)
-    g = stacked_grads.lerp_(
-        momentum_buffer, momentum
-    )  # Blend gradient with momentum buffer
+    momentum_buffer.lerp_(
+        stacked_grads, (1 - momentum).float()
+    )  # lerp(a, b, w) = a + w*(b - a)
+    g = stacked_grads.lerp_(momentum_buffer, momentum.float())  # Nesterov blend
 
     # ==================== Step 2: Polar Express Orthogonalization ====================
-    # Orthogonalize the gradient matrix using iterative Polar Express method
-    # This ensures the update direction has orthonormal columns/rows
+    # Orthogonalize the gradient matrix using iterative Polar Express method.
+    # This ensures the update direction has orthonormal columns/rows, which:
+    # - Reduces correlations between gradient components
+    # - Improves conditioning of the optimization landscape
+    # - Provides implicit regularization toward well-conditioned transformations
     X = g.bfloat16()  # Convert to bfloat16 for efficiency
 
     # Work with the narrow dimension: if tall matrix (rows > cols), transpose
@@ -96,23 +108,24 @@ def muon_step_fused(
     g = X  # Now g is approximately orthogonalized
 
     # ==================== Step 3: Variance Reduction (Adaptive Learning Rate) ====================
-    # Similar to Adam's adaptive learning rate, but factored per-row or per-column
-    # This scales the update based on the historical variance of gradients
+    # Similar to Adam's adaptive learning rate, but factored per-row or per-column.
+    # This scales the update based on the historical variance of gradients while:
+    # - Saving memory (factored representation instead of full matrix)
+    # - Preserving gradient norm (unlike standard Adam)
     beta2 = beta2_t.to(g.dtype)
 
     # Compute variance along the reduction dimension (either rows or cols)
-    v_mean = (
-        g.float().square().mean(dim=red_dim, keepdim=True)
-    )  # Mean of squared values
-    red_dim_size = g.size(red_dim)  # Size of the reduction dimension
+    v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
+    red_dim_size = g.size(red_dim)
 
     # Calculate the norm of the current gradient
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
     v_norm = v_norm_sq.sqrt()
 
     # Update exponential moving average of variance (like Adam's second moment)
+    # NOTE: .float() required for torch.compile (PyTorch 2.6+) - see comment in Step 1 above
     second_momentum_buffer.lerp_(
-        v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2
+        v_mean.to(dtype=second_momentum_buffer.dtype), (1 - beta2).float()
     )
 
     # Compute adaptive step size (inverse sqrt of variance, similar to Adam)
@@ -127,13 +140,13 @@ def muon_step_fused(
     g = g * final_scale.to(g.dtype)  # Apply adaptive scaling
 
     # ==================== Step 4: Cautious Weight Decay + Parameter Update ====================
-    # "Cautious" means only apply weight decay where gradient and parameter agree in sign
-    # This prevents weight decay from fighting against the gradient direction
+    # "Cautious" means only apply weight decay where gradient and parameter agree in sign.
+    # This prevents weight decay from fighting against the gradient direction, which can
+    # slow down training or cause instability.
     lr = lr_t.to(g.dtype)
     wd = wd_t.to(g.dtype)
 
     # Create mask: True where gradient and parameter have same sign
-    # This identifies parameters where weight decay would move in same direction as gradient
     mask = (g * stacked_params) >= 0
 
     # Update parameters: param -= lr * gradient + lr * weight_decay * param * mask
@@ -141,375 +154,440 @@ def muon_step_fused(
     stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
 
 
-class Muon(torch.optim.Optimizer):
+# ==============================================================================
+# Combined MuonAdamW Optimizer (Nanochat-style)
+# ==============================================================================
+# This combines both AdamW and Muon into a single optimizer with unified
+# parameter groups. Enables nanochat-style training without DDP wrapper.
+
+
+@torch.compile(dynamic=False, fullgraph=True)
+def adamw_step_fused(
+    p: Tensor,  # parameter tensor
+    grad: Tensor,  # gradient, same shape as p
+    exp_avg: Tensor,  # first moment, same shape as p
+    exp_avg_sq: Tensor,  # second moment, same shape as p
+    step_t: Tensor,  # 0-D CPU tensor, step count
+    lr_t: Tensor,  # 0-D CPU tensor, learning rate
+    beta1_t: Tensor,  # 0-D CPU tensor, beta1
+    beta2_t: Tensor,  # 0-D CPU tensor, beta2
+    eps_t: Tensor,  # 0-D CPU tensor, epsilon
+    wd_t: Tensor,  # 0-D CPU tensor, weight decay
+) -> None:
     """
-    Muon - MomentUm Orthogonalized by Newton-schulz
+    Fused AdamW step: weight_decay -> momentum_update -> bias_correction -> param_update
+    All in one compiled graph to eliminate Python overhead between ops.
+    The 0-D CPU tensors avoid recompilation when hyperparameter values change.
+    """
+    # Weight decay (decoupled, applied before the update)
+    p.mul_(1 - lr_t * wd_t)
+    # Update running averages (lerp_ is cleaner and fuses well)
+    # NOTE: .float() required for torch.compile (PyTorch 2.6+) - lerp_ weight param must be float32
+    exp_avg.lerp_(grad, (1 - beta1_t).float())
+    exp_avg_sq.lerp_(grad.square(), (1 - beta2_t).float())
+    # Bias corrections
+    bias1 = 1 - beta1_t**step_t
+    bias2 = 1 - beta2_t**step_t
+    # Compute update and apply
+    denom = (exp_avg_sq / bias2).sqrt() + eps_t
+    step_size = lr_t / bias1
+    p.add_(exp_avg / denom, alpha=-step_size)
 
-    https://kellerjordan.github.io/posts/muon/
 
-    Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
-    processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
-    the advantage that it can be stably run in bfloat16 on the GPU.
+class MuonAdamW(torch.optim.Optimizer):
+    """
+    Combined optimizer: Muon for 2D matrix params, AdamW for others (single GPU).
 
-    Some warnings:
-    - This optimizer should not be used for the embedding layer, the final fully connected layer,
-    or any {0,1}-D parameters; those should all be optimized by a standard method (e.g., AdamW).
-    - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
+    This is the nanochat-style combined optimizer that handles both parameter
+    types in a single optimizer with unified parameter groups.
 
     Arguments:
-        lr: The learning rate used by the internal SGD.
-        momentum: The momentum used by the internal SGD.
-        ns_steps: The number of Newton-Schulz iteration steps to use.
-        beta2: The decay rate for the second moment (variance) estimate. Set to None to disable.
-        weight_decay: Cautious weight decay coefficient. Only decays where update and weight agree.
+        param_groups: List of dicts, each containing:
+            - 'params': List of parameters
+            - 'kind': 'adamw' or 'muon'
+            - For AdamW groups: 'lr', 'betas', 'eps', 'weight_decay'
+            - For Muon groups: 'lr', 'momentum', 'ns_steps', 'beta2', 'weight_decay'
     """
 
-    def __init__(
-        self, params, lr=0.02, momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=0.0
-    ):
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            ns_steps=ns_steps,
-            beta2=beta2,
-            weight_decay=weight_decay,
+    def __init__(self, param_groups: list[dict]):
+        super().__init__(param_groups, defaults={})
+        # 0-D CPU tensors to avoid torch.compile recompilation when values change
+        # AdamW tensors
+        self._adamw_step_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta1_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_eps_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        # Muon tensors
+        self._muon_momentum_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+
+    def _step_adamw(self, group: dict) -> None:
+        """AdamW update for each param in the group individually."""
+        for p in group["params"]:
+            if p.grad is None:
+                continue
+            grad = p.grad
+            state = self.state[p]
+
+            # State init
+            if not state:
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(p)
+                state["exp_avg_sq"] = torch.zeros_like(p)
+            exp_avg = state["exp_avg"]
+            exp_avg_sq = state["exp_avg_sq"]
+            state["step"] += 1
+
+            # Fill 0-D tensors with current values
+            self._adamw_step_t.fill_(state["step"])
+            self._adamw_lr_t.fill_(group["lr"])
+            self._adamw_beta1_t.fill_(group["betas"][0])
+            self._adamw_beta2_t.fill_(group["betas"][1])
+            self._adamw_eps_t.fill_(group["eps"])
+            self._adamw_wd_t.fill_(group["weight_decay"])
+
+            # Fused update
+            adamw_step_fused(
+                p,
+                grad,
+                exp_avg,
+                exp_avg_sq,
+                self._adamw_step_t,
+                self._adamw_lr_t,
+                self._adamw_beta1_t,
+                self._adamw_beta2_t,
+                self._adamw_eps_t,
+                self._adamw_wd_t,
+            )
+
+    def _step_muon(self, group: dict) -> None:
+        """Muon update for all params in the group (stacked for efficiency)."""
+        params: list[Tensor] = group["params"]
+        if not params:
+            return
+
+        # Get or create group-level buffers
+        p = params[0]
+        state = self.state[p]
+        num_params = len(params)
+        shape, device, dtype = p.shape, p.device, p.dtype
+
+        # Momentum buffer
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros(
+                num_params, *shape, dtype=dtype, device=device
+            )
+        momentum_buffer = state["momentum_buffer"]
+
+        # Second momentum buffer (factored)
+        if "second_momentum_buffer" not in state:
+            state_shape = (
+                (num_params, shape[-2], 1)
+                if shape[-2] >= shape[-1]
+                else (num_params, 1, shape[-1])
+            )
+            state["second_momentum_buffer"] = torch.zeros(
+                state_shape, dtype=dtype, device=device
+            )
+        second_momentum_buffer = state["second_momentum_buffer"]
+        red_dim = -1 if shape[-2] >= shape[-1] else -2
+
+        # Stack grads and params
+        stacked_grads = torch.stack([p.grad for p in params])
+        stacked_params = torch.stack(params)
+
+        # Fill 0-D tensors
+        self._muon_momentum_t.fill_(group["momentum"])
+        self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
+        self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
+        self._muon_wd_t.fill_(group["weight_decay"])
+
+        # Single fused kernel
+        muon_step_fused(
+            stacked_grads,
+            stacked_params,
+            momentum_buffer,
+            second_momentum_buffer,
+            self._muon_momentum_t,
+            self._muon_lr_t,
+            self._muon_wd_t,
+            self._muon_beta2_t,
+            group["ns_steps"],
+            red_dim,
         )
 
-        # Muon only works with 2D parameters (weight matrices)
-        assert all(p.ndim == 2 for p in params), "Muon expects 2D parameters only"
-        params = list(
-            params
-        )  # Ensure we have a list, not an e.g. (exhaustible) iterator
-
-        # Group parameters by shape so we can stack tensors efficiently
-        # Stacking allows batched operations across multiple parameters in a single kernel
-        shapes = sorted(
-            {p.shape for p in params}
-        )  # Get unique shapes, sorted for determinism
-        param_groups = []
-        for shape in shapes:
-            # All parameters with the same shape go into one group
-            group_params = [p for p in params if p.shape == shape]
-            param_groups.append(dict(params=group_params))
-        super().__init__(param_groups, defaults)
-
-        # Store hyperparameters as 0-D CPU tensors to avoid torch.compile recompilation
-        # When values change, torch.compile sees the tensor reference is the same, not a new Python float
-        self._momentum_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        # Copy back to original params
+        torch._foreach_copy_(params, list(stacked_params.unbind(0)))
 
     @torch.no_grad()
     def step(self):
-        # Process each parameter group (parameters are grouped by shape)
         for group in self.param_groups:
-            params: list[Tensor] = group["params"]
-            if not params:
+            if group["kind"] == "adamw":
+                self._step_adamw(group)
+            elif group["kind"] == "muon":
+                self._step_muon(group)
+            else:
+                raise ValueError(f"Unknown optimizer kind: {group['kind']}")
+
+
+class DistMuonAdamW(torch.optim.Optimizer):
+    """
+    Combined distributed optimizer: Muon for 2D matrix params, AdamW for others.
+
+    This is the nanochat-style optimizer that enables distributed training
+    WITHOUT using PyTorch's DDP wrapper. Gradient synchronization happens
+    inside the optimizer using manual reduce_scatter/all_gather operations.
+
+    Design Goals:
+    - Overlap communication with computation (async ops)
+    - Minimize memory by sharding optimizer states across ranks (ZeRO-2 style)
+    - No DDP wrapper needed - model stays unwrapped
+
+    Communication Pattern (3-phase async):
+        Phase 1: Launch all async reduce ops (reduce_scatter/all_reduce)
+        Phase 2: Wait for reduces, compute updates, launch gathers
+        Phase 3: Wait for gathers, copy back
+
+    Arguments:
+        param_groups: List of dicts, each containing:
+            - 'params': List of parameters
+            - 'kind': 'adamw' or 'muon'
+            - For AdamW groups: 'lr', 'betas', 'eps', 'weight_decay'
+            - For Muon groups: 'lr', 'momentum', 'ns_steps', 'beta2', 'weight_decay'
+    """
+
+    def __init__(self, param_groups: list[dict]):
+        super().__init__(param_groups, defaults={})
+        # 0-D CPU tensors to avoid torch.compile recompilation
+        self._adamw_step_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta1_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_eps_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._adamw_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_momentum_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+        self._muon_beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+
+    def _reduce_adamw(self, group: dict, world_size: int) -> dict:
+        """Launch async reduce ops for AdamW group."""
+        param_infos = {}
+        for p in group["params"]:
+            if p.grad is None:
                 continue
-
-            # ==================== Initialize State Buffers ====================
-            # Store optimizer state in the first parameter's state dict (for convenience)
-            state = self.state[params[0]]
-            num_params = len(
-                params
-            )  # e.g.: 12 (for a 12-layer model with same-shaped weights)
-            # e.g.: shape = (768, 3072), device = cuda:0, dtype = torch.float32
-            shape, device, dtype = params[0].shape, params[0].device, params[0].dtype
-
-            # Create first momentum buffer (full size for each parameter)
-            # This stores the momentum-averaged gradients
-            if "momentum_buffer" not in state:
-                state["momentum_buffer"] = torch.zeros(
-                    num_params, *shape, dtype=dtype, device=device
+            grad = p.grad
+            if p.numel() < 1024:
+                # Small params: all_reduce
+                future = dist.all_reduce(
+                    grad, op=dist.ReduceOp.AVG, async_op=True
+                ).get_future()
+                param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
+            else:
+                # Large params: reduce_scatter
+                rank_size = grad.shape[0] // world_size
+                grad_slice = torch.empty_like(grad[:rank_size])
+                future = dist.reduce_scatter_tensor(
+                    grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True
+                ).get_future()
+                param_infos[p] = dict(
+                    future=future, grad_slice=grad_slice, is_small=False
                 )
-            momentum_buffer = state["momentum_buffer"]  # e.g.: (12, 768, 3072)
+        return dict(param_infos=param_infos)
 
-            # Create second momentum buffer (factored to save memory)
-            # This stores variance estimates, but only per-row OR per-column (not full matrix)
-            if "second_momentum_buffer" not in state:
-                if shape[-2] >= shape[-1]:
-                    # Tall or square matrix: track variance per row
-                    state["second_momentum_buffer"] = torch.zeros(
-                        num_params, shape[-2], 1, dtype=dtype, device=device
-                    )
-                else:
-                    # Wide matrix: track variance per column
-                    state["second_momentum_buffer"] = torch.zeros(
-                        num_params, 1, shape[-1], dtype=dtype, device=device
-                    )
-            second_momentum_buffer = state[
-                "second_momentum_buffer"
-            ]  # e.g.: (12, 768, 1)
-            red_dim = (
-                -1 if shape[-2] >= shape[-1] else -2
-            )  # Which dimension to reduce over
+    def _reduce_muon(self, group: dict, world_size: int) -> dict:
+        """Launch async reduce op for Muon group."""
+        params = group["params"]
+        chunk_size = (len(params) + world_size - 1) // world_size
+        padded_num_params = chunk_size * world_size
+        p = params[0]
+        shape, device, dtype = p.shape, p.device, p.dtype
 
-            # ==================== Stack Parameters for Batched Processing ====================
-            # Stack all parameters and gradients into single tensors
-            # This allows processing all parameters in one fused kernel call
-            stacked_grads = torch.stack([p.grad for p in params])  # (12, 768, 3072)
-            stacked_params = torch.stack(params)  # (12, 768, 3072)
+        # Stack grads and zero-pad
+        grad_stack = torch.stack([p.grad for p in params if p.grad is not None])
+        stacked_grads = torch.empty(
+            padded_num_params, *shape, dtype=dtype, device=device
+        )
+        stacked_grads[: len(params)].copy_(grad_stack)
+        if len(params) < padded_num_params:
+            stacked_grads[len(params) :].zero_()
 
-            # ==================== Fill Hyperparameter Tensors ====================
-            # Update the 0-D CPU tensors with current hyperparameter values
-            self._momentum_t.fill_(group["momentum"])
-            self._beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
-            # Scale learning rate based on aspect ratio (helps with wide/tall matrices)
-            self._lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
-            self._wd_t.fill_(group["weight_decay"])
+        # Reduce_scatter
+        grad_chunk = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
+        future = dist.reduce_scatter_tensor(
+            grad_chunk, stacked_grads, op=dist.ReduceOp.AVG, async_op=True
+        ).get_future()
 
-            # ==================== Execute Fused Update ====================
-            # Single compiled kernel does: momentum -> orthogonalization -> variance_reduction -> update
+        return dict(
+            future=future,
+            grad_chunk=grad_chunk,
+            stacked_grads=stacked_grads,
+            chunk_size=chunk_size,
+        )
+
+    def _compute_adamw(
+        self, group: dict, info: dict, gather_list: list, rank: int, world_size: int
+    ) -> None:
+        """Wait for reduce, compute AdamW updates, launch gathers for large params."""
+        param_infos = info["param_infos"]
+        for p in group["params"]:
+            if p not in param_infos:
+                continue
+            pinfo = param_infos[p]
+            pinfo["future"].wait()
+            grad_slice = pinfo["grad_slice"]
+            state = self.state[p]
+
+            # For small params, operate on full param; for large, operate on slice
+            if pinfo["is_small"]:
+                p_slice = p
+            else:
+                rank_size = p.shape[0] // world_size
+                p_slice = p[rank * rank_size : (rank + 1) * rank_size]
+
+            # State init
+            if not state:
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(p_slice)
+                state["exp_avg_sq"] = torch.zeros_like(p_slice)
+            state["step"] += 1
+
+            # Fill 0-D tensors and run fused kernel
+            self._adamw_step_t.fill_(state["step"])
+            self._adamw_lr_t.fill_(group["lr"])
+            self._adamw_beta1_t.fill_(group["betas"][0])
+            self._adamw_beta2_t.fill_(group["betas"][1])
+            self._adamw_eps_t.fill_(group["eps"])
+            self._adamw_wd_t.fill_(group["weight_decay"])
+            adamw_step_fused(
+                p_slice,
+                grad_slice,
+                state["exp_avg"],
+                state["exp_avg_sq"],
+                self._adamw_step_t,
+                self._adamw_lr_t,
+                self._adamw_beta1_t,
+                self._adamw_beta2_t,
+                self._adamw_eps_t,
+                self._adamw_wd_t,
+            )
+
+            # Large params need all_gather
+            if not pinfo["is_small"]:
+                future = dist.all_gather_into_tensor(
+                    p, p_slice, async_op=True
+                ).get_future()
+                gather_list.append(dict(future=future, params=None))
+
+    def _compute_muon(
+        self, group: dict, info: dict, gather_list: list, rank: int
+    ) -> None:
+        """Wait for reduce, compute Muon updates, launch gather."""
+        info["future"].wait()
+        params = group["params"]
+        chunk_size = info["chunk_size"]
+        grad_chunk = info["grad_chunk"]
+        p = params[0]
+        shape, device, dtype = p.shape, p.device, p.dtype
+
+        # How many params does this rank own?
+        start_idx = rank * chunk_size
+        num_owned = min(chunk_size, max(0, len(params) - start_idx))
+
+        # Get or create group-level state
+        state = self.state[p]
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros(
+                chunk_size, *shape, dtype=dtype, device=device
+            )
+        if "second_momentum_buffer" not in state:
+            state_shape = (
+                (chunk_size, shape[-2], 1)
+                if shape[-2] >= shape[-1]
+                else (chunk_size, 1, shape[-1])
+            )
+            state["second_momentum_buffer"] = torch.zeros(
+                state_shape, dtype=dtype, device=device
+            )
+        red_dim = -1 if shape[-2] >= shape[-1] else -2
+
+        # Build output buffer for all_gather
+        updated_params = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
+
+        if num_owned > 0:
+            owned_params = [params[start_idx + i] for i in range(num_owned)]
+            stacked_owned = torch.stack(owned_params)
+
+            # Fill 0-D tensors and run fused kernel
+            self._muon_momentum_t.fill_(group["momentum"])
+            self._muon_beta2_t.fill_(group["beta2"])
+            self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
+            self._muon_wd_t.fill_(group["weight_decay"])
             muon_step_fused(
-                stacked_grads,
-                stacked_params,
-                momentum_buffer,
-                second_momentum_buffer,
-                self._momentum_t,
-                self._lr_t,
-                self._wd_t,
-                self._beta2_t,
+                grad_chunk[:num_owned],
+                stacked_owned,
+                state["momentum_buffer"][:num_owned],
+                state["second_momentum_buffer"][:num_owned],
+                self._muon_momentum_t,
+                self._muon_lr_t,
+                self._muon_wd_t,
+                self._muon_beta2_t,
                 group["ns_steps"],
                 red_dim,
             )
+            updated_params[:num_owned].copy_(stacked_owned)
 
-            # ==================== Copy Updated Parameters Back ====================
-            # Unstack and copy updated parameters back to original parameter tensors
-            # torch._foreach_copy_ is an efficient batched copy operation
-            torch._foreach_copy_(params, list(stacked_params.unbind(0)))
+        if num_owned < chunk_size:
+            updated_params[num_owned:].zero_()
 
-
-class DistMuon(torch.optim.Optimizer):
-    """
-    Distributed version of the Muon optimizer.
-
-    Uses a 3-phase approach:
-    1. reduce_scatter: Each rank receives averaged gradients for its parameter chunk
-    2. Local update: Each rank updates its owned parameters
-    3. all_gather: Broadcast updated parameters back to all ranks
-
-    This distributes both computation and memory across ranks.
-    """
-
-    def __init__(
-        self,
-        params,
-        lr: float = 0.02,
-        momentum: float = 0.95,
-        ns_steps: int = 5,
-        beta2: float = 0.95,
-        weight_decay: float = 0.0,
-    ):
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            ns_steps=ns_steps,
-            beta2=beta2,
-            weight_decay=weight_decay,
+        # Reuse stacked_grads buffer for all_gather output
+        stacked_params = info["stacked_grads"]
+        future = dist.all_gather_into_tensor(
+            stacked_params, updated_params, async_op=True
+        ).get_future()
+        gather_list.append(
+            dict(future=future, stacked_params=stacked_params, params=params)
         )
 
-        # Muon only works with 2D parameters (weight matrices)
-        assert all(p.ndim == 2 for p in params), "Muon expects 2D parameters only"
-        params = list(params)
-
-        # Get distributed training info
-        world_size = dist.get_world_size()  # Number of GPUs/processes
-        rank = dist.get_rank()  # This process's rank (0 to world_size-1)
-
-        # Group parameters by shape for efficient batched operations
-        shapes = sorted(
-            {p.shape for p in params}
-        )  # Sort for deterministic ordering across ranks
-        param_groups = []
-        for shape in shapes:
-            group_params = [p for p in params if p.shape == shape]
-            device, dtype = group_params[0].device, group_params[0].dtype
-            # Ensure all params in group have same device/dtype
-            assert all(p.device == device for p in group_params)
-            assert all(p.dtype == dtype for p in group_params)
-
-            # Compute chunk size: how many parameters each rank will own and update
-            # Ceiling division ensures we allocate enough space even if not evenly divisible
-            chunk_size = (len(group_params) + world_size - 1) // world_size
-            if rank == 0:
-                print(
-                    f"Muon: {len(group_params)} params of shape {shape}, chunk_size={chunk_size}"
+    def _finish_gathers(self, gather_list: list) -> None:
+        """Wait for all gathers and copy Muon params back."""
+        for info in gather_list:
+            info["future"].wait()
+            if info["params"] is not None:
+                # Muon: copy from stacked buffer back to individual params
+                torch._foreach_copy_(
+                    info["params"],
+                    list(info["stacked_params"][: len(info["params"])].unbind(0)),
                 )
-            param_groups.append(dict(params=group_params, chunk_size=chunk_size))
-        super().__init__(param_groups, defaults)
-
-        # Store hyperparameters as 0-D CPU tensors to avoid torch.compile recompilation
-        self._momentum_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._lr_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._wd_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-        self._beta2_t = torch.tensor(0.0, dtype=torch.float32, device="cpu")
 
     @torch.no_grad()
     def step(self):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        # Ensure all grads exist
-        assert all(
-            p.grad is not None for group in self.param_groups for p in group["params"]
-        ), "All params must have grads"
-
-        # ==================== PHASE 1: Stack Gradients and Launch reduce_scatter ====================
-        # For each parameter group, stack gradients and start async communication
-        # reduce_scatter: Each rank gets the average of one chunk of parameters
-        group_infos = []
+        # Phase 1: launch all async reduce ops
+        reduce_infos: list[dict] = []
         for group in self.param_groups:
-            params: list[Tensor] = group["params"]
-            chunk_size = group["chunk_size"]
-            padded_num_params = chunk_size * world_size  # Total params after padding
-            shape = params[0].shape
-            device, dtype = params[0].device, params[0].dtype
+            if group["kind"] == "adamw":
+                reduce_infos.append(self._reduce_adamw(group, world_size))
+            elif group["kind"] == "muon":
+                reduce_infos.append(self._reduce_muon(group, world_size))
+            else:
+                raise ValueError(f"Unknown optimizer kind: {group['kind']}")
 
-            # Stack all gradients into a single tensor (single efficient kernel via torch.stack)
-            grad_stack = torch.stack([p.grad for p in params])
-            stacked_grads = torch.empty(
-                padded_num_params, *shape, dtype=dtype, device=device
-            )
-            stacked_grads[: len(params)].copy_(grad_stack)
+        # Phase 2: wait for reduces, compute updates, launch gathers
+        gather_list: list[dict] = []
+        for group, info in zip(self.param_groups, reduce_infos):
+            if group["kind"] == "adamw":
+                self._compute_adamw(group, info, gather_list, rank, world_size)
+            elif group["kind"] == "muon":
+                self._compute_muon(group, info, gather_list, rank)
+            else:
+                raise ValueError(f"Unknown optimizer kind: {group['kind']}")
 
-            # Zero-pad if we have fewer params than padded size (for even distribution)
-            if len(params) < padded_num_params:
-                stacked_grads[len(params) :].zero_()
-
-            # Allocate output buffer for this rank's chunk of averaged gradients
-            grad_chunk = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
-
-            # Launch async reduce_scatter:
-            # - Each rank sends its stacked_grads to all ranks
-            # - Each rank receives averaged gradients for its assigned chunk
-            # - async_op=True means this returns immediately and runs in background
-            reduce_future = dist.reduce_scatter_tensor(
-                grad_chunk, stacked_grads, op=dist.ReduceOp.AVG, async_op=True
-            ).get_future()
-
-            # Store info for next phase
-            group_infos.append(
-                dict(
-                    grad_chunk=grad_chunk,  # Will be filled when reduce completes
-                    reduce_future=reduce_future,  # Handle to wait on
-                    stacked_grads=stacked_grads,  # Reuse this buffer for all_gather output later
-                )
-            )
-
-        # ==================== PHASE 2: Wait for Reduce, Update Owned Parameters, Launch all_gather ====================
-        # Each rank updates only its assigned chunk of parameters, then starts broadcasting results
-        all_gather_futures = []
-        for group, info in zip(self.param_groups, group_infos):
-            # Wait for reduce_scatter to complete - now grad_chunk contains averaged gradients
-            info["reduce_future"].wait()
-
-            params = group["params"]
-            chunk_size = group["chunk_size"]
-            shape = params[0].shape
-            device, dtype = params[0].device, params[0].dtype
-            grad_chunk = info["grad_chunk"]
-
-            # Determine which parameters this rank owns
-            # Example: 12 params, 4 ranks, chunk_size=3
-            #   rank 0: params 0-2, rank 1: params 3-5, rank 2: params 6-8, rank 3: params 9-11
-            start_idx = rank * chunk_size
-            num_owned = min(chunk_size, max(0, len(params) - start_idx))
-
-            # ==================== Initialize State Buffers ====================
-            state = self.state[params[0]]
-
-            # First momentum buffer (for momentum-averaged gradients)
-            if "momentum_buffer" not in state:
-                state["momentum_buffer"] = torch.zeros(
-                    chunk_size, *shape, dtype=dtype, device=device
-                )
-            momentum_buffer = state["momentum_buffer"]
-
-            # Second momentum buffer (factored variance estimates)
-            if "second_momentum_buffer" not in state:
-                if shape[-2] >= shape[-1]:
-                    state["second_momentum_buffer"] = torch.zeros(
-                        chunk_size, shape[-2], 1, dtype=dtype, device=device
-                    )
-                else:
-                    state["second_momentum_buffer"] = torch.zeros(
-                        chunk_size, 1, shape[-1], dtype=dtype, device=device
-                    )
-            second_momentum_buffer = state["second_momentum_buffer"]
-            red_dim = -1 if shape[-2] >= shape[-1] else -2
-
-            # Allocate buffer for updated parameters (to be gathered across ranks)
-            updated_params = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
-
-            # ==================== Update Owned Parameters ====================
-            if num_owned > 0:
-                # Stack the parameters this rank owns
-                owned_params = [params[start_idx + i] for i in range(num_owned)]
-                stacked_owned_params = torch.stack(owned_params)
-
-                # Extract slices of buffers/grads corresponding to owned params
-                owned_grads = grad_chunk[:num_owned]
-                owned_momentum = momentum_buffer[:num_owned]
-                owned_second_momentum = second_momentum_buffer[:num_owned]
-
-                # Fill hyperparameter tensors
-                self._momentum_t.fill_(group["momentum"])
-                self._beta2_t.fill_(
-                    group["beta2"] if group["beta2"] is not None else 0.0
-                )
-                self._lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5)
-                self._wd_t.fill_(group["weight_decay"])
-
-                # Execute fused update on owned parameters only
-                muon_step_fused(
-                    owned_grads,
-                    stacked_owned_params,
-                    owned_momentum,
-                    owned_second_momentum,
-                    self._momentum_t,
-                    self._lr_t,
-                    self._wd_t,
-                    self._beta2_t,
-                    group["ns_steps"],
-                    red_dim,
-                )
-
-                # Copy updated params to output buffer
-                updated_params[:num_owned].copy_(stacked_owned_params)
-
-            # Zero-pad the rest (for ranks that own fewer params due to uneven division)
-            if num_owned < chunk_size:
-                updated_params[num_owned:].zero_()
-
-            # Reuse stacked_grads buffer for all_gather output (memory efficient!)
-            stacked_params = info["stacked_grads"]
-
-            # Launch async all_gather:
-            # - Each rank broadcasts its updated_params chunk to all other ranks
-            # - Result: every rank has all updated parameters
-            gather_future = dist.all_gather_into_tensor(
-                stacked_params, updated_params, async_op=True
-            ).get_future()
-
-            all_gather_futures.append(
-                dict(
-                    gather_future=gather_future,
-                    stacked_params=stacked_params,
-                    params=params,
-                )
-            )
-
-        # ==================== PHASE 3: Wait for all_gather and Copy Parameters Back ====================
-        # Wait for all parameter broadcasts to complete, then update local parameter tensors
-        for info in all_gather_futures:
-            # Wait for all_gather to complete - now stacked_params contains all updated params
-            info["gather_future"].wait()
-            stacked_params = info["stacked_params"]
-            params = info["params"]
-
-            # Copy gathered parameters back to original parameter tensors
-            # torch._foreach_copy_ is a batched operation (single kernel, more efficient)
-            # Only copy the actual parameters (not padding)
-            torch._foreach_copy_(params, list(stacked_params[: len(params)].unbind(0)))
+        # Phase 3: wait for gathers, copy back
+        self._finish_gathers(gather_list)

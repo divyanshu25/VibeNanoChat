@@ -43,7 +43,7 @@ class GPT(nn.Module):
     - Zero-initialized residual projections (pure skip connections at init)
     """
 
-    def __init__(self, config, master_process=True):
+    def __init__(self, config, master_process=True, pad_vocab_size_to=64):
         """
         Initialize GPT model with specified configuration.
 
@@ -55,16 +55,29 @@ class GPT(nn.Module):
                 - n_head: Number of attention heads per block
                 - block_size: Maximum sequence length (context window)
             master_process (bool): Whether this is the master process (for printing)
+            pad_vocab_size_to (int): Pad vocab size to multiple of this (for DDP efficiency)
         """
         super().__init__()
         self.config = config
         self.max_seq_len = config.block_size
 
+        # ===== Vocab Padding (Nanochat-style) =====
+        # Pad vocab for efficiency (DDP, tensor cores). Outputs are cropped in forward().
+        # This ensures embedding dimensions are divisible by common world_sizes
+        # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
+        self.padded_vocab_size = (
+            (config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to
+        ) * pad_vocab_size_to
+        if master_process and self.padded_vocab_size != config.vocab_size:
+            print(
+                f"Padding vocab_size from {config.vocab_size} to {self.padded_vocab_size} for efficiency (DDP/distributed)"
+            )
+
         # ===== Transformer Core Components =====
         self.transformer = nn.ModuleDict(
             dict(
-                # Token embeddings: vocab indices -> dense vectors
-                wte=nn.Embedding(config.vocab_size, config.n_embed),
+                # Token embeddings: vocab indices -> dense vectors (use padded vocab size)
+                wte=nn.Embedding(self.padded_vocab_size, config.n_embed),
                 # NOTE: No learned position embeddings (using RoPE instead)
                 # Transformer blocks: self-attention + feedforward
                 # Each block has a layer_idx for proper KV cache coordination
@@ -93,7 +106,8 @@ class GPT(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
 
         # ===== Language Modeling Head =====
-        self.lm_head = nn.Linear(config.n_embed, config.vocab_size, bias=False)
+        # Use padded vocab size (will crop to actual vocab_size in forward)
+        self.lm_head = nn.Linear(config.n_embed, self.padded_vocab_size, bias=False)
 
         # ===== Weight Initialization =====
         self.apply(self._init_weights)
@@ -303,10 +317,27 @@ class GPT(nn.Module):
             return optimizer
 
         # ===== Strategy 2: AdamW + Muon Hybrid (Nanochat-style) =====
+        # This hybrid approach uses a SINGLE COMBINED optimizer with different
+        # optimization strategies for different parameter types:
+        # - Muon: For transformer weight matrices (where Newton-Schulz preconditioning shines)
+        # - AdamW: For embeddings, output head, and 1D params (where adaptive LR is better)
         else:
-            from gpt_2.muon import DistMuon, Muon
+            from gpt_2.muon import DistMuonAdamW, MuonAdamW
 
-            # Partition parameters by location and type
+            # ========== STEP 1: Partition Parameters by Type ==========
+            # Different parameter types have different optimization characteristics:
+            #
+            # MUON CANDIDATES (2D weight matrices in transformer blocks):
+            # - Attention projections (Q, K, V, output)
+            # - MLP weight matrices (up_proj, down_proj)
+            # - These benefit from Newton-Schulz orthogonalization
+            # - Typically the bulk of trainable parameters (~90%+)
+            #
+            # ADAMW CANDIDATES (everything else):
+            # - Embeddings: High-variance sparse updates (only touched tokens get gradients)
+            # - Output head: Similar to embeddings, needs adaptive per-parameter learning
+            # - 1D params (biases, LayerNorm): Too small for Newton-Schulz, use adaptive LR
+
             matrix_params = []  # Transformer block 2D weights → Muon
             embedding_params = []  # Token/position embeddings → AdamW
             lm_head_params = []  # Output projection → AdamW
@@ -317,19 +348,24 @@ class GPT(nn.Module):
                     continue
 
                 if "transformer.h." in name and param.dim() == 2:
-                    # Transformer block weight matrices → Muon
+                    # Transformer block weight matrices (e.g., attn.c_attn.weight, mlp.c_fc.weight)
+                    # These are dense, frequently updated, and benefit from Muon's preconditioning
                     matrix_params.append(param)
                 elif "wte" in name or "wpe" in name:
-                    # Embedding layers → AdamW
+                    # Word token embeddings (wte) and word position embeddings (wpe)
+                    # Sparse updates (only active tokens) → needs adaptive per-embedding LR
                     embedding_params.append(param)
                 elif "lm_head" in name:
-                    # Language model head → AdamW
+                    # Language model head (final projection to vocabulary)
+                    # Similar gradient pattern to embeddings → AdamW works better
                     lm_head_params.append(param)
                 else:
-                    # Everything else (biases, etc.) → AdamW
+                    # Everything else: biases, LayerNorm weights/biases, etc.
+                    # 1D parameters → no benefit from Newton-Schulz, use AdamW
                     other_params.append(param)
 
-            # Log parameter distribution
+            # ========== STEP 2: Log Parameter Distribution ==========
+            # Verify that parameters are correctly partitioned (useful for debugging)
             if master_process:
                 print(
                     f"Muon: {len(matrix_params)} matrix params, {sum(p.numel() for p in matrix_params):,} parameters"
@@ -344,7 +380,20 @@ class GPT(nn.Module):
                     f"AdamW: {len(other_params)} other params, {sum(p.numel() for p in other_params):,} parameters"
                 )
 
-            # Use nanochat-style learning rates if provided, otherwise fall back to defaults
+            # ========== STEP 3: Configure Learning Rates ==========
+            # Nanochat-style: Different LRs for different parameter types
+            # This allows fine-grained control over optimization dynamics
+            #
+            # Nanochat defaults (aggressive, well-tuned):
+            # - matrix_lr (Muon): 0.02 - Muon's preconditioning allows stable high LR
+            # - embedding_lr: 0.3 - High LR for fast adaptation (sparse updates)
+            # - unembedding_lr: 0.004 - Lower for output stability
+            # - scalar_lr: 0.5 - Very high for biases/LayerNorm (quick adjustments)
+            #
+            # These are much higher than typical AdamW rates because:
+            # - AdamW's adaptive per-parameter scaling provides built-in safety
+            # - Muon's orthogonalization prevents instability at high LRs
+
             _unembedding_lr = (
                 unembedding_lr if unembedding_lr is not None else learning_rate
             )
@@ -352,61 +401,85 @@ class GPT(nn.Module):
             _matrix_lr = matrix_lr if matrix_lr is not None else muon_lr
             _scalar_lr = scalar_lr if scalar_lr is not None else learning_rate
 
-            # Configure AdamW for embeddings, output head, and 1D params (nanochat-style)
-            # Note: weight decay handled by Muon for transformer blocks
-            adam_groups = [
+            # ========== STEP 4: Build Combined Parameter Groups (Nanochat-style) ==========
+            # Create unified parameter groups for the combined optimizer.
+            # Each group specifies its 'kind' (adamw or muon) and gets appropriate
+            # hyperparameters.
+            #
+            # Why unified param_groups?
+            # - Single optimizer.step() call handles all parameters
+            # - Simplified LR scheduling (single scheduler for all groups)
+            # - Better integration with distributed training (no DDP wrapper needed)
+
+            param_groups = [
+                # AdamW groups (embeddings, lm_head, scalars)
                 {
                     "params": lm_head_params,
                     "lr": _unembedding_lr,
                     "initial_lr": _unembedding_lr,
+                    "betas": (adam_beta1, adam_beta2),
+                    "eps": 1e-8,
+                    "weight_decay": 0.0,
                     "kind": "adamw",
                 },
                 {
                     "params": embedding_params,
                     "lr": _embedding_lr,
                     "initial_lr": _embedding_lr,
+                    "betas": (adam_beta1, adam_beta2),
+                    "eps": 1e-8,
+                    "weight_decay": 0.0,
                     "kind": "adamw",
                 },
                 {
                     "params": other_params,
                     "lr": _scalar_lr,
                     "initial_lr": _scalar_lr,
+                    "betas": (adam_beta1, adam_beta2),
+                    "eps": 1e-8,
                     "weight_decay": 0.0,
                     "kind": "adamw",
                 },
             ]
 
-            fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-            use_fused = fused_available and device.startswith("cuda") and not ddp
+            # ========== STEP 5: Add Muon Groups (by shape for stacking efficiency) ==========
+            # Group matrix parameters by shape so they can be stacked for efficient
+            # batched processing in the Muon optimizer.
+            for shape in sorted({p.shape for p in matrix_params}):
+                group_params = [p for p in matrix_params if p.shape == shape]
+                param_groups.append(
+                    {
+                        "params": group_params,
+                        "lr": _matrix_lr,
+                        "initial_lr": _matrix_lr,
+                        "momentum": 0.95,
+                        "ns_steps": 5,
+                        "beta2": 0.95,
+                        "weight_decay": weight_decay,
+                        "kind": "muon",
+                    }
+                )
+
             if master_process:
-                print(f"Using fused AdamW: {use_fused}")
                 print(
                     f"Learning rates: unembedding={_unembedding_lr:.4f}, embedding={_embedding_lr:.4f}, matrix={_matrix_lr:.4f}, scalar={_scalar_lr:.4f}"
                 )
+                print(
+                    f"Using combined {'DistMuonAdamW' if ddp else 'MuonAdamW'} optimizer (nanochat-style)"
+                )
 
-            adamw_optimizer = torch.optim.AdamW(
-                adam_groups,
-                betas=(adam_beta1, adam_beta2),
-                eps=1e-8,
-                weight_decay=0.0,  # Muon handles weight decay for transformer blocks
-                fused=use_fused,
-            )
+            # ========== STEP 6: Create Combined Optimizer ==========
+            # Use DistMuonAdamW for distributed training (handles gradient sync internally)
+            # Use MuonAdamW for single GPU training
+            #
+            # Key difference from standard approach:
+            # - NO DDP wrapper on model when using DistMuonAdamW
+            # - Gradient synchronization happens inside optimizer.step()
+            # - Enables better overlap of communication with computation
+            OptimizerFactory = DistMuonAdamW if ddp else MuonAdamW
+            optimizer = OptimizerFactory(param_groups)
 
-            # Configure Muon for transformer block weight matrices
-            MuonFactory = DistMuon if ddp else Muon
-            muon_optimizer = MuonFactory(
-                matrix_params,
-                lr=_matrix_lr,
-                momentum=0.95,
-                weight_decay=weight_decay,  # Muon handles weight decay
-            )
-
-            # Mark Muon param groups with 'kind' for scheduler
-            for group in muon_optimizer.param_groups:
-                group["initial_lr"] = group["lr"]
-                group["kind"] = "muon"
-
-            return [adamw_optimizer, muon_optimizer]
+            return optimizer
 
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction="mean"):
         """
@@ -475,7 +548,9 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))  # Functional RMSNorm (nanochat-style)
 
         # ===== Language Modeling Head =====
-        logits = self.lm_head(x)  # (B, T, vocab_size)
+        logits = self.lm_head(x)  # (B, T, padded_vocab_size)
+        # Crop to actual vocab_size (remove padding)
+        logits = logits[..., : self.config.vocab_size]  # (B, T, vocab_size)
 
         # ===== Loss Computation =====
         loss = None

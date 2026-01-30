@@ -223,16 +223,25 @@ class Trainer:
         self.raw_model.to(self.device)
 
         # Wrap with torch.compile for faster training
-        # DISABLED: torch.compile + Muon + DDP causes none_dealloc crashes
-        # TODO: Re-enable when PyTorch fixes reference counting with compiled optimizers
-        # self.model = torch.compile(self.raw_model)
-        self.model = self.raw_model
+        # Use dynamic=False because input shapes never change during training (nanochat-style)
+        # Requires PyTorch 2.9.0+ to avoid none_dealloc crash
+        self.model = torch.compile(self.raw_model, dynamic=False)
+        # self.model = self.raw_model
 
-        # Wrap with DDP for distributed training
-        if self.ddp:
+        # Nanochat-style: NO DDP wrapper when using combined optimizer with Muon
+        # The DistMuonAdamW optimizer handles gradient synchronization internally
+        # This provides better overlap of communication with computation
+        #
+        # DDP wrapping is only used when NOT using Muon (AdamW-only mode)
+        if self.ddp and not self.use_muon:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, device_ids=[self.ddp_local_rank]
             )
+        elif self.ddp and self.use_muon:
+            if self.master_process:
+                print(
+                    "Using DistMuonAdamW optimizer - skipping DDP wrapper (nanochat-style)"
+                )
 
         # Note: self.raw_model stays unchanged and shares parameters with self.model
         # This allows clean checkpoint saving without unwrapping
@@ -715,7 +724,11 @@ class Trainer:
                     #     total_nats += nats
                     #     total_bytes += bytes
 
-                    if self.ddp:
+                    # Control gradient synchronization for DDP
+                    # Note: When using DistMuonAdamW (ddp=True, use_muon=True), the model
+                    # is NOT wrapped with DDP, so we skip this. DistMuonAdamW handles
+                    # gradient synchronization internally during optimizer.step()
+                    if self.ddp and not self.use_muon:
                         self.model.require_backward_grad_sync = (
                             micro_step == self.grad_accumulation_steps - 1
                         )
@@ -924,42 +937,43 @@ class Trainer:
                     # - Matrices: Medium learning (default 0.02) - core transformer weights with Muon
                     # - Scalars/Biases: Fast learning (default 0.5) - small params adjust quickly
 
-                    if self.use_muon and len(self.optimizers) > 1:
-                        # When using Muon, we have 2 optimizers:
-                        # - optimizers[0] = AdamW (for embeddings, output head, biases)
-                        # - optimizers[1] = Muon (for transformer weight matrices)
+                    if self.use_muon:
+                        # Combined optimizer (nanochat-style) or legacy dual optimizer
+                        opt = self.optimizers[0]
 
-                        # Log AdamW learning rates (3 parameter groups)
-                        adamw_opt = self.optimizers[0]
-                        log_dict["lr/unembedding"] = adamw_opt.param_groups[0][
-                            "lr"
-                        ]  # Output projection (lm_head)
-                        log_dict["lr/embedding"] = adamw_opt.param_groups[1][
-                            "lr"
-                        ]  # Token embeddings (wte)
-                        log_dict["lr/scalar"] = adamw_opt.param_groups[2][
-                            "lr"
-                        ]  # Bias terms (attention, MLP biases)
+                        # Iterate through param_groups to find specific types
+                        adamw_groups = [
+                            g for g in opt.param_groups if g.get("kind") == "adamw"
+                        ]
+                        muon_groups = [
+                            g for g in opt.param_groups if g.get("kind") == "muon"
+                        ]
 
-                        # Log Muon learning rate (all matrix params share same LR)
-                        # Muon handles: Q, K, V projections + attention output + MLP up/down projections
-                        muon_opt = self.optimizers[1]
-                        if len(muon_opt.param_groups) > 0:
-                            log_dict["lr/matrix"] = muon_opt.param_groups[0][
+                        # Log AdamW learning rates (expect 3 groups: lm_head, embeddings, scalars)
+                        if len(adamw_groups) >= 3:
+                            log_dict["lr/unembedding"] = adamw_groups[0][
+                                "lr"
+                            ]  # lm_head
+                            log_dict["lr/embedding"] = adamw_groups[1][
+                                "lr"
+                            ]  # embeddings
+                            log_dict["lr/scalar"] = adamw_groups[2][
+                                "lr"
+                            ]  # scalars/biases
+
+                        # Log Muon learning rate and hyperparameters
+                        if len(muon_groups) > 0:
+                            log_dict["lr/matrix"] = muon_groups[0][
                                 "lr"
                             ]  # All 2D transformer matrices
 
-                            # Log Muon-specific hyperparameters (interesting for analysis)
-                            if "momentum" in muon_opt.param_groups[0]:
-                                # Momentum: 0.85 → 0.95 over first 300 steps (warmup for stability)
-                                log_dict["muon/momentum"] = muon_opt.param_groups[0][
-                                    "momentum"
+                            # Log Muon-specific hyperparameters
+                            if "momentum" in muon_groups[0]:
+                                log_dict["muon/momentum"] = muon_groups[0]["momentum"]
+                            if "weight_decay" in muon_groups[0]:
+                                log_dict["muon/weight_decay"] = muon_groups[0][
+                                    "weight_decay"
                                 ]
-                            if "weight_decay" in muon_opt.param_groups[0]:
-                                # Weight decay: scales by 1/depth² and decays linearly to 0 over training
-                                log_dict["muon/weight_decay"] = muon_opt.param_groups[
-                                    0
-                                ]["weight_decay"]
                     else:
                         # For standard AdamW-only training (no Muon), just log main LR
                         if (
