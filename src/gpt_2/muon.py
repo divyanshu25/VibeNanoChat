@@ -296,6 +296,11 @@ class MuonAdamW(torch.optim.Optimizer):
         second_momentum_buffer = state["second_momentum_buffer"]
         red_dim = -1 if shape[-2] >= shape[-1] else -2
 
+        # Validate all parameters have gradients before stacking
+        assert all(
+            p.grad is not None for p in params
+        ), "All parameters in Muon group must have gradients. Check if all parameters are used in forward pass."
+
         # Stack grads and params
         stacked_grads = torch.stack([p.grad for p in params])
         stacked_params = torch.stack(params)

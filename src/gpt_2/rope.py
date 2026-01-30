@@ -29,7 +29,9 @@ def apply_rotary_emb(x, cos, sin):
     x1, x2 = x[..., :d], x[..., d:]  # This will split the head_dim into two halves
 
     # Apply rotation to pairs of dimensions
-    # This is equivalent to complex number rotation: e^(iθ) * z
+    # This is equivalent to complex number rotation: e^(-iθ) * z
+    # Note: This uses negative rotation (matching nanochat implementation)
+    # 2D rotation matrix: [cos sin; -sin cos]
     y1 = x1 * cos + x2 * sin
     y2 = x1 * (-sin) + x2 * cos
 
