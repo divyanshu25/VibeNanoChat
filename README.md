@@ -274,27 +274,7 @@ The mid-training setup (TaskMixture) provides a good template for instruction-fo
 
 ## Makefile helpers
 
-```bash
-# Setup
-make environment                    # install uv and setup venv
-make jupyter-kernel                 # register as jupyter kernel
-
-# Training
-make ddp-train NGPUS=8 MODE=pretraining                           # basic training
-make ddp-train NGPUS=8 MODE=mid-training CHECKPOINT=/path/to/pt  # mid-training
-make ddp-train NGPUS=8 MODE=pretraining CORE_EVALS=true          # with evals
-
-# GPU Management
-make gpu-status                     # check nvidia-smi
-make kill-gpu                       # kill all processes on GPUs
-make gpu-hot GPUS=0,1,2            # keep specific GPUs active
-make gpu-hot GPUS=0,1,2 DELAY=2    # start heating in 2 hours
-
-# Code Quality
-make format                         # format with black and isort
-make lint                           # lint with ruff
-make check                          # format + lint
-```
+Run `make help` to see all available options.
 
 ## Troubleshooting
 
