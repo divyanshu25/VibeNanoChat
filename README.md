@@ -84,6 +84,154 @@ You'll get beautiful Chinchilla-style plots showing optimal model size for your 
 
 📖 **More details**: [docs/README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md)
 
+## Scaling Laws: The Bitter Lesson Applies Here Too 📈
+
+We ran a bunch of experiments sweeping model sizes and FLOP budgets to find the optimal allocation of compute. Here's what we learned.
+
+### The Fundamental Equation: C = 6ND
+
+When you train a transformer, the compute cost is approximately:
+```
+C = 6ND
+```
+
+where:
+- `C` = total training FLOPs
+- `N` = number of model parameters
+- `D` = number of training tokens
+
+The `6` comes from the forward pass (2ND FLOPs) + backward pass (4ND FLOPs). So if you have a fixed compute budget C, you face a tradeoff: bigger model with less data, or smaller model with more data?
+
+#### Does C = 6ND Actually Hold?
+
+Short answer: **yes, remarkably well**. We verified this across 35 training runs spanning three compute budgets (1e18, 3e18, 6e18 FLOPs) and model sizes from 77M to 522M parameters.
+
+<p align="center">
+  <img src="scripts/graphs/flops_formula_verification.png" width="100%"/>
+</p>
+
+*Figure: Empirical verification of C = 6ND. Left: ratio of actual FLOPs to 6ND across model depths. Right: average ratio per budget. The formula holds to within ±1% on average.*
+
+**Key findings:**
+
+1. **Average accuracy**: The ratio C_actual / (6ND) is 1.0016 across all runs. That's **0.2% error** - basically perfect.
+
+2. **Consistent across budgets**: 
+   - 1e18 FLOPs: 0.998× (−0.24%)
+   - 3e18 FLOPs: 0.998× (−0.23%)
+   - 6e18 FLOPs: 1.009× (+0.94%)
+
+3. **Model size effects**: Small models (N8, N9) slightly underestimate (0.88-0.92×), large models (N15-N20) slightly overestimate (1.04-1.08×). Medium models are spot on.
+
+Why the small deviations? 
+
+- **Small models**: Less optimizer overhead relative to forward/backward. Also, some ops (embeddings, layer norms) don't scale exactly as ND.
+
+- **Large models**: More gradient communication in distributed training, more memory ops, slightly higher overhead from checkpointing and evals.
+
+- **The "6" is approximate**: It assumes every operation in the transformer scales as ND. In reality, some ops scale differently (e.g., softmax is O(seq_len²), not O(params)).
+
+But here's the thing: **these effects nearly cancel out**. The average is so close to 1.0 that C = 6ND is empirically a *great* predictor of training cost. You can use it to plan experiments with confidence.
+
+**Practical implication**: Want to know how many tokens you can afford with your compute budget? Just solve for D:
+
+```
+D = C / (6N)
+```
+
+Example: You have 1e19 FLOPs and want to train a 500M parameter model. How many tokens can you train?
+
+```
+D = 1e19 / (6 × 500M) = 3.33B tokens
+```
+
+The formula works. Use it.
+
+### The Square Root Law: N, D ∝ √C
+
+Here's the interesting part. When we fit power laws to our optimal models across three compute budgets (1e18, 3e18, 6e18 FLOPs), we found:
+
+```
+N_optimal ∝ C^0.456
+D_optimal ∝ C^0.544
+```
+
+Both exponents are close to 0.5! This means **as you scale compute, you should scale both model size AND training data roughly proportional to the square root of compute**. Not linearly - *sublinearly*. 
+
+Why? Because both N and D contribute to loss reduction, but with diminishing returns. The math works out such that you want to grow them at similar rates.
+
+<p align="center">
+  <img src="scripts/graphs/optimal_model_vs_flops.png" width="100%"/>
+</p>
+
+*Figure: Log-log plot showing optimal N and D vs compute budget. The straight lines confirm power law behavior. Note how both scale at roughly C^0.5.*
+
+### The Bitter Truth: Validation Loss Curves
+
+When you plot validation loss (BPB - bits per byte) vs model size at a fixed compute budget, you get a U-shaped curve. Too small = underfitting. Too big = not enough training tokens.
+
+<p align="center">
+  <img src="scripts/graphs/validation_bpb_curve.png" width="100%"/>
+</p>
+
+*Figure: Validation BPB vs model parameters for three compute budgets. Stars mark the optimal models from curve fitting. Notice how the optimal point shifts right (bigger models) as compute increases.*
+
+Key observations:
+
+1. **There's a sweet spot**: For 1e18 FLOPs, optimal is ~154M params with 7.05 tokens/param. For 6e18 FLOPs, it's ~341M params with 8.61 tokens/param.
+
+2. **Bigger budgets favor bigger models**: As C increases, the optimal N grows, but not as fast as C itself (remember, N ∝ C^0.456).
+
+3. **More tokens per param at scale**: The optimal tokens/param ratio increases slightly with compute (7.05 → 8.61). But it's still way below Chinchilla's 20 tokens/param.
+
+### Wait, What About Chinchilla?
+
+Chinchilla (Hoffmann et al., 2022) famously said: "for optimal compute efficiency, you should train with 20 tokens per parameter." Our fitted curves suggest much lower ratios (7-9 tokens/param). 
+
+What's going on? A few possibilities:
+
+1. **Different compute regime**: Chinchilla studied 400M-70B param models. We're at 76M-522M. Scaling laws can have different exponents at different scales.
+
+2. **Optimizer differences**: We use DistMuon (momentum + Newton-Schulz orthogonalization). Chinchilla used AdamW. Better optimizers can extract more from fewer tokens.
+
+3. **Data quality**: FineWeb-Edu is higher quality than raw Common Crawl. Quality tokens count for more.
+
+4. **Curve fitting vs actual runs**: Our optima come from spline fits through empirical points. There's uncertainty in the interpolation.
+
+The honest answer? Scaling laws are empirical, not theoretical. They depend on architecture, optimizer, data, and the range you're measuring. Our laws apply to *our* setup. If you change something, re-run the experiments!
+
+### Practical Takeaways
+
+If you have a fixed compute budget and want to train optimally:
+
+1. **Don't train too long**: The "train forever on a tiny model" approach is suboptimal. Scale up the model size.
+
+2. **Don't go too wide**: A huge model trained for 100 steps won't work either. Balance N and D.
+
+3. **Use the fitted curve**: Our power law fits let you extrapolate. Want to train with 1e19 FLOPs? Optimal is ~750M params (extrapolating N ∝ C^0.456).
+
+4. **Empiricism over theory**: Scaling laws are discovered, not derived. When in doubt, run the experiment.
+
+### Running Your Own Scaling Law Study
+
+```bash
+# Sweep depths and FLOP budgets
+make run-scaling-law
+
+# Plot the results
+uv run python scripts/plot_isoflop_curve.py
+
+# Get beautiful curves and optimal points
+```
+
+The script automatically:
+- Finds all log files matching `scaling_laws_N*_F*.log`
+- Extracts validation BPB, params, tokens for each run
+- Fits smooth curves (cubic splines) to find optima
+- Plots isoflop curves, validation curves, and optimal scaling
+
+You'll see console output with fitted exponents and optimal parameters for each budget. Use these to plan your next training run.
+
 ## Architecture (GPT-2 124M)
 
 ```
