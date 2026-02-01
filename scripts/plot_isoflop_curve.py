@@ -66,7 +66,7 @@ def parse_log_file(log_path):
 
 
 # Define FLOP budgets to analyze
-FLOP_BUDGETS = ["1e18", "3e18"]  # Add or modify as needed (3e18 and 6e18 still running)
+FLOP_BUDGETS = ["1e18", "2e18", "3e18", "6e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
 log_dir = "/mnt/localssd/VibeNanoChat/logs"
@@ -230,7 +230,7 @@ for budget in sorted_budgets:
     )
 
 # Formatting
-ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
+ax.set_xlabel("Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold")
 ax.set_ylabel("Training Tokens (Billions)", fontsize=14, fontweight="bold")
 ax.set_title(
     "ISOFlop Curves: Model Size vs. Training Data\nComparing Different Compute Budgets",
@@ -395,32 +395,13 @@ for budget in sorted_budgets:
             zorder=5,
         )
 
-        # Annotate the optimal point with tokens/param ratio
-        ax.annotate(
-            f"Optimal\n{optimal_params_M:.1f}M params\n{optimal_tokens_per_param:.1f} tok/param",
-            (optimal_params_M, optimal_bpb),
-            xytext=(15, 40),
-            textcoords="offset points",
-            fontsize=10,
-            fontweight="bold",
-            color="white",
-            bbox=dict(
-                boxstyle="round,pad=0.5",
-                facecolor=color,
-                edgecolor="black",
-                alpha=0.95,
-                linewidth=2.5,
-            ),
-            arrowprops=dict(
-                arrowstyle="->",
-                connectionstyle="arc3,rad=0.3",
-                color="black",
-                lw=2,
-            ),
-        )
+        # Store optimal info for later positioning on the right side
+        fitted_optima[budget]["color"] = color
+        fitted_optima[budget]["optimal_params_M"] = optimal_params_M
+        fitted_optima[budget]["optimal_bpb"] = optimal_bpb
 
 # Formatting
-ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
+ax.set_xlabel("Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold")
 ax.set_ylabel("Validation BPB (Bits Per Byte)", fontsize=14, fontweight="bold")
 ax.set_title(
     "Scaling Law: Validation BPB vs Model Size (with Curve Fitting)\nComparing Different Compute Budgets",
@@ -435,57 +416,48 @@ ax.set_xscale("log")
 # Grid
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
-# Legend
-ax.legend(fontsize=10, loc="upper right", framealpha=0.9, ncol=1)
+# Legend - positioned outside the plot area at the top right
+ax.legend(fontsize=10, loc="upper left", bbox_to_anchor=(1.02, 1.0), framealpha=0.9, ncol=1)
 
-# Find best models for each budget (both empirical and fitted)
-info_text = "Empirical Best vs Fitted Optimal:\n\n"
-for budget in sorted_budgets:
-    models = data_by_budget[budget]
-    models_with_val = {
-        k: v for k, v in models.items() if v["final_val_bpb"] is not None
-    }
-    if models_with_val:
-        best_model = min(models_with_val.items(), key=lambda x: x[1]["final_val_bpb"])
-        empirical_params_M = best_model[1]["params"] / 1e6
-        empirical_bpb = best_model[1]["final_val_bpb"]
-
-        info_text += f"{budget:.1e} FLOPs:\n"
-
-        # Calculate empirical tokens/param ratio
-        empirical_tokens = best_model[1]["tokens"]
-        empirical_params = best_model[1]["params"]
-        empirical_ratio = empirical_tokens / empirical_params
-
-        info_text += f"  Empirical: {best_model[0].upper()}\n"
-        info_text += (
-            f"    {empirical_params_M:.1f}M params, {empirical_ratio:.1f} tok/param\n"
+# Add optimal model annotations on the right side of the plot
+# Generate vertical positions dynamically based on the number of budgets
+num_budgets = len(sorted_budgets)
+vertical_positions = [0.9 - (i * 0.3) for i in range(num_budgets)]
+for i, budget in enumerate(sorted_budgets):
+    if budget in fitted_optima:
+        opt = fitted_optima[budget]
+        color = opt["color"]
+        optimal_params_M = opt["optimal_params_M"]
+        optimal_bpb = opt["optimal_bpb"]
+        
+        # Create annotation text
+        annotation_text = f"Optimal @ {budget:.1e} FLOPs\n"
+        annotation_text += f"{opt['params_M']:.1f}M params\n"
+        annotation_text += f"{opt['tokens_per_param']:.1f} tok/param\n"
+        annotation_text += f"BPB: {opt['bpb']:.4f}"
+        
+        # Add annotation on the right side (without arrow)
+        ax.text(
+            1.02,
+            vertical_positions[i],
+            annotation_text,
+            transform=ax.transAxes,
+            fontsize=9,
+            fontweight="bold",
+            color="white",
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor=color,
+                edgecolor="black",
+                alpha=0.95,
+                linewidth=2.5,
+            ),
+            ha="left",
+            va="center",
         )
-        info_text += f"    BPB: {empirical_bpb:.4f}\n"
 
-        if budget in fitted_optima:
-            opt = fitted_optima[budget]
-            info_text += "  Fitted Optimal:\n"
-            info_text += f"    {opt['params_M']:.1f}M params, {opt['tokens_per_param']:.1f} tok/param\n"
-            info_text += f"    BPB: {opt['bpb']:.4f}\n"
-            improvement = (empirical_bpb - opt["bpb"]) * 1000  # in millibits
-            info_text += f"    Gain: {improvement:.2f} millibits\n"
-        info_text += "\n"
-
-ax.text(
-    1.02,
-    0.5,
-    info_text.strip(),
-    transform=ax.transAxes,
-    fontsize=9,
-    verticalalignment="center",
-    horizontalalignment="left",
-    family="monospace",
-    bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.9),
-)
-
-# Tight layout with extra space for the text box
-plt.tight_layout(rect=[0, 0, 0.85, 1])
+# Tight layout with extra space for the legend and text box
+plt.tight_layout(rect=[0, 0, 0.75, 1])
 
 # Save figure
 bpb_output_path = "/mnt/localssd/VibeNanoChat/scripts/graphs/validation_bpb_curve.png"
@@ -560,15 +532,30 @@ if optimal_data:
         zorder=3,
     )
 
-    # Connect points with a line if there are multiple budgets
+    # Fit a power law curve if there are multiple budgets: N ∝ C^a
     if len(optimal_data) > 1:
+        # Fit power law in log space: log(N) = a*log(C) + b
+        log_budgets = np.log(budgets)
+        log_params = np.log(optimal_params_M)
+        
+        # Linear fit in log space
+        coeffs = np.polyfit(log_budgets, log_params, 1)
+        a_params = coeffs[0]  # exponent
+        b_params = coeffs[1]  # intercept
+        
+        # Generate fitted curve
+        budgets_dense = np.logspace(np.log10(budgets.min()), np.log10(budgets.max()), 200)
+        params_fit = np.exp(b_params) * (budgets_dense ** a_params)
+        
+        # Plot fitted curve
         ax1.plot(
-            budgets,
-            optimal_params_M,
+            budgets_dense,
+            params_fit,
             "-",
-            linewidth=2.5,
-            alpha=0.7,
+            linewidth=3,
+            alpha=0.6,
             color="#FF6B6B",
+            label=f"Power Law Fit: N ∝ C^{a_params:.3f}",
             zorder=2,
         )
 
@@ -593,9 +580,9 @@ if optimal_data:
         )
 
     # Formatting
-    ax1.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
+    ax1.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
     ax1.set_ylabel(
-        "Optimal Model Parameters (Millions)", fontsize=14, fontweight="bold"
+        "Optimal Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold"
     )
     ax1.set_title(
         "Compute-Optimal Model Size\nOptimal Parameters vs Compute Budget",
@@ -604,8 +591,9 @@ if optimal_data:
         pad=15,
     )
 
-    # Use log scale for x-axis to better show different budget scales
+    # Use log scale for both axes to show power law as straight line
     ax1.set_xscale("log")
+    ax1.set_yscale("log")
 
     # Grid
     ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
@@ -650,15 +638,30 @@ if optimal_data:
         zorder=3,
     )
 
-    # Connect points with a line if there are multiple budgets
+    # Fit a power law curve if there are multiple budgets: D ∝ C^b
     if len(optimal_data) > 1:
+        # Fit power law in log space: log(D) = b*log(C) + c
+        log_budgets = np.log(budgets)
+        log_tokens = np.log(optimal_tokens_B)
+        
+        # Linear fit in log space
+        coeffs_tokens = np.polyfit(log_budgets, log_tokens, 1)
+        a_tokens = coeffs_tokens[0]  # exponent
+        b_tokens = coeffs_tokens[1]  # intercept
+        
+        # Generate fitted curve
+        budgets_dense = np.logspace(np.log10(budgets.min()), np.log10(budgets.max()), 200)
+        tokens_fit = np.exp(b_tokens) * (budgets_dense ** a_tokens)
+        
+        # Plot fitted curve
         ax2.plot(
-            budgets,
-            optimal_tokens_B,
+            budgets_dense,
+            tokens_fit,
             "-",
-            linewidth=2.5,
-            alpha=0.7,
+            linewidth=3,
+            alpha=0.6,
             color="#4ECDC4",
+            label=f"Power Law Fit: D ∝ C^{a_tokens:.3f}",
             zorder=2,
         )
 
@@ -683,8 +686,8 @@ if optimal_data:
         )
 
     # Formatting
-    ax2.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
-    ax2.set_ylabel("Optimal Training Tokens (Billions)", fontsize=14, fontweight="bold")
+    ax2.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
+    ax2.set_ylabel("Optimal Training Tokens (Billions) [log scale]", fontsize=14, fontweight="bold")
     ax2.set_title(
         "Compute-Optimal Training Data\nOptimal Tokens vs Compute Budget",
         fontsize=15,
@@ -692,8 +695,9 @@ if optimal_data:
         pad=15,
     )
 
-    # Use log scale for x-axis to better show different budget scales
+    # Use log scale for both axes to show power law as straight line
     ax2.set_xscale("log")
+    ax2.set_yscale("log")
 
     # Grid
     ax2.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)

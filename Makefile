@@ -201,7 +201,7 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 	else \
 		echo "⚡ Muon optimizer enabled for all runs"; \
 	fi; \
-	for FLOPS in 1e18 3e18 6e18; do \
+	for FLOPS in 2e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
