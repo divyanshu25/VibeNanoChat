@@ -46,8 +46,8 @@ def parse_log_file(log_path):
 
 
 # Define budgets
-BUDGETS = [1e18, 3e18, 6e18]
-BUDGET_STRS = ["1e18", "3e18", "6e18"]
+BUDGETS = [1e18, 2e18, 3e18, 6e18]
+BUDGET_STRS = ["1e18", "2e18", "3e18", "6e18"]
 
 # Discover and parse log files
 log_dir = "/mnt/localssd/VibeNanoChat/logs"
@@ -130,8 +130,11 @@ for budget in BUDGETS:
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
 # ========== LEFT PLOT: Ratio vs Model Depth for Each Budget ==========
-colors = {"1e18": "#FF6B6B", "3e18": "#4ECDC4", "6e18": "#45B7D1"}
-markers = {"1e18": "o", "3e18": "s", "6e18": "D"}
+# Dynamically generate colors and markers for any number of budgets
+available_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#A29BFE"]
+available_markers = ["o", "s", "D", "^", "v", "<"]
+colors = {budget_str: available_colors[i % len(available_colors)] for i, budget_str in enumerate(BUDGET_STRS)}
+markers = {budget_str: available_markers[i % len(available_markers)] for i, budget_str in enumerate(BUDGET_STRS)}
 
 for budget, budget_str in zip(BUDGETS, BUDGET_STRS):
     if budget not in data_by_budget:
@@ -178,7 +181,8 @@ avg_ratios = [budget_stats[b]["avg"] for b in budgets_list]
 std_ratios = [budget_stats[b]["std"] for b in budgets_list]
 
 x_pos = np.arange(len(budgets_list))
-colors_bar = ["#FF6B6B", "#4ECDC4", "#45B7D1"]
+# Generate colors dynamically based on the number of budgets
+colors_bar = [available_colors[i % len(available_colors)] for i in range(len(budgets_list))]
 
 bars = ax2.bar(
     x_pos,

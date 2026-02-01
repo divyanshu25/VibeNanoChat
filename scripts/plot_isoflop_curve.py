@@ -66,7 +66,7 @@ def parse_log_file(log_path):
 
 
 # Define FLOP budgets to analyze
-FLOP_BUDGETS = ["1e18", "3e18", "6e18"]  # Add or modify as needed (3e18 and 6e18 still running)
+FLOP_BUDGETS = ["1e18", "2e18", "3e18", "6e18"]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
 log_dir = "/mnt/localssd/VibeNanoChat/logs"
@@ -230,7 +230,7 @@ for budget in sorted_budgets:
     )
 
 # Formatting
-ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
+ax.set_xlabel("Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold")
 ax.set_ylabel("Training Tokens (Billions)", fontsize=14, fontweight="bold")
 ax.set_title(
     "ISOFlop Curves: Model Size vs. Training Data\nComparing Different Compute Budgets",
@@ -401,7 +401,7 @@ for budget in sorted_budgets:
         fitted_optima[budget]["optimal_bpb"] = optimal_bpb
 
 # Formatting
-ax.set_xlabel("Model Parameters (Millions)", fontsize=14, fontweight="bold")
+ax.set_xlabel("Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold")
 ax.set_ylabel("Validation BPB (Bits Per Byte)", fontsize=14, fontweight="bold")
 ax.set_title(
     "Scaling Law: Validation BPB vs Model Size (with Curve Fitting)\nComparing Different Compute Budgets",
@@ -420,7 +420,9 @@ ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 ax.legend(fontsize=10, loc="upper left", bbox_to_anchor=(1.02, 1.0), framealpha=0.9, ncol=1)
 
 # Add optimal model annotations on the right side of the plot
-vertical_positions = [0.7, 0.4, 0.1]  # Positions for up to 3 budgets
+# Generate vertical positions dynamically based on the number of budgets
+num_budgets = len(sorted_budgets)
+vertical_positions = [0.9 - (i * 0.3) for i in range(num_budgets)]
 for i, budget in enumerate(sorted_budgets):
     if budget in fitted_optima:
         opt = fitted_optima[budget]
@@ -578,9 +580,9 @@ if optimal_data:
         )
 
     # Formatting
-    ax1.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
+    ax1.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
     ax1.set_ylabel(
-        "Optimal Model Parameters (Millions)", fontsize=14, fontweight="bold"
+        "Optimal Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold"
     )
     ax1.set_title(
         "Compute-Optimal Model Size\nOptimal Parameters vs Compute Budget",
@@ -684,8 +686,8 @@ if optimal_data:
         )
 
     # Formatting
-    ax2.set_xlabel("Compute Budget (FLOPs)", fontsize=14, fontweight="bold")
-    ax2.set_ylabel("Optimal Training Tokens (Billions)", fontsize=14, fontweight="bold")
+    ax2.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
+    ax2.set_ylabel("Optimal Training Tokens (Billions) [log scale]", fontsize=14, fontweight="bold")
     ax2.set_title(
         "Compute-Optimal Training Data\nOptimal Tokens vs Compute Budget",
         fontsize=15,

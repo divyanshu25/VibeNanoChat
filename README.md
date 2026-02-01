@@ -76,7 +76,7 @@ The `DEPTH` parameter controls both depth and width. Learning rate and weight de
 Want to run a full scaling law experiment? Easy:
 
 ```bash
-make run-scaling-law  # Sweeps depths 6-14, FLOP budgets 1e18-6e18
+make run-scaling-law  # Sweeps depths 6-14, FLOP budgets 1e18, 2e18, 3e18, 6e18
 uv run python scripts/plot_isoflop_curve.py  # Plot results
 ```
 
@@ -104,7 +104,7 @@ The `6` comes from the forward pass (2ND FLOPs) + backward pass (4ND FLOPs). So 
 
 #### Does C = 6ND Actually Hold?
 
-Short answer: **yes, remarkably well**. We verified this across 35 training runs spanning three compute budgets (1e18, 3e18, 6e18 FLOPs) and model sizes from 77M to 522M parameters.
+Short answer: **yes, remarkably well**. We verified this across 46+ training runs spanning four compute budgets (1e18, 2e18, 3e18, 6e18 FLOPs) and model sizes from 77M to 522M parameters.
 
 <p align="center">
   <img src="scripts/graphs/flops_formula_verification.png" width="100%"/>
@@ -114,10 +114,11 @@ Short answer: **yes, remarkably well**. We verified this across 35 training runs
 
 **Key findings:**
 
-1. **Average accuracy**: The ratio C_actual / (6ND) is 1.0016 across all runs. That's **0.2% error** - basically perfect.
+1. **Average accuracy**: The ratio C_actual / (6ND) is ~1.001 across all runs. That's **~0.1% error** - basically perfect.
 
 2. **Consistent across budgets**: 
    - 1e18 FLOPs: 0.998× (−0.24%)
+   - 2e18 FLOPs: 0.999× (−0.12%)
    - 3e18 FLOPs: 0.998× (−0.23%)
    - 6e18 FLOPs: 1.009× (+0.94%)
 
@@ -149,7 +150,7 @@ The formula works. Use it.
 
 ### The Square Root Law: N, D ∝ √C
 
-Here's the interesting part. When we fit power laws to our optimal models across three compute budgets (1e18, 3e18, 6e18 FLOPs), we found:
+Here's the interesting part. When we fit power laws to our optimal models across four compute budgets (1e18, 2e18, 3e18, 6e18 FLOPs), we found:
 
 ```
 N_optimal ∝ C^0.456
@@ -174,7 +175,7 @@ When you plot validation loss (BPB - bits per byte) vs model size at a fixed com
   <img src="scripts/graphs/validation_bpb_curve.png" width="100%"/>
 </p>
 
-*Figure: Validation BPB vs model parameters for three compute budgets. Stars mark the optimal models from curve fitting. Notice how the optimal point shifts right (bigger models) as compute increases.*
+*Figure: Validation BPB vs model parameters for four compute budgets. Stars mark the optimal models from curve fitting. Notice how the optimal point shifts right (bigger models) as compute increases.*
 
 Key observations:
 
