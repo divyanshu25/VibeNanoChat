@@ -66,7 +66,12 @@ def parse_log_file(log_path):
 
 
 # Define FLOP budgets to analyze
-FLOP_BUDGETS = ["1e18", "2e18", "3e18", "6e18"]  # Add or modify as needed (3e18 and 6e18 still running)
+FLOP_BUDGETS = [
+    "1e18",
+    "2e18",
+    "3e18",
+    "6e18",
+]  # Add or modify as needed (3e18 and 6e18 still running)
 
 # Auto-discover log files matching the pattern: scaling_laws_N<depth>_F<FLOPBudget>
 log_dir = "/mnt/localssd/VibeNanoChat/logs"
@@ -417,7 +422,9 @@ ax.set_xscale("log")
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
 # Legend - positioned outside the plot area at the top right
-ax.legend(fontsize=10, loc="upper left", bbox_to_anchor=(1.02, 1.0), framealpha=0.9, ncol=1)
+ax.legend(
+    fontsize=10, loc="upper left", bbox_to_anchor=(1.02, 1.0), framealpha=0.9, ncol=1
+)
 
 # Add optimal model annotations on the right side of the plot
 # Generate vertical positions dynamically based on the number of budgets
@@ -429,13 +436,13 @@ for i, budget in enumerate(sorted_budgets):
         color = opt["color"]
         optimal_params_M = opt["optimal_params_M"]
         optimal_bpb = opt["optimal_bpb"]
-        
+
         # Create annotation text
         annotation_text = f"Optimal @ {budget:.1e} FLOPs\n"
         annotation_text += f"{opt['params_M']:.1f}M params\n"
         annotation_text += f"{opt['tokens_per_param']:.1f} tok/param\n"
         annotation_text += f"BPB: {opt['bpb']:.4f}"
-        
+
         # Add annotation on the right side (without arrow)
         ax.text(
             1.02,
@@ -537,16 +544,18 @@ if optimal_data:
         # Fit power law in log space: log(N) = a*log(C) + b
         log_budgets = np.log(budgets)
         log_params = np.log(optimal_params_M)
-        
+
         # Linear fit in log space
         coeffs = np.polyfit(log_budgets, log_params, 1)
         a_params = coeffs[0]  # exponent
         b_params = coeffs[1]  # intercept
-        
+
         # Generate fitted curve
-        budgets_dense = np.logspace(np.log10(budgets.min()), np.log10(budgets.max()), 200)
-        params_fit = np.exp(b_params) * (budgets_dense ** a_params)
-        
+        budgets_dense = np.logspace(
+            np.log10(budgets.min()), np.log10(budgets.max()), 200
+        )
+        params_fit = np.exp(b_params) * (budgets_dense**a_params)
+
         # Plot fitted curve
         ax1.plot(
             budgets_dense,
@@ -582,7 +591,9 @@ if optimal_data:
     # Formatting
     ax1.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
     ax1.set_ylabel(
-        "Optimal Model Parameters (Millions) [log scale]", fontsize=14, fontweight="bold"
+        "Optimal Model Parameters (Millions) [log scale]",
+        fontsize=14,
+        fontweight="bold",
     )
     ax1.set_title(
         "Compute-Optimal Model Size\nOptimal Parameters vs Compute Budget",
@@ -643,16 +654,18 @@ if optimal_data:
         # Fit power law in log space: log(D) = b*log(C) + c
         log_budgets = np.log(budgets)
         log_tokens = np.log(optimal_tokens_B)
-        
+
         # Linear fit in log space
         coeffs_tokens = np.polyfit(log_budgets, log_tokens, 1)
         a_tokens = coeffs_tokens[0]  # exponent
         b_tokens = coeffs_tokens[1]  # intercept
-        
+
         # Generate fitted curve
-        budgets_dense = np.logspace(np.log10(budgets.min()), np.log10(budgets.max()), 200)
-        tokens_fit = np.exp(b_tokens) * (budgets_dense ** a_tokens)
-        
+        budgets_dense = np.logspace(
+            np.log10(budgets.min()), np.log10(budgets.max()), 200
+        )
+        tokens_fit = np.exp(b_tokens) * (budgets_dense**a_tokens)
+
         # Plot fitted curve
         ax2.plot(
             budgets_dense,
@@ -687,7 +700,9 @@ if optimal_data:
 
     # Formatting
     ax2.set_xlabel("Compute Budget (FLOPs) [log scale]", fontsize=14, fontweight="bold")
-    ax2.set_ylabel("Optimal Training Tokens (Billions) [log scale]", fontsize=14, fontweight="bold")
+    ax2.set_ylabel(
+        "Optimal Training Tokens (Billions) [log scale]", fontsize=14, fontweight="bold"
+    )
     ax2.set_title(
         "Compute-Optimal Training Data\nOptimal Tokens vs Compute Budget",
         fontsize=15,
