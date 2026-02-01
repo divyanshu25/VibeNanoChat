@@ -804,7 +804,7 @@ Examples:
     parser.add_argument(
         "--head-dim",
         type=int,
-        default=128,
+        default=64,
         help="Attention head dimension (default: 128 for Flash Attention efficiency)",
     )
 
