@@ -139,14 +139,13 @@ def get_lr_multiplier(
 
     Training Phase Schedules (matching nanochat exactly):
     - pretrain: warmup -> constant -> warmdown to final_lr_frac
-    - midtrain: constant for 80% of training -> linear decay to 0
     - sft/rl: linear decay from 1.0 to 0 (no warmup)
 
     Args:
         global_step: Current global training step (across all epochs)
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
-        training_phase: One of "pretrain", "midtrain", "sft", "rl"
+        training_phase: One of "pretrain", "sft", "rl"
         warmup_ratio: Ratio of iterations for LR warmup (pretrain only, default 0.0)
         warmdown_ratio: Ratio of iterations for LR warmdown (pretrain only, default 0.4)
         final_lr_frac: Final LR as fraction of initial LR (pretrain only, default 0.0)
@@ -172,18 +171,13 @@ def get_lr_multiplier(
             progress = (total_steps - global_step) / warmdown_iters
             return progress * 1.0 + (1 - progress) * final_lr_frac
 
-    elif training_phase == "midtrain":
-        # Nanochat mid_train logic: constant for 80%, then linear decay to 0
-        progress = global_step / total_steps
-        return 1.0 if progress < 0.8 else 1.0 - (progress - 0.8) / 0.2
-
     elif training_phase in ["sft", "rl"]:
         # Nanochat chat_sft/chat_rl logic: linear decay from 1.0 to 0
         return 1.0 - global_step / total_steps
 
     else:
         raise ValueError(
-            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, midtrain, sft, rl"
+            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, sft, rl"
         )
 
 
@@ -374,7 +368,6 @@ def save_checkpoint(
     max_steps: int = 17234,
     num_epochs: int = 3,
     master_process: bool = True,
-    mid_training: bool = False,
     sft_training: bool = False,
 ) -> None:
     """
@@ -396,7 +389,6 @@ def save_checkpoint(
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
         master_process: Whether this is the master process
-        mid_training: Whether this is mid-training mode
         sft_training: Whether this is SFT training mode
     """
     total_steps = max_steps * num_epochs
@@ -436,8 +428,6 @@ def save_checkpoint(
 
     if sft_training:
         checkpoint_suffix = "_sft"
-    elif mid_training:
-        checkpoint_suffix = "_midtraining"
     else:
         checkpoint_suffix = "_pretraining"
 

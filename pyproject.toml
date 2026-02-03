@@ -36,6 +36,8 @@ dependencies = [
 dev = [
     "ruff",   # For linting and formatting
     "pytest", # For running tests
+    "pytest-cov", # For test coverage
+    "pyarrow", # For parquet file testing
     "wandb",  # For experiment tracking,
     "black",
     "types-torch",  # PyTorch type stubs

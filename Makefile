@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: help uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+.PHONY: help uv uvlock venv dotenv environment jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
 
 .DEFAULT_GOAL := help
 
@@ -101,6 +101,11 @@ lint: ## Run linting with ruff
 
 check: format lint ## Run format + lint
 	@echo "✅ All checks passed!"
+
+
+test: ## Run all tests
+	@echo "🧪 Running tests..."
+	@cd tests && ./run_tests.sh
 
 
 kill-gpu: ## Kill all GPU processes

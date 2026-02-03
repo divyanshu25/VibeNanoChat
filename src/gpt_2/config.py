@@ -68,14 +68,13 @@ class GPTConfig:
     # ========================================================================
     # NOTE: Training steps are automatically calculated from target_param_data_ratio,
     # target_flops, or num_iterations (see "Training horizon" section above).
-    # The trainer computes steps dynamically for all phases (pretrain/midtrain/sft).
+    # The trainer computes steps dynamically for all phases (pretrain/sft).
 
     max_learning_rate: float = 6e-4  # Peak learning rate (for AdamW optimizer)
     min_lr_ratio: float = 0.1  # Minimum LR as fraction of peak (0.1 = 10% of peak)
 
     # Warmup steps for each training phase (as fraction of max_steps)
     lr_warmup_ratio_pretrain: float = 0.1  # Warmup as fraction of total steps (10%)
-    lr_warmup_ratio_midtrain: float = 0.2  # Warmup as fraction of total steps (10%)
     lr_warmup_ratio_sft: float = 0.4  # Warmup as fraction of total steps (10%)
 
     # ========================================================================
@@ -102,10 +101,25 @@ class GPTConfig:
     # ========================================================================
     # Data Directories
     # ========================================================================
+    # Standard binary dataloaders (streaming, no BOS alignment):
     data_dir_pretrain: str = "/sensei-fs/users/divgoyal/fineweb_edu"
-    data_dir_midtrain: str = "/sensei-fs/users/divgoyal/nanochat_midtraining_data"
+
+    # Parquet dataloaders (BOS-aligned, nanochat-style):
+    # Set use_bos_aligned_dataloader=True and update paths below
+    data_dir_pretrain_parquet: str = "/sensei-fs/users/divgoyal/fineweb_edu_parquet"
+
     sft_cache_dir: str = (
-        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # Cache dir for SFT datasets
+        "/sensei-fs/users/divgoyal/sft_cache"  # Cache dir for SFT datasets
+    )
+
+    # ========================================================================
+    # Dataloader Configuration
+    # ========================================================================
+    use_bos_aligned_dataloader: bool = (
+        False  # Use BOS-aligned Parquet dataloader (nanochat-style)
+    )
+    bos_dataloader_buffer_size: int = (
+        1000  # Document buffer size for BOS-aligned packing
     )
 
     # ========================================================================
@@ -113,9 +127,6 @@ class GPTConfig:
     # ========================================================================
     checkpoint_interval_pretrain: int = (
         5000  # Save checkpoint every N global steps (pretraining)
-    )
-    checkpoint_interval_midtrain: int = (
-        400  # Save checkpoint every N global steps (mid-training)
     )
     checkpoint_interval_sft: int = 100  # Save checkpoint every N global steps (SFT)
 
@@ -158,7 +169,7 @@ class GPTConfig:
     chat_core_temperature: float = 0.0  # Sampling temperature (0.0 = greedy decoding)
     chat_core_top_k: int = 50  # Top-k filtering for sampling
     chat_core_hf_cache_dir: str = (
-        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # HuggingFace cache directory for datasets
+        "/sensei-fs/users/divgoyal/sft_cache"  # HuggingFace cache directory for datasets
     )
 
     def __post_init__(self):

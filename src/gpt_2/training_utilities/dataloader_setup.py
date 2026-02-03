@@ -1,7 +1,8 @@
 """Dataloader setup utilities for the trainer."""
 
 from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
-from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
+from dataloaders.fineweb_edu_parquet_bos_dataloader import \
+    FinewebEduParquetBOSDataloader
 from eval_tasks import CoreEvaluator
 from eval_tasks.training import TrainingEvaluator
 from gpt_2.utils import get_custom_tokenizer
@@ -59,6 +60,7 @@ def setup_pretraining_dataloaders(
     ddp_rank,
     master_process,
     run_evals,
+    device="cuda",
 ):
     """
     Setup dataloaders for pretraining mode.
@@ -69,66 +71,34 @@ def setup_pretraining_dataloaders(
         ddp_rank: DDP rank
         master_process: Whether this is the master process
         run_evals: Whether to create evaluation dataloader
+        device: Device for tensor allocation ('cuda' or 'cpu')
 
     Returns:
         tuple: (train_dataloader, eval_dataloader)
     """
-    DataloaderClass = FinewebEduDataloader
-    data_dir = config.data_dir_pretrain
-
-    train_dataloader = DataloaderClass(
-        data_dir=data_dir,
-        batch_size=config.batch_size,
-        block_size=config.block_size,
-        ddp_world_size=ddp_world_size,
-        ddp_rank=ddp_rank,
-        split="train",
-        master_process=master_process,
-    )
-
-    if run_evals:
-        eval_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=config.batch_size,
-            block_size=config.block_size,
-            ddp_world_size=ddp_world_size,
-            ddp_rank=ddp_rank,
-            split="val",
-            master_process=master_process,
-        )
+    # Choose dataloader class and data directory based on config
+    if config.use_bos_aligned_dataloader:
+        DataloaderClass = FinewebEduParquetBOSDataloader
+        data_dir = config.data_dir_pretrain_parquet
+        extra_kwargs = {
+            "buffer_size": config.bos_dataloader_buffer_size,
+            "device": device,
+            "tokenizer_threads": 4,
+            "tokenizer_batch_size": 128,
+        }
+        if master_process:
+            print(
+                "📚 PRETRAINING: Using Parquet BOS-aligned dataloader (nanochat-style)"
+            )
+            print(f"   Data directory: {data_dir}")
+            print("   Expected token waste: ~35% (cropping for document boundaries)")
     else:
-        eval_dataloader = None
-
-    return train_dataloader, eval_dataloader
-
-
-def setup_midtraining_dataloaders(
-    config,
-    ddp_world_size,
-    ddp_rank,
-    master_process,
-    run_evals,
-):
-    """
-    Setup dataloaders for mid-training mode.
-
-    Args:
-        config: GPTConfig instance
-        ddp_world_size: DDP world size
-        ddp_rank: DDP rank
-        master_process: Whether this is the master process
-        run_evals: Whether to create evaluation dataloader
-
-    Returns:
-        tuple: (train_dataloader, eval_dataloader)
-    """
-    DataloaderClass = TaskMixtureDataloader
-    data_dir = config.data_dir_midtrain
-
-    if master_process:
-        print("\n" + "=" * 80)
-        print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
-        print("=" * 80 + "\n")
+        DataloaderClass = FinewebEduDataloader
+        data_dir = config.data_dir_pretrain
+        extra_kwargs = {}
+        if master_process:
+            print("📚 PRETRAINING: Using standard streaming dataloader")
+            print(f"   Data directory: {data_dir}")
 
     train_dataloader = DataloaderClass(
         data_dir=data_dir,
@@ -138,6 +108,7 @@ def setup_midtraining_dataloaders(
         ddp_rank=ddp_rank,
         split="train",
         master_process=master_process,
+        **extra_kwargs,
     )
 
     if run_evals:
@@ -149,6 +120,7 @@ def setup_midtraining_dataloaders(
             ddp_rank=ddp_rank,
             split="val",
             master_process=master_process,
+            **extra_kwargs,
         )
     else:
         eval_dataloader = None
@@ -312,7 +284,6 @@ def setup_sft_dataloaders(
 
 def setup_dataloaders(
     sft_training,
-    mid_training,
     config,
     ddp_world_size,
     ddp_rank,
@@ -333,7 +304,6 @@ def setup_dataloaders(
 
     Args:
         sft_training: Whether doing SFT training
-        mid_training: Whether doing mid-training
         config: GPTConfig instance
         ddp_world_size: DDP world size
         ddp_rank: DDP rank
@@ -357,13 +327,9 @@ def setup_dataloaders(
         train_dataloader, eval_dataloader = setup_sft_dataloaders(
             config, ddp_world_size, ddp_rank, master_process, run_evals
         )
-    elif mid_training:
-        train_dataloader, eval_dataloader = setup_midtraining_dataloaders(
-            config, ddp_world_size, ddp_rank, master_process, run_evals
-        )
     else:
         train_dataloader, eval_dataloader = setup_pretraining_dataloaders(
-            config, ddp_world_size, ddp_rank, master_process, run_evals
+            config, ddp_world_size, ddp_rank, master_process, run_evals, device
         )
 
     # Create evaluator if needed

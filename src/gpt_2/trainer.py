@@ -39,7 +39,6 @@ class Trainer:
         run_evals=False,
         run_core_evals=False,
         run_chatcore_evals=False,
-        mid_training=False,
         sft_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
@@ -65,10 +64,9 @@ class Trainer:
             run_evals: Whether to run evaluations
             run_core_evals: Whether to run CORE benchmark evaluations
             run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
-            mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             sft_training: Whether to do SFT training (uses Multiplex dataloader with conversation data)
-            checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
-            checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
+            checkpoint_path: Path to checkpoint to load (for SFT or resuming)
+            checkpoint_dir: Directory to save checkpoints (pretraining or SFT specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
             depth: Model depth (auto-calculates n_layer/n_embed/n_head from depth × aspect_ratio)
             aspect_ratio: Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default from config)
@@ -85,7 +83,6 @@ class Trainer:
         self.run_evals = run_evals
         self.run_core_evals = run_core_evals
         self.run_chatcore_evals = run_chatcore_evals
-        self.mid_training = mid_training
         self.sft_training = sft_training
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
@@ -104,7 +101,7 @@ class Trainer:
         self.start_global_step = 0
 
         # Select 4 random sample contexts for generation evaluation
-        if self.sft_training or self.mid_training:
+        if self.sft_training:
             self.sample_contexts = random.sample(
                 SFT_SAMPLE_CONTEXTS, min(4, len(SFT_SAMPLE_CONTEXTS))
             )
@@ -312,8 +309,6 @@ class Trainer:
             print("\n" + "=" * 80)
             if self.sft_training:
                 print("📊 CALCULATING SFT TRAINING STEPS")
-            elif self.mid_training:
-                print("📊 CALCULATING MID-TRAINING STEPS")
             else:
                 print("📊 CALCULATING PRETRAINING STEPS")
             print("=" * 80)
@@ -340,10 +335,6 @@ class Trainer:
         # Set warmup steps based on training phase (calculated as % of max_steps)
         if self.sft_training:
             self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
-        elif self.mid_training:
-            self.warmup_steps = int(
-                self.max_steps * self.config.lr_warmup_ratio_midtrain
-            )
         else:
             self.warmup_steps = int(
                 self.max_steps * self.config.lr_warmup_ratio_pretrain
@@ -379,7 +370,6 @@ class Trainer:
         """Wrapper to setup dataloaders using utility functions."""
         results = setup_dataloaders(
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
             ddp_world_size=self.ddp_world_size,
             ddp_rank=self.ddp_rank,
@@ -475,25 +465,17 @@ class Trainer:
         if self.checkpoint_path:
             # Determine checkpoint source
             is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
-            is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
             is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
 
             # Define training scenario flags
-            is_rollover_pretrain_to_midtrain = self.mid_training and is_pretrain_ckpt
-            is_rollover_midtrain_to_sft = self.sft_training and is_midtrain_ckpt
-            is_resume_pretrain = (
-                not self.mid_training and not self.sft_training and is_pretrain_ckpt
-            )
-            is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+            is_rollover_pretrain_to_sft = self.sft_training and is_pretrain_ckpt
+            is_resume_pretrain = not self.sft_training and is_pretrain_ckpt
             is_resume_sft = self.sft_training and is_sft_ckpt
 
             # Load optimizer only when resuming (not when rolling over)
-            is_rollover = (
-                is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
-            )
-            should_load_optimizer = not is_rollover
+            should_load_optimizer = not is_rollover_pretrain_to_sft
             # Don't print resume info for rollover scenarios
-            should_print_resume_info = not is_rollover
+            should_print_resume_info = not is_rollover_pretrain_to_sft
 
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
@@ -507,41 +489,25 @@ class Trainer:
                 self.config = checkpoint_result["config"]
 
             # Reset training counters only when rolling over
-            if is_rollover_pretrain_to_midtrain:
+            if is_rollover_pretrain_to_sft:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
                 if self.master_process:
                     print(
-                        "🔄 Rollover: Pretraining → Mid-training "
-                        "(weights loaded, fresh optimizer, counters reset to 0)"
-                    )
-                    print("   Training will start from global_step: 0")
-                    print(f"{'='*80}\n")
-            elif is_rollover_midtrain_to_sft:
-                self.start_epoch = 0
-                self.start_step = 0
-                self.start_global_step = 0
-                if self.master_process:
-                    print(
-                        "🔄 Rollover: Mid-training → SFT "
+                        "🔄 Rollover: Pretraining → SFT "
                         "(weights loaded, fresh optimizer, counters reset to 0)"
                     )
                     print("   Training will start from global_step: 0")
                     print(f"{'='*80}\n")
             # Keep checkpoint counters when resuming
-            elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
+            elif is_resume_pretrain or is_resume_sft:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
 
                 if self.master_process:
-                    if is_resume_pretrain:
-                        mode = "pretraining"
-                    elif is_resume_midtrain:
-                        mode = "mid-training"
-                    else:
-                        mode = "SFT"
+                    mode = "pretraining" if is_resume_pretrain else "SFT"
                     print(
                         f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
                         f"step {self.start_step}, global_step {self.start_global_step} "
@@ -552,16 +518,12 @@ class Trainer:
                 raise ValueError(
                     f"Unrecognized checkpoint scenario!\n"
                     f"  Checkpoint path: {self.checkpoint_path}\n"
-                    f"  mid_training flag: {self.mid_training}\n"
                     f"  sft_training flag: {self.sft_training}\n"
                     f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
-                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n"
                     f"  is_sft_ckpt: {is_sft_ckpt}\n\n"
                     f"Expected checkpoint path patterns:\n"
-                    f"  - For rollover pretrain→midtrain: mid_training=True + 'pretrain_checkpoints' in path\n"
-                    f"  - For rollover midtrain→sft: sft_training=True + 'midtrain_checkpoints' in path\n"
-                    f"  - For resume pretraining: mid_training=False + sft_training=False + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For rollover pretrain→sft: sft_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: sft_training=False + 'pretrain_checkpoints' in path\n"
                     f"  - For resume SFT: sft_training=True + 'sft_checkpoints' in path"
                 )
 
@@ -575,7 +537,6 @@ class Trainer:
         setup_wandb(
             master_process=self.master_process,
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
             max_learning_rate=self.max_learning_rate,
             min_learning_rate=self.min_learning_rate,
@@ -624,10 +585,7 @@ class Trainer:
             tokens_params_ratio = total_tokens / num_params
 
             print("\n" + "=" * 80)
-            if self.mid_training:
-                print("🔄 STARTING MID-TRAINING")
-            else:
-                print("🚀 STARTING TRAINING")
+            print("🚀 STARTING TRAINING")
             print("=" * 80)
             if self.start_global_step > 0:
                 print(
@@ -766,8 +724,6 @@ class Trainer:
                     # Determine training phase
                     if self.sft_training:
                         training_phase = "sft"
-                    elif self.mid_training:
-                        training_phase = "midtrain"
                     else:
                         training_phase = "pretrain"
 
@@ -882,8 +838,6 @@ class Trainer:
                 # Save checkpoint at intervals or at end of training (independent of evals)
                 if self.sft_training:
                     checkpoint_interval = self.config.checkpoint_interval_sft
-                elif self.mid_training:
-                    checkpoint_interval = self.config.checkpoint_interval_midtrain
                 else:
                     checkpoint_interval = self.config.checkpoint_interval_pretrain
 
@@ -900,7 +854,6 @@ class Trainer:
                     max_steps=self.max_steps,
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
-                    mid_training=self.mid_training,
                     sft_training=self.sft_training,
                 )
 

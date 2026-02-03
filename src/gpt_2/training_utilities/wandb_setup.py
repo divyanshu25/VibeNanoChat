@@ -6,7 +6,6 @@ import wandb
 def setup_wandb(
     master_process: bool,
     sft_training: bool,
-    mid_training: bool,
     config,
     max_learning_rate: float,
     min_learning_rate: float,
@@ -27,7 +26,6 @@ def setup_wandb(
     Args:
         master_process: Whether this is the master process
         sft_training: Whether doing SFT training
-        mid_training: Whether doing mid-training
         config: GPTConfig instance
         max_learning_rate: Maximum learning rate
         min_learning_rate: Minimum learning rate
@@ -49,9 +47,6 @@ def setup_wandb(
     if sft_training:
         project_name = "gpt2-sft"
         training_mode = "SFT"
-    elif mid_training:
-        project_name = "gpt2-midtraining"
-        training_mode = "mid-training"
     else:
         project_name = "gpt2-pretraining-scaling-law-muon"
         training_mode = "pretraining"
