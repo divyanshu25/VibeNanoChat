@@ -12,13 +12,13 @@ import time
 import torch
 
 import wandb
-# from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
+from gpt_2.muon import get_muon_momentum, get_muon_weight_decay
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
 from gpt_2.training_utilities import (setup_dataloaders, setup_logging,
                                       setup_wandb)
-from gpt_2.utils import (calculate_num_iterations, get_lr, get_peak_flops,
+from gpt_2.utils import (calculate_num_iterations, get_peak_flops,
                          load_checkpoint, save_checkpoint)
 
 
@@ -39,7 +39,6 @@ class Trainer:
         run_evals=False,
         run_core_evals=False,
         run_chatcore_evals=False,
-        mid_training=False,
         sft_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
@@ -48,9 +47,9 @@ class Trainer:
         aspect_ratio=None,
         head_dim=None,
         target_flops=None,
+        param_data_ratio=None,
         eval_interval=None,
         core_eval_interval=None,
-        use_muon=False,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -65,15 +64,15 @@ class Trainer:
             run_evals: Whether to run evaluations
             run_core_evals: Whether to run CORE benchmark evaluations
             run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
-            mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             sft_training: Whether to do SFT training (uses Multiplex dataloader with conversation data)
-            checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
-            checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
+            checkpoint_path: Path to checkpoint to load (for SFT or resuming)
+            checkpoint_dir: Directory to save checkpoints (pretraining or SFT specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
             depth: Model depth (auto-calculates n_layer/n_embed/n_head from depth × aspect_ratio)
             aspect_ratio: Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default from config)
             head_dim: Target head dimension for depth mode (default from config)
             target_flops: Target total FLOPs for training (overrides config.target_flops)
+            param_data_ratio: Token:Param ratio for training (overrides config.target_param_data_ratio)
         """
         # Store basic config
         self.ddp = ddp
@@ -85,7 +84,6 @@ class Trainer:
         self.run_evals = run_evals
         self.run_core_evals = run_core_evals
         self.run_chatcore_evals = run_chatcore_evals
-        self.mid_training = mid_training
         self.sft_training = sft_training
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
@@ -93,8 +91,8 @@ class Trainer:
         self.depth_override = depth
         self.aspect_ratio_override = aspect_ratio
         self.head_dim_override = head_dim
-        self.use_muon = use_muon
         self.target_flops_override = target_flops
+        self.param_data_ratio_override = param_data_ratio
         self.eval_interval_override = eval_interval
         self.core_eval_interval_override = core_eval_interval
 
@@ -104,7 +102,7 @@ class Trainer:
         self.start_global_step = 0
 
         # Select 4 random sample contexts for generation evaluation
-        if self.sft_training or self.mid_training:
+        if self.sft_training:
             self.sample_contexts = random.sample(
                 SFT_SAMPLE_CONTEXTS, min(4, len(SFT_SAMPLE_CONTEXTS))
             )
@@ -114,42 +112,18 @@ class Trainer:
             )
 
         # Setup components
-        self.generation_log_file = setup_logging(self.master_process)
         self._setup_model()
+        # Setup logging after model so we have depth info for filename
+        self.generation_log_file = setup_logging(
+            self.master_process,
+            depth=self.config.depth if self.config._depth_mode else None,
+            sft_training=self.sft_training,
+        )
         self._setup_hyperparameters()
         self._setup_dataloaders_wrapper()
         self._setup_optimizer_and_checkpoint()
         self._setup_wandb_wrapper()
         # self._setup_token_bytes()
-
-    def get_muon_momentum(self, step):
-        """
-        Muon momentum scheduler (nanochat-style).
-        Warms up from 0.85 to 0.95 over first 300 steps.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Momentum value for Muon optimizer
-        """
-        frac = min(step / 300, 1.0)
-        momentum = (1 - frac) * 0.85 + frac * 0.95
-        return momentum
-
-    def get_muon_weight_decay(self, step):
-        """
-        Muon weight decay scheduler (nanochat-style).
-        Linearly decays from initial value to 0 over the course of training.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Weight decay value for Muon optimizer
-        """
-        total_steps = self.max_steps * self.num_epochs
-        return self.weight_decay_scaled * (1 - step / total_steps)
 
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
@@ -209,6 +183,14 @@ class Trainer:
                 )
             self.config.target_flops = self.target_flops_override
 
+        # Override param_data_ratio if provided
+        if self.param_data_ratio_override is not None:
+            if self.master_process:
+                print(
+                    f"🎯 Overriding param_data_ratio: {self.config.target_param_data_ratio} → {self.param_data_ratio_override}"
+                )
+            self.config.target_param_data_ratio = self.param_data_ratio_override
+
         # Override eval_interval if provided
         if self.eval_interval_override is not None:
             if self.master_process:
@@ -232,12 +214,9 @@ class Trainer:
         # The DistMuonAdamW optimizer handles gradient synchronization internally
         # This provides better overlap of communication with computation
         #
-        # DDP wrapping is only used when NOT using Muon (AdamW-only mode)
-        if self.ddp and not self.use_muon:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model, device_ids=[self.ddp_local_rank]
-            )
-        elif self.ddp and self.use_muon:
+        # Nanochat-style: NO DDP wrapper when using Muon optimizer
+        # The DistMuonAdamW optimizer handles gradient synchronization internally
+        if self.ddp:
             if self.master_process:
                 print(
                     "Using DistMuonAdamW optimizer - skipping DDP wrapper (nanochat-style)"
@@ -312,8 +291,6 @@ class Trainer:
             print("\n" + "=" * 80)
             if self.sft_training:
                 print("📊 CALCULATING SFT TRAINING STEPS")
-            elif self.mid_training:
-                print("📊 CALCULATING MID-TRAINING STEPS")
             else:
                 print("📊 CALCULATING PRETRAINING STEPS")
             print("=" * 80)
@@ -340,10 +317,6 @@ class Trainer:
         # Set warmup steps based on training phase (calculated as % of max_steps)
         if self.sft_training:
             self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
-        elif self.mid_training:
-            self.warmup_steps = int(
-                self.max_steps * self.config.lr_warmup_ratio_midtrain
-            )
         else:
             self.warmup_steps = int(
                 self.max_steps * self.config.lr_warmup_ratio_pretrain
@@ -379,7 +352,6 @@ class Trainer:
         """Wrapper to setup dataloaders using utility functions."""
         results = setup_dataloaders(
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
             ddp_world_size=self.ddp_world_size,
             ddp_rank=self.ddp_rank,
@@ -390,14 +362,11 @@ class Trainer:
             raw_model=self.raw_model,
             device=self.device,
             ddp=self.ddp,
-            model=self.model,
-            eval_dataloader=None,  # Will be set by setup_dataloaders
             generation_log_file=self.generation_log_file,
             token_bytes_path=self.token_bytes_path,
         )
         (
             self.train_dataloader,
-            self.eval_dataloader,
             self.evaluator,
             self.core_evaluator,
             self.chatcore_evaluator,
@@ -424,7 +393,7 @@ class Trainer:
         # ===== Nanochat-style Weight Decay Scaling by Depth =====
         # Weight decay is tuned at depth=12, scales as ∝ 1/depth²
         weight_decay = self.config.weight_decay
-        if self.config._depth_mode and self.use_muon:
+        if self.config._depth_mode:
             reference_depth = 12
             wd_scale = (reference_depth / self.config.depth) ** 2
             weight_decay = self.config.weight_decay * wd_scale
@@ -449,7 +418,6 @@ class Trainer:
             learning_rate=self.max_learning_rate,
             weight_decay=weight_decay,
             device=self.device,
-            use_muon=self.use_muon,
             muon_lr=self.config.muon_lr,
             ddp=self.ddp,
             master_process=self.master_process,
@@ -475,25 +443,17 @@ class Trainer:
         if self.checkpoint_path:
             # Determine checkpoint source
             is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
-            is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
             is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
 
             # Define training scenario flags
-            is_rollover_pretrain_to_midtrain = self.mid_training and is_pretrain_ckpt
-            is_rollover_midtrain_to_sft = self.sft_training and is_midtrain_ckpt
-            is_resume_pretrain = (
-                not self.mid_training and not self.sft_training and is_pretrain_ckpt
-            )
-            is_resume_midtrain = self.mid_training and is_midtrain_ckpt
+            is_rollover_pretrain_to_sft = self.sft_training and is_pretrain_ckpt
+            is_resume_pretrain = not self.sft_training and is_pretrain_ckpt
             is_resume_sft = self.sft_training and is_sft_ckpt
 
             # Load optimizer only when resuming (not when rolling over)
-            is_rollover = (
-                is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
-            )
-            should_load_optimizer = not is_rollover
+            should_load_optimizer = not is_rollover_pretrain_to_sft
             # Don't print resume info for rollover scenarios
-            should_print_resume_info = not is_rollover
+            should_print_resume_info = not is_rollover_pretrain_to_sft
 
             checkpoint_result = load_checkpoint(
                 checkpoint_path=self.checkpoint_path,
@@ -507,41 +467,25 @@ class Trainer:
                 self.config = checkpoint_result["config"]
 
             # Reset training counters only when rolling over
-            if is_rollover_pretrain_to_midtrain:
+            if is_rollover_pretrain_to_sft:
                 self.start_epoch = 0
                 self.start_step = 0
                 self.start_global_step = 0
                 if self.master_process:
                     print(
-                        "🔄 Rollover: Pretraining → Mid-training "
-                        "(weights loaded, fresh optimizer, counters reset to 0)"
-                    )
-                    print("   Training will start from global_step: 0")
-                    print(f"{'='*80}\n")
-            elif is_rollover_midtrain_to_sft:
-                self.start_epoch = 0
-                self.start_step = 0
-                self.start_global_step = 0
-                if self.master_process:
-                    print(
-                        "🔄 Rollover: Mid-training → SFT "
+                        "🔄 Rollover: Pretraining → SFT "
                         "(weights loaded, fresh optimizer, counters reset to 0)"
                     )
                     print("   Training will start from global_step: 0")
                     print(f"{'='*80}\n")
             # Keep checkpoint counters when resuming
-            elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
+            elif is_resume_pretrain or is_resume_sft:
                 self.start_epoch = checkpoint_result["start_epoch"]
                 self.start_step = checkpoint_result["start_step"]
                 self.start_global_step = checkpoint_result["start_global_step"]
 
                 if self.master_process:
-                    if is_resume_pretrain:
-                        mode = "pretraining"
-                    elif is_resume_midtrain:
-                        mode = "mid-training"
-                    else:
-                        mode = "SFT"
+                    mode = "pretraining" if is_resume_pretrain else "SFT"
                     print(
                         f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
                         f"step {self.start_step}, global_step {self.start_global_step} "
@@ -552,16 +496,12 @@ class Trainer:
                 raise ValueError(
                     f"Unrecognized checkpoint scenario!\n"
                     f"  Checkpoint path: {self.checkpoint_path}\n"
-                    f"  mid_training flag: {self.mid_training}\n"
                     f"  sft_training flag: {self.sft_training}\n"
                     f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
-                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n"
                     f"  is_sft_ckpt: {is_sft_ckpt}\n\n"
                     f"Expected checkpoint path patterns:\n"
-                    f"  - For rollover pretrain→midtrain: mid_training=True + 'pretrain_checkpoints' in path\n"
-                    f"  - For rollover midtrain→sft: sft_training=True + 'midtrain_checkpoints' in path\n"
-                    f"  - For resume pretraining: mid_training=False + sft_training=False + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path\n"
+                    f"  - For rollover pretrain→sft: sft_training=True + 'pretrain_checkpoints' in path\n"
+                    f"  - For resume pretraining: sft_training=False + 'pretrain_checkpoints' in path\n"
                     f"  - For resume SFT: sft_training=True + 'sft_checkpoints' in path"
                 )
 
@@ -575,7 +515,6 @@ class Trainer:
         setup_wandb(
             master_process=self.master_process,
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
             max_learning_rate=self.max_learning_rate,
             min_learning_rate=self.min_learning_rate,
@@ -588,7 +527,6 @@ class Trainer:
             start_step=self.start_step,
             flops_per_token=self.flops_per_token,
             total_batch_size=self.total_batch_size,
-            use_muon=self.use_muon,
         )
 
     def _setup_token_bytes(self):
@@ -610,6 +548,9 @@ class Trainer:
         Includes gradient clipping, learning rate scheduling, and progress monitoring.
         """
         ## Start training ##
+        # Record training start time for total duration logging
+        training_start_time = time.time()
+
         # Set precision for matrix multiplications (improves performance on modern GPUs)
         torch.set_float32_matmul_precision("high")
 
@@ -624,10 +565,7 @@ class Trainer:
             tokens_params_ratio = total_tokens / num_params
 
             print("\n" + "=" * 80)
-            if self.mid_training:
-                print("🔄 STARTING MID-TRAINING")
-            else:
-                print("🚀 STARTING TRAINING")
+            print("🚀 STARTING TRAINING")
             print("=" * 80)
             if self.start_global_step > 0:
                 print(
@@ -703,7 +641,7 @@ class Trainer:
 
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
-                    x, y = self.train_dataloader.next_batch()
+                    x, y = next(self.train_dataloader)
                     x, y = x.to(self.device), y.to(self.device)
 
                     # Forward pass: compute per-token loss
@@ -717,22 +655,6 @@ class Trainer:
                     # Count active tokens (for SFT: targets >= 0, for pretrain: all tokens)
                     if self.sft_training:
                         num_active_tokens += (y >= 0).sum()
-
-                    # Accumulate for BPB calculation
-                    # if self._token_bytes is not None:
-                    #     nats, bytes = accumulate_bpb(per_token_loss, y, self._token_bytes)
-                    #     total_nats += nats
-                    #     total_bytes += bytes
-
-                    # Control gradient synchronization for DDP
-                    # Note: When using DistMuonAdamW (ddp=True, use_muon=True), the model
-                    # is NOT wrapped with DDP, so we skip this. DistMuonAdamW handles
-                    # gradient synchronization internally during optimizer.step()
-                    if self.ddp and not self.use_muon:
-                        self.model.require_backward_grad_sync = (
-                            micro_step == self.grad_accumulation_steps - 1
-                        )
-                    # Backward pass: compute gradients
                     loss.backward()
 
                 if self.ddp:
@@ -744,13 +666,6 @@ class Trainer:
                         torch.distributed.all_reduce(
                             num_active_tokens, op=torch.distributed.ReduceOp.SUM
                         )
-                    # if self._token_bytes is not None:
-                    #     torch.distributed.all_reduce(
-                    #         total_nats, op=torch.distributed.ReduceOp.SUM
-                    #     )
-                    #     torch.distributed.all_reduce(
-                    #         total_bytes, op=torch.distributed.ReduceOp.SUM
-                    #     )
 
                 # Gradient clipping to prevent exploding gradients
                 # This stabilizes training by limiting gradient magnitude
@@ -759,64 +674,46 @@ class Trainer:
                 )
 
                 # Update learning rate based on global step (continuous across epochs)
-                if self.use_muon:
-                    # Nanochat-style: Use get_lr_multiplier to get a multiplier for all param groups
-                    from gpt_2.utils import get_lr_multiplier
+                # Nanochat-style: Use get_lr_multiplier to get a multiplier for all param groups
+                from gpt_2.utils import get_lr_multiplier
 
-                    # Determine training phase
-                    if self.sft_training:
-                        training_phase = "sft"
-                    elif self.mid_training:
-                        training_phase = "midtrain"
-                    else:
-                        training_phase = "pretrain"
-
-                    lrm = get_lr_multiplier(
-                        global_step=global_step,
-                        max_steps=self.max_steps,
-                        num_epochs=self.num_epochs,
-                        training_phase=training_phase,
-                        warmup_ratio=self.config.warmup_ratio,
-                        warmdown_ratio=self.config.warmdown_ratio,
-                        final_lr_frac=self.config.final_lr_frac,
-                    )
-
-                    # Get Muon schedulers
-                    muon_momentum = self.get_muon_momentum(global_step)
-                    muon_weight_decay = self.get_muon_weight_decay(global_step)
-
-                    # Update all optimizers with nanochat-style scheduling
-                    for opt in self.optimizers:
-                        for param_group in opt.param_groups:
-                            # Apply LR multiplier to initial_lr
-                            param_group["lr"] = param_group["initial_lr"] * lrm
-
-                            # Update Muon-specific params
-                            if param_group.get("kind") == "muon":
-                                param_group["momentum"] = muon_momentum
-                                param_group["weight_decay"] = muon_weight_decay
-
-                    lr = lrm  # For logging
+                # Determine training phase
+                if self.sft_training:
+                    training_phase = "sft"
                 else:
-                    # Standard cosine schedule for AdamW-only
-                    lr = get_lr(
-                        global_step=global_step,
-                        warmup_steps=self.warmup_steps,
-                        max_steps=self.max_steps,
-                        num_epochs=self.num_epochs,
-                        max_learning_rate=self.max_learning_rate,
-                        min_learning_rate=self.min_learning_rate,
-                    )
-                    # Update LR for all optimizers
-                    for opt in self.optimizers:
-                        for param_group in opt.param_groups:
-                            # Scale LR based on initial_lr if available
-                            if "initial_lr" in param_group:
-                                param_group["lr"] = lr * (
-                                    param_group["initial_lr"] / self.max_learning_rate
-                                )
-                            else:
-                                param_group["lr"] = lr
+                    training_phase = "pretrain"
+
+                lrm = get_lr_multiplier(
+                    global_step=global_step,
+                    max_steps=self.max_steps,
+                    num_epochs=self.num_epochs,
+                    training_phase=training_phase,
+                    warmup_ratio=self.config.warmup_ratio,
+                    warmdown_ratio=self.config.warmdown_ratio,
+                    final_lr_frac=self.config.final_lr_frac,
+                )
+
+                # Get Muon schedulers
+                muon_momentum = get_muon_momentum(global_step)
+                muon_weight_decay = get_muon_weight_decay(
+                    global_step,
+                    self.max_steps,
+                    self.num_epochs,
+                    self.weight_decay_scaled,
+                )
+
+                # Update all optimizers with nanochat-style scheduling
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        # Apply LR multiplier to initial_lr
+                        param_group["lr"] = param_group["initial_lr"] * lrm
+
+                        # Update Muon-specific params
+                        if param_group.get("kind") == "muon":
+                            param_group["momentum"] = muon_momentum
+                            param_group["weight_decay"] = muon_weight_decay
+
+                lr = lrm  # For logging
 
                 # Apply gradients to update model parameters
                 for opt in self.optimizers:
@@ -862,12 +759,24 @@ class Trainer:
                         step=step, global_step=global_step, total_flops=flops_so_far
                     )
 
-                    # self.evaluator.sample_from_model(
-                    #     num_sequences=self.config.generation_num_samples,
-                    #     max_length=1024,
-                    #     context=sample_context,
-                    #     step=step,
-                    # )
+                    # Sample from model to see what it's learning
+                    if self.config.enable_sampling and self.master_process:
+                        print(f"\n{'='*80}")
+                        print(f"📝 SAMPLING FROM MODEL (Step {global_step})")
+                        print(f"{'='*80}\n")
+
+                        # Sample from multiple contexts to test different capabilities
+                        for i, context in enumerate(self.sample_contexts, 1):
+                            print(
+                                f"Context {i}/{len(self.sample_contexts)}: {context[:50]}..."
+                            )
+                            self.evaluator.sample_from_model(
+                                num_sequences=1,  # 1 sample per context to avoid spam
+                                max_length=self.config.generation_max_length,
+                                context=context,
+                                step=step,
+                            )
+                        print(f"{'='*80}\n")
 
                 # Run CORE evaluations if enabled (separate interval from val loss)
                 should_eval_core = (
@@ -882,14 +791,12 @@ class Trainer:
                 # Save checkpoint at intervals or at end of training (independent of evals)
                 if self.sft_training:
                     checkpoint_interval = self.config.checkpoint_interval_sft
-                elif self.mid_training:
-                    checkpoint_interval = self.config.checkpoint_interval_midtrain
                 else:
                     checkpoint_interval = self.config.checkpoint_interval_pretrain
 
                 save_checkpoint(
                     model=self.raw_model,  # Pass unwrapped model for clean state_dict
-                    optimizer=self.optimizers,  # Pass all optimizers (AdamW + Muon if enabled)
+                    optimizer=self.optimizers,  # Pass all optimizers (AdamW + Muon)
                     step=step,
                     epoch=epoch,
                     global_step=global_step,
@@ -900,19 +807,13 @@ class Trainer:
                     max_steps=self.max_steps,
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
-                    mid_training=self.mid_training,
                     sft_training=self.sft_training,
+                    depth=self.config.depth,
                 )
 
                 # Log metrics to wandb
                 if self.master_process:
                     train_loss = loss_accumulator.item()
-                    # # Compute train BPB
-                    # total_bytes_val = total_bytes.item()
-                    # if total_bytes_val > 0:
-                    #     train_bpb = total_nats.item() / (math.log(2) * total_bytes_val)
-                    # else:
-                    #     train_bpb = float("inf")
 
                     # Build logging dict with base metrics
                     log_dict = {
@@ -937,51 +838,35 @@ class Trainer:
                     # - Matrices: Medium learning (default 0.02) - core transformer weights with Muon
                     # - Scalars/Biases: Fast learning (default 0.5) - small params adjust quickly
 
-                    if self.use_muon:
-                        # Combined optimizer (nanochat-style) or legacy dual optimizer
-                        opt = self.optimizers[0]
+                    # Combined optimizer (nanochat-style)
+                    opt = self.optimizers[0]
 
-                        # Iterate through param_groups to find specific types
-                        adamw_groups = [
-                            g for g in opt.param_groups if g.get("kind") == "adamw"
-                        ]
-                        muon_groups = [
-                            g for g in opt.param_groups if g.get("kind") == "muon"
-                        ]
+                    # Iterate through param_groups to find specific types
+                    adamw_groups = [
+                        g for g in opt.param_groups if g.get("kind") == "adamw"
+                    ]
+                    muon_groups = [
+                        g for g in opt.param_groups if g.get("kind") == "muon"
+                    ]
 
-                        # Log AdamW learning rates (expect 3 groups: lm_head, embeddings, scalars)
-                        if len(adamw_groups) >= 3:
-                            log_dict["lr/unembedding"] = adamw_groups[0][
-                                "lr"
-                            ]  # lm_head
-                            log_dict["lr/embedding"] = adamw_groups[1][
-                                "lr"
-                            ]  # embeddings
-                            log_dict["lr/scalar"] = adamw_groups[2][
-                                "lr"
-                            ]  # scalars/biases
+                    # Log AdamW learning rates (expect 3 groups: lm_head, embeddings, scalars)
+                    if len(adamw_groups) >= 3:
+                        log_dict["lr/unembedding"] = adamw_groups[0]["lr"]  # lm_head
+                        log_dict["lr/embedding"] = adamw_groups[1]["lr"]  # embeddings
+                        log_dict["lr/scalar"] = adamw_groups[2]["lr"]  # scalars/biases
 
-                        # Log Muon learning rate and hyperparameters
-                        if len(muon_groups) > 0:
-                            log_dict["lr/matrix"] = muon_groups[0][
-                                "lr"
-                            ]  # All 2D transformer matrices
+                    # Log Muon learning rate and hyperparameters
+                    if len(muon_groups) > 0:
+                        log_dict["lr/matrix"] = muon_groups[0][
+                            "lr"
+                        ]  # All 2D transformer matrices
 
-                            # Log Muon-specific hyperparameters
-                            if "momentum" in muon_groups[0]:
-                                log_dict["muon/momentum"] = muon_groups[0]["momentum"]
-                            if "weight_decay" in muon_groups[0]:
-                                log_dict["muon/weight_decay"] = muon_groups[0][
-                                    "weight_decay"
-                                ]
-                    else:
-                        # For standard AdamW-only training (no Muon), just log main LR
-                        if (
-                            len(self.optimizers) > 0
-                            and len(self.optimizers[0].param_groups) > 0
-                        ):
-                            log_dict["lr/main"] = self.optimizers[0].param_groups[0][
-                                "lr"
+                        # Log Muon-specific hyperparameters
+                        if "momentum" in muon_groups[0]:
+                            log_dict["muon/momentum"] = muon_groups[0]["momentum"]
+                        if "weight_decay" in muon_groups[0]:
+                            log_dict["muon/weight_decay"] = muon_groups[0][
+                                "weight_decay"
                             ]
 
                     wandb.log(log_dict)
@@ -1025,9 +910,55 @@ class Trainer:
                     print("=" * 80 + "\n")
 
         # Training complete
+        training_end_time = time.time()
+        total_training_time = training_end_time - training_start_time
+
+        # Log dataloader packing statistics at end of training
+        if self.master_process and hasattr(self.train_dataloader, "get_stats"):
+            try:
+                # Stop dataloader iterator to signal workers we're done
+                # This prevents background prefetching from overflowing the buffer
+                if (
+                    hasattr(self.train_dataloader, "_iterator")
+                    and self.train_dataloader._iterator is not None
+                ):
+                    del self.train_dataloader._iterator
+                    self.train_dataloader._iterator = None
+
+                # Give workers a moment to finish current operations
+                time.sleep(0.5)
+
+                stats = self.train_dataloader.get_stats()
+                print(f"\n{'='*80}")
+                print("📦 DATALOADER PACKING STATS (Final)")
+                print(f"{'='*80}")
+                print(f"   Total tokens processed: {stats['total_tokens']:,}")
+                print(f"   Cropped tokens: {stats['cropped_tokens']:,}")
+                print(f"   Crop percentage: {stats['crop_percentage']:.2f}%")
+                print(f"   Final buffer size: {stats['buffer_size']}")
+                print(f"{'='*80}\n")
+            except Exception as e:
+                print(f"⚠️  Could not retrieve dataloader stats: {e}")
+
         if self.master_process:
+            # Format training time in human-readable format
+            hours = int(total_training_time // 3600)
+            minutes = int((total_training_time % 3600) // 60)
+            seconds = int(total_training_time % 60)
+
+            if hours > 0:
+                time_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                time_str = f"{minutes}m {seconds}s"
+            else:
+                time_str = f"{seconds}s"
+
             print("\n" + "=" * 80)
             print("✅ TRAINING COMPLETE!")
+            print("=" * 80)
+            print(f"⏱️  Total training time: {time_str} ({total_training_time:.2f}s)")
+            print(f"📊 Total steps completed: {global_step:,}")
+            print(f"📊 Average time per step: {total_training_time/global_step:.2f}s")
             print("=" * 80 + "\n")
 
         # Finish wandb run

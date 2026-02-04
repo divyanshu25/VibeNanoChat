@@ -26,6 +26,10 @@ def generate(
     device,
     random_number_generator,
     use_kv_cache=True,
+    verbose=True,
+    temperature=0.8,
+    top_k=50,
+    repetition_penalty=1.2,
 ):
     """
     Generate text sequences using the trained GPT model with optional KV caching.
@@ -46,6 +50,11 @@ def generate(
         device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
         random_number_generator: PyTorch random generator for sampling
         use_kv_cache (bool): Whether to use KV caching (default: True)
+        verbose (bool): Whether to print progress updates (default: True)
+        temperature (float): Sampling temperature (default: 0.8). Higher = more random
+        top_k (int): Top-k sampling parameter (default: 50)
+        repetition_penalty (float): Penalty for repeating tokens (default: 1.2).
+            Values > 1.0 discourage repetition. Higher values = stronger penalty.
 
     Returns:
         list: List of decoded text sequences
@@ -76,6 +85,9 @@ def generate(
     print(f"  - Context length: {x.size(1)} tokens")
     print(f"  - Target max length: {max_length} tokens")
     print(f"  - KV cache enabled: {use_kv_cache}")
+    print(f"  - Temperature: {temperature}")
+    print(f"  - Top-k: {top_k}")
+    print(f"  - Repetition penalty: {repetition_penalty}")
     print(f"{'='*60}\n")
 
     # Set random seed for reproducible generation
@@ -165,14 +177,45 @@ def generate(
     print("Starting token generation (decode phase)...\n")
     tokens_to_generate = max_length - x.size(1)
     while x.size(1) < max_length:
+        # =====================================================================
+        # STEP 1: Apply repetition penalty to discourage repeating tokens
+        # =====================================================================
+        if repetition_penalty != 1.0:
+            # Penalize tokens that already appeared in the sequence
+            # This reduces the probability of tokens we've seen before
+            for i in range(x.size(0)):  # For each sequence in batch
+                # Get unique tokens that have appeared in this sequence
+                previous_tokens = set(x[i].tolist())
+
+                for previous_token in previous_tokens:
+                    # Apply penalty: divide logits by penalty value
+                    # If logit > 0: divide by penalty (reduce probability)
+                    # If logit < 0: multiply by penalty (reduce probability more)
+                    if logits[i, previous_token] > 0:
+                        logits[i, previous_token] /= repetition_penalty
+                    else:
+                        logits[i, previous_token] *= repetition_penalty
+
+        # =====================================================================
+        # STEP 2: Apply temperature scaling for diversity
+        # =====================================================================
+        # Temperature controls randomness:
+        # - temperature < 1.0: More focused (peaks become sharper)
+        # - temperature = 1.0: Unchanged
+        # - temperature > 1.0: More random (flatter distribution)
+        if temperature != 1.0:
+            logits = logits / temperature
+
         # Convert logits to probabilities
         probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
 
-        # Apply top-k sampling (k=50) for diverse generation
+        # =====================================================================
+        # STEP 3: Apply top-k sampling for diverse generation
+        # =====================================================================
         # This helps avoid repetitive text by sampling from top-k most likely tokens
         topk_probs, topk_indices = torch.topk(
-            probs, 50, dim=-1
-        )  # topk_probs: (B, 50), topk_indices: (B, 50)
+            probs, top_k, dim=-1
+        )  # topk_probs: (B, top_k), topk_indices: (B, top_k)
 
         # Sample from the top-k distribution
         ix = torch.multinomial(
@@ -185,14 +228,15 @@ def generate(
         # Append the new token to the sequence
         x = torch.cat((x, xcol), dim=1)
 
-        # Progress monitoring
-        current_len = x.size(1)
-        tokens_generated = current_len - (max_length - tokens_to_generate)
-        if tokens_generated % 10 == 0 or current_len == max_length:
-            progress_pct = (tokens_generated / tokens_to_generate) * 100
-            print(
-                f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
-            )
+        # Progress monitoring (only if verbose)
+        if verbose:
+            current_len = x.size(1)
+            tokens_generated = current_len - (max_length - tokens_to_generate)
+            if tokens_generated % 10 == 0 or current_len == max_length:
+                progress_pct = (tokens_generated / tokens_to_generate) * 100
+                print(
+                    f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
+                )
 
         # Get next token's logits
         with torch.no_grad():
@@ -265,29 +309,78 @@ class TrainingEvaluator:
     def __init__(
         self,
         model,
-        eval_dataloader,
+        eval_dataloader_builder,
         device,
         master_process,
         ddp,
+        batch_size,
+        block_size,
         ddp_rank=0,
         ddp_world_size=1,
         generation_log_file=None,
         token_bytes_path=None,
-        val_loss_steps=39,
+        val_loss_tokens=None,
         sample_seed=42,
         use_kv_cache=True,
+        generation_verbose=False,
+        temperature=0.8,
+        top_k=50,
+        repetition_penalty=1.2,
     ):
+        """
+        Initialize training evaluator (nanochat-style).
+
+        Args:
+            model: The model to evaluate
+            eval_dataloader_builder: Callable that returns a fresh validation dataloader
+            device: Device to run evaluation on
+            master_process: Whether this is the master process
+            ddp: Whether using DDP
+            batch_size: Batch size (required - used to calculate validation steps from tokens)
+            block_size: Sequence length (required - used to calculate validation steps from tokens)
+            ddp_rank: DDP rank
+            ddp_world_size: DDP world size
+            generation_log_file: Path to save generation samples
+            token_bytes_path: Path to token_bytes.pt for BPB calculation
+            val_loss_tokens: Number of tokens to use for validation (nanochat default: 20 * 524288)
+            sample_seed: Random seed for sampling
+            use_kv_cache: Whether to use KV cache for generation
+            generation_verbose: Whether to print verbose progress during generation (default: False)
+            temperature: Sampling temperature for generation (default: 0.8)
+            top_k: Top-k sampling parameter (default: 50)
+        """
         self.model = model
-        self.eval_dataloader = eval_dataloader
+        self.eval_dataloader_builder = eval_dataloader_builder
         self.device = device
         self.master_process = master_process
         self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.ddp_world_size = ddp_world_size
         self.generation_log_file = generation_log_file
-        self.val_loss_steps = val_loss_steps
         self.sample_seed = sample_seed
         self.use_kv_cache = use_kv_cache
+        self.generation_verbose = generation_verbose
+        self.batch_size = batch_size
+        self.block_size = block_size
+        self.temperature = temperature
+        self.top_k = top_k
+        self.repetition_penalty = repetition_penalty
+
+        # Nanochat-style: Calculate validation steps from tokens (not row groups)
+        # Default: 20 * 524288 = 10,485,760 tokens
+        if val_loss_tokens is None:
+            val_loss_tokens = 20 * 524288  # nanochat default
+
+        # Calculate steps: eval_tokens / (batch_size * block_size * world_size)
+        tokens_per_batch = batch_size * block_size * ddp_world_size
+        self.val_loss_steps = val_loss_tokens // tokens_per_batch
+        self.val_loss_tokens = val_loss_tokens
+
+        if master_process:
+            print("✓ Validation config (nanochat-style):")
+            print(f"   Tokens per validation: {val_loss_tokens:,}")
+            print(f"   Tokens per batch: {tokens_per_batch:,}")
+            print(f"   Validation steps: {self.val_loss_steps}")
 
         # Load pre-computed token_bytes tensor for BPB calculation
         if token_bytes_path is not None:
@@ -302,6 +395,9 @@ class TrainingEvaluator:
         Estimate average loss on validation set and compute bits per byte (BPB).
         BPB is tokenization-independent: normalized by actual byte length of tokens.
 
+        Nanochat-style: Creates a fresh validation dataloader each time to ensure
+        consistent starting point for validation.
+
         Args:
             step: Current step within epoch
             global_step: Global step across all epochs (for wandb logging)
@@ -313,7 +409,10 @@ class TrainingEvaluator:
         start_time = time.time()
 
         self.model.eval()
-        self.eval_dataloader.reset()
+
+        # Nanochat-style: Create a fresh validation dataloader each time
+        # This ensures we always start from the beginning of validation set
+        eval_dataloader = self.eval_dataloader_builder()
         val_loss_steps = self.val_loss_steps
 
         token_bytes = self._token_bytes
@@ -326,7 +425,7 @@ class TrainingEvaluator:
 
         with torch.no_grad():
             for k in range(val_loss_steps):
-                X, Y = self.eval_dataloader.next_batch()
+                X, Y = next(eval_dataloader)
                 X = X.to(self.device)
                 Y = Y.to(self.device)
                 with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
@@ -412,18 +511,34 @@ class TrainingEvaluator:
             f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
         )
 
-        # Unwrap model from DDP if needed (generation only happens on master process)
-        raw_model = self.model.module if self.ddp else self.model
+        # =====================================================================
+        # CRITICAL: Set model to eval mode for generation
+        # =====================================================================
+        # This disables dropout, switches batch norm to inference mode, etc.
+        # Without this, generation would have dropout randomly dropping activations!
+        self.model.eval()
 
+        # Note: self.model is already the raw unwrapped model (passed from trainer)
+        # No need to unwrap from DDP since nanochat-style doesn't use DDP wrapper
         decoded = generate(
             num_sequences=num_sequences,
             max_length=max_length,
-            model=raw_model,
+            model=self.model,
             context=context,
             device=self.device,
             random_number_generator=sample_rng,
             use_kv_cache=self.use_kv_cache,
+            verbose=self.generation_verbose,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            repetition_penalty=self.repetition_penalty,
         )
+
+        # =====================================================================
+        # CRITICAL: Restore training mode after generation
+        # =====================================================================
+        # The model needs to be back in training mode for continued training
+        self.model.train()
 
         elapsed_time = time.time() - start_time
 

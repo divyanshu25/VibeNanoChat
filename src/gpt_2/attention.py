@@ -2,6 +2,7 @@
 import os
 import sys
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -12,7 +13,82 @@ sys.path.append(parent_dir)
 from gpt_2.rope import apply_rotary_emb
 
 
+# =============================================================================
+# Flash Attention 3 Detection and Loading
+# =============================================================================
+def _load_flash_attention_3():
+    """Try to load Flash Attention 3 pre-compiled kernels (requires Hopper GPU, sm90)."""
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, _ = torch.cuda.get_device_capability()
+        # FA3 kernels are compiled for Hopper (sm90) only
+        if major != 9:
+            return None
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        from kernels import get_kernel
+
+        return get_kernel("varunneal/flash-attention-3").flash_attn_interface
+    except Exception:
+        return None
+
+
+_fa3 = _load_flash_attention_3()
+HAS_FA3 = _fa3 is not None
+
+# Print which backend is being used
+if HAS_FA3:
+    print("✅ Flash Attention 3 is available and will be used (pre-compiled kernels)")
+else:
+    print("⚠️  Flash Attention 3 not available, falling back to PyTorch SDPA")
+
+
+def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
+    """
+    Unified attention interface that uses Flash Attention 3 if available,
+    otherwise falls back to PyTorch SDPA (which uses FA2).
+
+    Args:
+        q: Query tensor (B, n_head, T, head_dim)
+        k: Key tensor (B, n_kv_head, T, head_dim)
+        v: Value tensor (B, n_kv_head, T, head_dim)
+        is_causal: Whether to apply causal masking
+        enable_gqa: Whether grouped-query attention is being used
+
+    Returns:
+        Output tensor (B, n_head, T, head_dim)
+    """
+    # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
+    B, n_head, T, head_dim = q.shape
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    # Use FA3 only if available AND tensors are on CUDA (FA3 doesn't support CPU)
+    # Use FA3 only if:
+    # 1. FA3 is available
+    # 2. Tensors are on CUDA (FA3 doesn't support CPU)
+    # 3. Dtype is supported (fp16, bf16, or fp8_e4m3)
+    supported_dtypes = (torch.float16, torch.bfloat16, torch.float8_e4m3fn)
+    use_fa3 = HAS_FA3 and q.is_cuda and q.dtype in supported_dtypes
+
+    if use_fa3:
+        # Use Flash Attention 3 pre-compiled kernels
+        output = _fa3.flash_attn_func(q, k, v, causal=is_causal)
+    else:
+        # Fallback to PyTorch SDPA (works on CPU, CUDA, and all dtypes)
+        output = F.scaled_dot_product_attention(
+            q, k, v, is_causal=is_causal, enable_gqa=enable_gqa
+        )
+
+    # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
+    return output.transpose(1, 2)
+
+
 class CausalSelfAttention(nn.Module):
+    # Class variable to track if we've printed attention info (shared across all instances)
+    _printed_attention_info = False
+
     def __init__(self, config, layer_idx=None):
         """
         Initialize Causal Self-Attention layer.
@@ -131,14 +207,14 @@ class CausalSelfAttention(nn.Module):
             # CASE 1: No KV cache (training) OR prefill phase (Tq == Tk)
             # Use standard causal attention: each position can only attend to
             # itself and previous positions
-            y = F.scaled_dot_product_attention(
+            y = attention_forward(
                 q, k, v, is_causal=True, enable_gqa=(self.n_kv_head < self.n_head)
             )
         elif Tq == 1:
             # CASE 2: Single token generation (most common during inference)
             # The single query token can attend to ALL cached tokens (no masking needed)
             # This is super efficient: only 1 token forward pass!
-            y = F.scaled_dot_product_attention(
+            y = attention_forward(
                 q, k, v, is_causal=False, enable_gqa=(self.n_kv_head < self.n_head)
             )
         else:
@@ -147,7 +223,10 @@ class CausalSelfAttention(nn.Module):
             # Need custom attention mask:
             # - Each query can attend to ALL cached tokens (prefix)
             # - Each query can only attend causally within the new tokens
-            import torch
+            #
+            # NOTE: We use F.scaled_dot_product_attention here instead of flash_attn_func
+            # because arbitrary attention masks are easier to handle with PyTorch SDPA.
+            # This case is rare (only during multi-token generation with cache).
 
             attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)
             prefix_len = Tk - Tq

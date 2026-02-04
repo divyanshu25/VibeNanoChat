@@ -113,7 +113,7 @@ class CoreEvaluator:
             }
 
             # Evaluate task
-            accuracy = evaluate_task(
+            accuracy, num_evaluated = evaluate_task(
                 model=self.model,
                 tokenizer=self.tokenizer,
                 data=task["data"],
@@ -133,7 +133,7 @@ class CoreEvaluator:
 
             if self.master_process:
                 print(
-                    f"  [{i+1}/{len(self.tasks)}] {task_label}: {accuracy:.4f} ({task_time:.1f}s)"
+                    f"  [{i+1}/{len(self.tasks)}] {task_label}: {accuracy:.4f} ({num_evaluated} examples, {task_time:.1f}s)"
                 )
 
         self.model.train()

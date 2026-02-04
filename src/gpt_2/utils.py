@@ -139,14 +139,13 @@ def get_lr_multiplier(
 
     Training Phase Schedules (matching nanochat exactly):
     - pretrain: warmup -> constant -> warmdown to final_lr_frac
-    - midtrain: constant for 80% of training -> linear decay to 0
     - sft/rl: linear decay from 1.0 to 0 (no warmup)
 
     Args:
         global_step: Current global training step (across all epochs)
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
-        training_phase: One of "pretrain", "midtrain", "sft", "rl"
+        training_phase: One of "pretrain", "sft", "rl"
         warmup_ratio: Ratio of iterations for LR warmup (pretrain only, default 0.0)
         warmdown_ratio: Ratio of iterations for LR warmdown (pretrain only, default 0.4)
         final_lr_frac: Final LR as fraction of initial LR (pretrain only, default 0.0)
@@ -172,18 +171,13 @@ def get_lr_multiplier(
             progress = (total_steps - global_step) / warmdown_iters
             return progress * 1.0 + (1 - progress) * final_lr_frac
 
-    elif training_phase == "midtrain":
-        # Nanochat mid_train logic: constant for 80%, then linear decay to 0
-        progress = global_step / total_steps
-        return 1.0 if progress < 0.8 else 1.0 - (progress - 0.8) / 0.2
-
     elif training_phase in ["sft", "rl"]:
         # Nanochat chat_sft/chat_rl logic: linear decay from 1.0 to 0
         return 1.0 - global_step / total_steps
 
     else:
         raise ValueError(
-            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, midtrain, sft, rl"
+            f"Unknown training_phase: {training_phase}. Must be one of: pretrain, sft, rl"
         )
 
 
@@ -244,8 +238,15 @@ def load_checkpoint(
     Expects canonical format with clean state_dict (no 'module.' prefix).
     Model should be the raw unwrapped model (e.g., self.raw_model from trainer).
 
+    Backward compatible with multiple checkpoint filename formats:
+        - New format: step10000_d12_pretrain.pt
+        - Old format: model_checkpoint_global10000_pretraining.pt
+
+    The function loads based on checkpoint content, not filename, so any
+    filename format works as long as the checkpoint contains the required keys.
+
     Args:
-        checkpoint_path: Path to the checkpoint file
+        checkpoint_path: Path to the checkpoint file (any naming format)
         model: Raw unwrapped model (not DDP/compile wrapped)
         device: Device to map the checkpoint to ('cuda', 'cpu', etc.)
         optimizer: Optional single optimizer or list of optimizers to load state into
@@ -374,14 +375,21 @@ def save_checkpoint(
     max_steps: int = 17234,
     num_epochs: int = 3,
     master_process: bool = True,
-    mid_training: bool = False,
     sft_training: bool = False,
+    depth: int = None,
 ) -> None:
     """
-    Save model checkpoint at specified intervals.
+    Save model checkpoint at specified intervals with informative filename.
 
     Model should be the raw unwrapped model (e.g., self.raw_model from trainer)
     to ensure clean state_dict without 'module.' or other wrapper prefixes.
+
+    Checkpoint filename format:
+        step{global_step}_depth{depth}_{mode}.pt
+
+    Examples:
+        step10000_depth14_pretrain.pt
+        step5000_depth18_sft.pt
 
     Args:
         model: Raw unwrapped model to save (not DDP/compile wrapped)
@@ -396,8 +404,8 @@ def save_checkpoint(
         max_steps: Maximum steps per epoch
         num_epochs: Total number of epochs
         master_process: Whether this is the master process
-        mid_training: Whether this is mid-training mode
         sft_training: Whether this is SFT training mode
+        depth: Model depth (for depth-based architecture, -1 if not using depth mode)
     """
     total_steps = max_steps * num_epochs
     should_save = (global_step > 0 and global_step % checkpoint_interval == 0) or (
@@ -434,16 +442,22 @@ def save_checkpoint(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    if sft_training:
-        checkpoint_suffix = "_sft"
-    elif mid_training:
-        checkpoint_suffix = "_midtraining"
-    else:
-        checkpoint_suffix = "_pretraining"
+    # Build informative checkpoint filename
+    mode = "sft" if sft_training else "pretrain"
 
-    checkpoint_path = (
-        f"{checkpoint_dir}/model_checkpoint_global{global_step}{checkpoint_suffix}.pt"
-    )
+    # Base filename with global step
+    filename_parts = [f"step{global_step}"]
+
+    # Add depth if provided
+    if depth is not None and depth > 0:
+        filename_parts.append(f"depth{depth}")
+
+    # Add training mode
+    filename_parts.append(mode)
+
+    # Join all parts with underscores
+    checkpoint_filename = "_".join(filename_parts) + ".pt"
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
 
     torch.save(checkpoint, checkpoint_path)
     print(f"\n💾 Checkpoint saved: {checkpoint_path}\n")

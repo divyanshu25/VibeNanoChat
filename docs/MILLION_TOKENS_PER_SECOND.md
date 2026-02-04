@@ -725,7 +725,7 @@ cd VibeNanoChat
 make environment
 
 # Download data
-cd data/fineweb_edu && uv run python prepare.py && cd ../..
+cd data/fineweb_edu && uv run python prepare_parquet.py --config sample-10BT && cd ../..
 
 # Train with all optimizations (8 GPUs)
 make ddp-train NGPUS=8 DEPTH=12 TARGET_FLOPS=1e18

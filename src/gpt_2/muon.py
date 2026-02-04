@@ -27,6 +27,50 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
+# ==============================================================================
+# Muon Schedulers (nanochat-style)
+# ==============================================================================
+
+
+def get_muon_momentum(step: int) -> float:
+    """
+    Muon momentum scheduler (nanochat-style).
+    Warms up from 0.85 to 0.95 over first 300 steps.
+
+    Args:
+        step: Current training step
+
+    Returns:
+        float: Momentum value for Muon optimizer
+    """
+    frac = min(step / 300, 1.0)
+    momentum = (1 - frac) * 0.85 + frac * 0.95
+    return momentum
+
+
+def get_muon_weight_decay(
+    step: int, max_steps: int, num_epochs: int, weight_decay_scaled: float
+) -> float:
+    """
+    Muon weight decay scheduler (nanochat-style).
+    Linearly decays from initial value to 0 over the course of training.
+
+    Args:
+        step: Current training step
+        max_steps: Maximum steps per epoch
+        num_epochs: Total number of epochs
+        weight_decay_scaled: Initial weight decay value (scaled)
+
+    Returns:
+        float: Weight decay value for Muon optimizer
+    """
+    total_steps = max_steps * num_epochs
+    return weight_decay_scaled * (1 - step / total_steps)
+
+
+# ==============================================================================
+# Polar Express Coefficients
+# ==============================================================================
 # Coefficients for Polar Express (computed for num_iters=5, safety_factor=2e-2, cushion=2)
 # From https://arxiv.org/pdf/2505.16932
 # These are precomputed (a, b, c) tuples for the iterative orthogonalization formula:

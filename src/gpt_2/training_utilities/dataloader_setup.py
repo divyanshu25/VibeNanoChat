@@ -1,56 +1,10 @@
 """Dataloader setup utilities for the trainer."""
 
-from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
-from dataloaders.task_mixture_dataloader import TaskMixtureDataloader
+from dataloaders.fineweb_edu_parquet_bos_dataloader import \
+    FinewebEduParquetBOSDataloader
 from eval_tasks import CoreEvaluator
 from eval_tasks.training import TrainingEvaluator
 from gpt_2.utils import get_custom_tokenizer
-
-
-def create_evaluator(
-    model,
-    eval_dataloader,
-    device,
-    master_process,
-    ddp,
-    ddp_rank,
-    ddp_world_size,
-    generation_log_file,
-    token_bytes_path,
-    config,
-):
-    """
-    Create a TrainingEvaluator with standard configuration.
-
-    Args:
-        model: The model to evaluate
-        eval_dataloader: The evaluation dataloader to use
-        device: Device to run evaluation on
-        master_process: Whether this is the master process
-        ddp: Whether using DDP
-        ddp_rank: DDP rank
-        ddp_world_size: DDP world size
-        generation_log_file: Path to generation log file
-        token_bytes_path: Path to token bytes file
-        config: GPTConfig instance
-
-    Returns:
-        TrainingEvaluator instance
-    """
-    return TrainingEvaluator(
-        model=model,
-        eval_dataloader=eval_dataloader,
-        device=device,
-        master_process=master_process,
-        ddp=ddp,
-        ddp_rank=ddp_rank,
-        ddp_world_size=ddp_world_size,
-        generation_log_file=generation_log_file,
-        token_bytes_path=token_bytes_path,
-        val_loss_steps=config.val_loss_eval_batches,
-        sample_seed=config.generation_seed,
-        use_kv_cache=config.use_kv_cache,
-    )
 
 
 def setup_pretraining_dataloaders(
@@ -58,77 +12,41 @@ def setup_pretraining_dataloaders(
     ddp_world_size,
     ddp_rank,
     master_process,
-    run_evals,
+    device="cuda",
 ):
     """
-    Setup dataloaders for pretraining mode.
+    Setup training dataloader for pretraining mode.
 
     Args:
         config: GPTConfig instance
         ddp_world_size: DDP world size
         ddp_rank: DDP rank
         master_process: Whether this is the master process
-        run_evals: Whether to create evaluation dataloader
+        device: Device for tensor allocation ('cuda' or 'cpu')
 
     Returns:
-        tuple: (train_dataloader, eval_dataloader)
+        DataLoader: Training dataloader
+
+    Note:
+        Validation dataloader is created on-demand via builder pattern (nanochat-style)
     """
-    DataloaderClass = FinewebEduDataloader
-    data_dir = config.data_dir_pretrain
-
-    train_dataloader = DataloaderClass(
-        data_dir=data_dir,
-        batch_size=config.batch_size,
-        block_size=config.block_size,
-        ddp_world_size=ddp_world_size,
-        ddp_rank=ddp_rank,
-        split="train",
-        master_process=master_process,
-    )
-
-    if run_evals:
-        eval_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=config.batch_size,
-            block_size=config.block_size,
-            ddp_world_size=ddp_world_size,
-            ddp_rank=ddp_rank,
-            split="val",
-            master_process=master_process,
-        )
-    else:
-        eval_dataloader = None
-
-    return train_dataloader, eval_dataloader
-
-
-def setup_midtraining_dataloaders(
-    config,
-    ddp_world_size,
-    ddp_rank,
-    master_process,
-    run_evals,
-):
-    """
-    Setup dataloaders for mid-training mode.
-
-    Args:
-        config: GPTConfig instance
-        ddp_world_size: DDP world size
-        ddp_rank: DDP rank
-        master_process: Whether this is the master process
-        run_evals: Whether to create evaluation dataloader
-
-    Returns:
-        tuple: (train_dataloader, eval_dataloader)
-    """
-    DataloaderClass = TaskMixtureDataloader
-    data_dir = config.data_dir_midtrain
-
+    # Use Parquet BOS-aligned dataloader for pretraining (PyTorch-native)
+    DataloaderClass = FinewebEduParquetBOSDataloader
+    data_dir = config.data_dir_pretrain_parquet
+    extra_kwargs = {
+        "buffer_size": config.bos_dataloader_buffer_size,
+        "device": device,
+        "num_workers": config.dataloader_num_workers,
+        "prefetch_factor": config.dataloader_prefetch_factor,
+        "persistent_workers": config.dataloader_persistent_workers,
+    }
     if master_process:
-        print("\n" + "=" * 80)
-        print("🔄 MID-TRAINING MODE: Using TaskMixture datasets")
-        print("=" * 80 + "\n")
+        print("📚 PRETRAINING: Using PyTorch-native BOS-aligned dataloader")
+        print(f"   Data directory: {data_dir}")
+        print(
+            f"   Workers: {config.dataloader_num_workers}, Prefetch: {config.dataloader_prefetch_factor}"
+        )
+        print("   Expected token waste: ~35% (cropping for document boundaries)")
 
     train_dataloader = DataloaderClass(
         data_dir=data_dir,
@@ -138,22 +56,10 @@ def setup_midtraining_dataloaders(
         ddp_rank=ddp_rank,
         split="train",
         master_process=master_process,
+        **extra_kwargs,
     )
 
-    if run_evals:
-        eval_dataloader = DataloaderClass(
-            data_dir=data_dir,
-            batch_size=config.batch_size,
-            block_size=config.block_size,
-            ddp_world_size=ddp_world_size,
-            ddp_rank=ddp_rank,
-            split="val",
-            master_process=master_process,
-        )
-    else:
-        eval_dataloader = None
-
-    return train_dataloader, eval_dataloader
+    return train_dataloader
 
 
 def setup_sft_dataloaders(
@@ -312,7 +218,6 @@ def setup_sft_dataloaders(
 
 def setup_dataloaders(
     sft_training,
-    mid_training,
     config,
     ddp_world_size,
     ddp_rank,
@@ -323,8 +228,6 @@ def setup_dataloaders(
     raw_model,
     device,
     ddp,
-    model,
-    eval_dataloader,
     generation_log_file,
     token_bytes_path,
 ):
@@ -333,7 +236,6 @@ def setup_dataloaders(
 
     Args:
         sft_training: Whether doing SFT training
-        mid_training: Whether doing mid-training
         config: GPTConfig instance
         ddp_world_size: DDP world size
         ddp_rank: DDP rank
@@ -341,44 +243,80 @@ def setup_dataloaders(
         run_evals: Whether to run evaluations
         run_core_evals: Whether to run CORE evaluations
         run_chatcore_evals: Whether to run ChatCORE evaluations
-        raw_model: The raw (unwrapped) model
+        raw_model: The raw (unwrapped) model for evaluators
         device: Device to use
         ddp: Whether using DDP
-        model: The model (possibly wrapped)
-        eval_dataloader: Evaluation dataloader (will be set by this function)
         generation_log_file: Path to generation log file
         token_bytes_path: Path to token bytes file
 
     Returns:
-        tuple: (train_dataloader, eval_dataloader, evaluator, core_evaluator, chatcore_evaluator)
+        tuple: (train_dataloader, evaluator, core_evaluator, chatcore_evaluator)
     """
     # Setup train and eval dataloaders based on mode
     if sft_training:
         train_dataloader, eval_dataloader = setup_sft_dataloaders(
             config, ddp_world_size, ddp_rank, master_process, run_evals
         )
-    elif mid_training:
-        train_dataloader, eval_dataloader = setup_midtraining_dataloaders(
-            config, ddp_world_size, ddp_rank, master_process, run_evals
-        )
+
+        # For SFT, we already have the dataloader instance (if run_evals is True)
+        if run_evals:
+
+            def eval_dataloader_builder():
+                if master_process:
+                    print("🔄 Using SFT validation dataloader...")
+                return eval_dataloader
+
     else:
-        train_dataloader, eval_dataloader = setup_pretraining_dataloaders(
-            config, ddp_world_size, ddp_rank, master_process, run_evals
+        train_dataloader = setup_pretraining_dataloaders(
+            config,
+            ddp_world_size,
+            ddp_rank,
+            master_process,
+            device=device,
         )
+
+        # Nanochat-style: Create a builder function that returns a fresh dataloader each time
+        if run_evals:
+
+            def eval_dataloader_builder():
+                if master_process:
+                    print("🔄 Creating fresh validation dataloader...")
+                return FinewebEduParquetBOSDataloader(
+                    data_dir=config.data_dir_pretrain_parquet,
+                    batch_size=config.batch_size,
+                    block_size=config.block_size,
+                    ddp_world_size=ddp_world_size,
+                    ddp_rank=ddp_rank,
+                    split="val",
+                    master_process=False,  # Don't print banner each time
+                    buffer_size=config.bos_dataloader_buffer_size,
+                    device=device,
+                    num_workers=config.dataloader_num_workers,
+                    prefetch_factor=config.dataloader_prefetch_factor,
+                    persistent_workers=config.dataloader_persistent_workers,
+                )
 
     # Create evaluator if needed
     if run_evals:
-        evaluator = create_evaluator(
-            model,
-            eval_dataloader,
-            device,
-            master_process,
-            ddp,
-            ddp_rank,
-            ddp_world_size,
-            generation_log_file,
-            token_bytes_path,
-            config,
+        evaluator = TrainingEvaluator(
+            model=raw_model,  # Pass raw_model for clean generation (no DDP/compile wrapper)
+            eval_dataloader_builder=eval_dataloader_builder,
+            device=device,
+            master_process=master_process,
+            ddp=ddp,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+            generation_log_file=generation_log_file,
+            token_bytes_path=token_bytes_path,
+            val_loss_tokens=config.val_loss_eval_tokens,
+            batch_size=config.batch_size,
+            block_size=config.block_size,
+            sample_seed=config.generation_seed,
+            use_kv_cache=config.use_kv_cache,
+            generation_verbose=config.generation_verbose,
+            temperature=config.generation_temperature,
+            top_k=config.generation_top_k,
+            repetition_penalty=config.generation_repetition_penalty,
         )
     else:
         evaluator = None
@@ -467,7 +405,6 @@ def setup_dataloaders(
 
     return (
         train_dataloader,
-        eval_dataloader,
         evaluator,
         core_evaluator,
         chatcore_evaluator,

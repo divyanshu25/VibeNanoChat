@@ -29,11 +29,11 @@ def apply_rotary_emb(x, cos, sin):
     x1, x2 = x[..., :d], x[..., d:]  # This will split the head_dim into two halves
 
     # Apply rotation to pairs of dimensions
-    # This is equivalent to complex number rotation: e^(-iθ) * z
-    # Note: This uses negative rotation (matching nanochat implementation)
-    # 2D rotation matrix: [cos sin; -sin cos]
-    y1 = x1 * cos + x2 * sin
-    y2 = x1 * (-sin) + x2 * cos
+    # This is equivalent to complex number rotation: e^(iθ) * z
+    # Standard 2D rotation matrix: [cos -sin; sin cos]
+    # Correctly implements RoPE from RoFormer paper (Su et al., 2021)
+    y1 = x1 * cos - x2 * sin
+    y2 = x1 * sin + x2 * cos
 
     return torch.cat([y1, y2], dim=3)  # shape: (B, T, n_head, head_dim)
 
