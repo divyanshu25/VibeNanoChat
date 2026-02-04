@@ -170,6 +170,7 @@ def run_pretraining(
     aspect_ratio=None,
     head_dim=None,
     target_flops=None,
+    param_data_ratio=None,
     eval_interval=None,
     core_eval_interval=None,
 ):
@@ -195,6 +196,7 @@ def run_pretraining(
         aspect_ratio (int, optional): Aspect ratio for depth mode
         head_dim (int, optional): Target head dimension
         target_flops (float, optional): Target total FLOPs for training
+        param_data_ratio (int, optional): Token:Param ratio (Chinchilla optimal = 20)
         eval_interval (int, optional): Steps between validation evaluations
         core_eval_interval (int, optional): Steps between CORE evaluations
 
@@ -235,6 +237,7 @@ def run_pretraining(
         aspect_ratio=aspect_ratio,
         head_dim=head_dim,
         target_flops=target_flops,
+        param_data_ratio=param_data_ratio,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
     )
@@ -426,6 +429,7 @@ def run_trainer(args):
                 aspect_ratio=args.aspect_ratio,
                 head_dim=args.head_dim,
                 target_flops=args.target_flops,
+                param_data_ratio=args.param_data_ratio,
                 eval_interval=args.eval_interval,
                 core_eval_interval=args.core_eval_interval,
             )
@@ -544,6 +548,13 @@ Examples:
         type=float,
         default=None,
         help="Target total FLOPs for training (overrides config.target_flops); useful for scaling laws",
+    )
+
+    parser.add_argument(
+        "--param-data-ratio",
+        type=int,
+        default=None,
+        help="Token:Param ratio for training (overrides config.target_param_data_ratio); Chinchilla optimal = 20",
     )
 
     # ========================================================================

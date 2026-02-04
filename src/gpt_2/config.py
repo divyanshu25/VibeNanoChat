@@ -60,8 +60,8 @@ class GPTConfig:
     num_iterations: int = (
         -1
     )  # Explicit number of optimization steps (-1 = calculate from ratio/flops)
-    target_flops: float = 1e18  # Target total FLOPs (-1 = use param_data_ratio instead)
-    target_param_data_ratio: int = -1  # Data:param ratio (Chinchilla optimal = 20)
+    target_flops: float = -1  # Target total FLOPs (-1 = use param_data_ratio instead)
+    target_param_data_ratio: int = 10  # Data:param ratio (Chinchilla optimal = 20)
 
     # ========================================================================
     # Learning Rate Schedule (Nanochat-style)

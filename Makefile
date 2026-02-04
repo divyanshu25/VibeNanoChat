@@ -147,9 +147,16 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	ASPECT_RATIO=$${ASPECT_RATIO:-64}; \
 	HEAD_DIM=$${HEAD_DIM:-128}; \
 	TARGET_FLOPS=$${TARGET_FLOPS:-}; \
+	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-}; \
 	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
+	if [ -n "$$TARGET_FLOPS" ]; then \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
+	elif [ -n "$$PARAM_DATA_RATIO" ]; then \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_R$${PARAM_DATA_RATIO}_$${TIMESTAMP}.log"; \
+	else \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_Rconfig_$${TIMESTAMP}.log"; \
+	fi; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
 	echo "📝 Logging to: $$LOG_FILE"; \
@@ -178,8 +185,13 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		CMD="$$CMD --depth $$DEPTH --aspect-ratio $$ASPECT_RATIO --head-dim $$HEAD_DIM"; \
 	fi; \
 	if [ -n "$$TARGET_FLOPS" ]; then \
-		echo "🎯 Target FLOPs: $$TARGET_FLOPS"; \
+		echo "🎯 Training budget: Fixed FLOPs ($$TARGET_FLOPS)"; \
 		CMD="$$CMD --target-flops $$TARGET_FLOPS"; \
+	elif [ -n "$$PARAM_DATA_RATIO" ]; then \
+		echo "🎯 Training budget: Token:Param ratio ($$PARAM_DATA_RATIO:1)"; \
+		CMD="$$CMD --param-data-ratio $$PARAM_DATA_RATIO"; \
+	else \
+		echo "🎯 Training budget: Token:Param ratio (from config, default 20:1)"; \
 	fi; \
 	if [ -n "$$EVAL_INTERVAL" ]; then \
 		echo "⏱️  Eval interval: $$EVAL_INTERVAL steps"; \

@@ -47,6 +47,7 @@ class Trainer:
         aspect_ratio=None,
         head_dim=None,
         target_flops=None,
+        param_data_ratio=None,
         eval_interval=None,
         core_eval_interval=None,
     ):
@@ -71,6 +72,7 @@ class Trainer:
             aspect_ratio: Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default from config)
             head_dim: Target head dimension for depth mode (default from config)
             target_flops: Target total FLOPs for training (overrides config.target_flops)
+            param_data_ratio: Token:Param ratio for training (overrides config.target_param_data_ratio)
         """
         # Store basic config
         self.ddp = ddp
@@ -90,6 +92,7 @@ class Trainer:
         self.aspect_ratio_override = aspect_ratio
         self.head_dim_override = head_dim
         self.target_flops_override = target_flops
+        self.param_data_ratio_override = param_data_ratio
         self.eval_interval_override = eval_interval
         self.core_eval_interval_override = core_eval_interval
 
@@ -179,6 +182,14 @@ class Trainer:
                     f"🎯 Overriding target_flops: {self.config.target_flops:.2e} → {self.target_flops_override:.2e}"
                 )
             self.config.target_flops = self.target_flops_override
+
+        # Override param_data_ratio if provided
+        if self.param_data_ratio_override is not None:
+            if self.master_process:
+                print(
+                    f"🎯 Overriding param_data_ratio: {self.config.target_param_data_ratio} → {self.param_data_ratio_override}"
+                )
+            self.config.target_param_data_ratio = self.param_data_ratio_override
 
         # Override eval_interval if provided
         if self.eval_interval_override is not None:
