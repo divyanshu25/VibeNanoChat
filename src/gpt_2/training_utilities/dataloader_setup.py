@@ -224,7 +224,6 @@ def setup_dataloaders(
     raw_model,
     device,
     ddp,
-    model,
     generation_log_file,
     token_bytes_path,
 ):
@@ -240,10 +239,9 @@ def setup_dataloaders(
         run_evals: Whether to run evaluations
         run_core_evals: Whether to run CORE evaluations
         run_chatcore_evals: Whether to run ChatCORE evaluations
-        raw_model: The raw (unwrapped) model
+        raw_model: The raw (unwrapped) model for evaluators
         device: Device to use
         ddp: Whether using DDP
-        model: The model (possibly wrapped)
         generation_log_file: Path to generation log file
         token_bytes_path: Path to token bytes file
 
@@ -296,7 +294,7 @@ def setup_dataloaders(
     # Create evaluator if needed
     if run_evals:
         evaluator = TrainingEvaluator(
-            model=model,
+            model=raw_model,  # Pass raw_model for clean generation (no DDP/compile wrapper)
             eval_dataloader_builder=eval_dataloader_builder,
             device=device,
             master_process=master_process,

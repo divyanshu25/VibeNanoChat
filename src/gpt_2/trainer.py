@@ -109,8 +109,13 @@ class Trainer:
             )
 
         # Setup components
-        self.generation_log_file = setup_logging(self.master_process)
         self._setup_model()
+        # Setup logging after model so we have depth info for filename
+        self.generation_log_file = setup_logging(
+            self.master_process,
+            depth=self.config.depth if self.config._depth_mode else None,
+            sft_training=self.sft_training,
+        )
         self._setup_hyperparameters()
         self._setup_dataloaders_wrapper()
         self._setup_optimizer_and_checkpoint()
@@ -346,7 +351,6 @@ class Trainer:
             raw_model=self.raw_model,
             device=self.device,
             ddp=self.ddp,
-            model=self.model,
             generation_log_file=self.generation_log_file,
             token_bytes_path=self.token_bytes_path,
         )
@@ -741,12 +745,24 @@ class Trainer:
                         step=step, global_step=global_step, total_flops=flops_so_far
                     )
 
-                    # self.evaluator.sample_from_model(
-                    #     num_sequences=self.config.generation_num_samples,
-                    #     max_length=1024,
-                    #     context=sample_context,
-                    #     step=step,
-                    # )
+                    # Sample from model to see what it's learning
+                    if self.config.enable_sampling and self.master_process:
+                        print(f"\n{'='*80}")
+                        print(f"📝 SAMPLING FROM MODEL (Step {global_step})")
+                        print(f"{'='*80}\n")
+
+                        # Sample from multiple contexts to test different capabilities
+                        for i, context in enumerate(self.sample_contexts, 1):
+                            print(
+                                f"Context {i}/{len(self.sample_contexts)}: {context[:50]}..."
+                            )
+                            self.evaluator.sample_from_model(
+                                num_sequences=1,  # 1 sample per context to avoid spam
+                                max_length=self.config.generation_max_length,
+                                context=context,
+                                step=step,
+                            )
+                        print(f"{'='*80}\n")
 
                 # Run CORE evaluations if enabled (separate interval from val loss)
                 should_eval_core = (

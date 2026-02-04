@@ -142,6 +142,7 @@ class GPTConfig:
     # ========================================================================
     # Generation Sampling (during evaluation)
     # ========================================================================
+    enable_sampling: bool = True  # Enable text generation sampling during training
     generation_num_samples: int = 4  # Number of sequences to generate per evaluation
     generation_max_length: int = 256  # Maximum tokens per generated sequence
     generation_seed: int = 42  # Random seed for reproducible generation

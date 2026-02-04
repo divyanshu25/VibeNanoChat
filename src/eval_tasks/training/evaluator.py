@@ -456,13 +456,12 @@ class TrainingEvaluator:
             f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
         )
 
-        # Unwrap model from DDP if needed (generation only happens on master process)
-        raw_model = self.model.module if self.ddp else self.model
-
+        # Note: self.model is already the raw unwrapped model (passed from trainer)
+        # No need to unwrap from DDP since nanochat-style doesn't use DDP wrapper
         decoded = generate(
             num_sequences=num_sequences,
             max_length=max_length,
-            model=raw_model,
+            model=self.model,
             context=context,
             device=self.device,
             random_number_generator=sample_rng,
