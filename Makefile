@@ -149,13 +149,12 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	TARGET_FLOPS=$${TARGET_FLOPS:-}; \
 	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-}; \
 	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
-	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
 	if [ -n "$$TARGET_FLOPS" ]; then \
 		LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
 	elif [ -n "$$PARAM_DATA_RATIO" ]; then \
-		LOG_FILE="logs/scaling_laws_N$${DEPTH}_R$${PARAM_DATA_RATIO}_$${TIMESTAMP}.log"; \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_R$${PARAM_DATA_RATIO}.log"; \
 	else \
-		LOG_FILE="logs/scaling_laws_N$${DEPTH}_Rconfig_$${TIMESTAMP}.log"; \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_Rconfig.log"; \
 	fi; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \

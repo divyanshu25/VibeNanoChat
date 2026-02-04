@@ -27,6 +27,8 @@ def generate(
     random_number_generator,
     use_kv_cache=True,
     verbose=True,
+    temperature=0.8,
+    top_k=50,
 ):
     """
     Generate text sequences using the trained GPT model with optional KV caching.
@@ -48,6 +50,8 @@ def generate(
         random_number_generator: PyTorch random generator for sampling
         use_kv_cache (bool): Whether to use KV caching (default: True)
         verbose (bool): Whether to print progress updates (default: True)
+        temperature (float): Sampling temperature (default: 0.8). Higher = more random
+        top_k (int): Top-k sampling parameter (default: 50)
 
     Returns:
         list: List of decoded text sequences
@@ -78,6 +82,8 @@ def generate(
     print(f"  - Context length: {x.size(1)} tokens")
     print(f"  - Target max length: {max_length} tokens")
     print(f"  - KV cache enabled: {use_kv_cache}")
+    print(f"  - Temperature: {temperature}")
+    print(f"  - Top-k: {top_k}")
     print(f"{'='*60}\n")
 
     # Set random seed for reproducible generation
@@ -167,14 +173,26 @@ def generate(
     print("Starting token generation (decode phase)...\n")
     tokens_to_generate = max_length - x.size(1)
     while x.size(1) < max_length:
+        # =====================================================================
+        # STEP 1: Apply temperature scaling for diversity
+        # =====================================================================
+        # Temperature controls randomness:
+        # - temperature < 1.0: More focused (peaks become sharper)
+        # - temperature = 1.0: Unchanged
+        # - temperature > 1.0: More random (flatter distribution)
+        if temperature != 1.0:
+            logits = logits / temperature
+
         # Convert logits to probabilities
         probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
 
-        # Apply top-k sampling (k=50) for diverse generation
+        # =====================================================================
+        # STEP 2: Apply top-k sampling for diverse generation
+        # =====================================================================
         # This helps avoid repetitive text by sampling from top-k most likely tokens
         topk_probs, topk_indices = torch.topk(
-            probs, 50, dim=-1
-        )  # topk_probs: (B, 50), topk_indices: (B, 50)
+            probs, top_k, dim=-1
+        )  # topk_probs: (B, top_k), topk_indices: (B, top_k)
 
         # Sample from the top-k distribution
         ix = torch.multinomial(
@@ -282,6 +300,8 @@ class TrainingEvaluator:
         sample_seed=42,
         use_kv_cache=True,
         generation_verbose=False,
+        temperature=0.8,
+        top_k=50,
     ):
         """
         Initialize training evaluator (nanochat-style).
@@ -302,6 +322,8 @@ class TrainingEvaluator:
             sample_seed: Random seed for sampling
             use_kv_cache: Whether to use KV cache for generation
             generation_verbose: Whether to print verbose progress during generation (default: False)
+            temperature: Sampling temperature for generation (default: 0.8)
+            top_k: Top-k sampling parameter (default: 50)
         """
         self.model = model
         self.eval_dataloader_builder = eval_dataloader_builder
@@ -316,6 +338,8 @@ class TrainingEvaluator:
         self.generation_verbose = generation_verbose
         self.batch_size = batch_size
         self.block_size = block_size
+        self.temperature = temperature
+        self.top_k = top_k
 
         # Nanochat-style: Calculate validation steps from tokens (not row groups)
         # Default: 20 * 524288 = 10,485,760 tokens
@@ -462,6 +486,13 @@ class TrainingEvaluator:
             f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
         )
 
+        # =====================================================================
+        # CRITICAL: Set model to eval mode for generation
+        # =====================================================================
+        # This disables dropout, switches batch norm to inference mode, etc.
+        # Without this, generation would have dropout randomly dropping activations!
+        self.model.eval()
+
         # Note: self.model is already the raw unwrapped model (passed from trainer)
         # No need to unwrap from DDP since nanochat-style doesn't use DDP wrapper
         decoded = generate(
@@ -473,7 +504,15 @@ class TrainingEvaluator:
             random_number_generator=sample_rng,
             use_kv_cache=self.use_kv_cache,
             verbose=self.generation_verbose,
+            temperature=self.temperature,
+            top_k=self.top_k,
         )
+
+        # =====================================================================
+        # CRITICAL: Restore training mode after generation
+        # =====================================================================
+        # The model needs to be back in training mode for continued training
+        self.model.train()
 
         elapsed_time = time.time() - start_time
 

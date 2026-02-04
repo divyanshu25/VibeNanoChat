@@ -309,6 +309,8 @@ def setup_dataloaders(
             sample_seed=config.generation_seed,
             use_kv_cache=config.use_kv_cache,
             generation_verbose=config.generation_verbose,
+            temperature=config.generation_temperature,
+            top_k=config.generation_top_k,
         )
     else:
         evaluator = None

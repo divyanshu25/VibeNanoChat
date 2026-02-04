@@ -548,6 +548,9 @@ class Trainer:
         Includes gradient clipping, learning rate scheduling, and progress monitoring.
         """
         ## Start training ##
+        # Record training start time for total duration logging
+        training_start_time = time.time()
+
         # Set precision for matrix multiplications (improves performance on modern GPUs)
         torch.set_float32_matmul_precision("high")
 
@@ -907,9 +910,28 @@ class Trainer:
                     print("=" * 80 + "\n")
 
         # Training complete
+        training_end_time = time.time()
+        total_training_time = training_end_time - training_start_time
+
         if self.master_process:
+            # Format training time in human-readable format
+            hours = int(total_training_time // 3600)
+            minutes = int((total_training_time % 3600) // 60)
+            seconds = int(total_training_time % 60)
+
+            if hours > 0:
+                time_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                time_str = f"{minutes}m {seconds}s"
+            else:
+                time_str = f"{seconds}s"
+
             print("\n" + "=" * 80)
             print("✅ TRAINING COMPLETE!")
+            print("=" * 80)
+            print(f"⏱️  Total training time: {time_str} ({total_training_time:.2f}s)")
+            print(f"📊 Total steps completed: {global_step:,}")
+            print(f"📊 Average time per step: {total_training_time/global_step:.2f}s")
             print("=" * 80 + "\n")
 
         # Finish wandb run
