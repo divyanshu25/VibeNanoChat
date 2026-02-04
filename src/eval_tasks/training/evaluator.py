@@ -26,6 +26,7 @@ def generate(
     device,
     random_number_generator,
     use_kv_cache=True,
+    verbose=True,
 ):
     """
     Generate text sequences using the trained GPT model with optional KV caching.
@@ -46,6 +47,7 @@ def generate(
         device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
         random_number_generator: PyTorch random generator for sampling
         use_kv_cache (bool): Whether to use KV caching (default: True)
+        verbose (bool): Whether to print progress updates (default: True)
 
     Returns:
         list: List of decoded text sequences
@@ -185,14 +187,15 @@ def generate(
         # Append the new token to the sequence
         x = torch.cat((x, xcol), dim=1)
 
-        # Progress monitoring
-        current_len = x.size(1)
-        tokens_generated = current_len - (max_length - tokens_to_generate)
-        if tokens_generated % 10 == 0 or current_len == max_length:
-            progress_pct = (tokens_generated / tokens_to_generate) * 100
-            print(
-                f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
-            )
+        # Progress monitoring (only if verbose)
+        if verbose:
+            current_len = x.size(1)
+            tokens_generated = current_len - (max_length - tokens_to_generate)
+            if tokens_generated % 10 == 0 or current_len == max_length:
+                progress_pct = (tokens_generated / tokens_to_generate) * 100
+                print(
+                    f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
+                )
 
         # Get next token's logits
         with torch.no_grad():
@@ -278,6 +281,7 @@ class TrainingEvaluator:
         val_loss_tokens=None,
         sample_seed=42,
         use_kv_cache=True,
+        generation_verbose=False,
     ):
         """
         Initialize training evaluator (nanochat-style).
@@ -297,6 +301,7 @@ class TrainingEvaluator:
             val_loss_tokens: Number of tokens to use for validation (nanochat default: 20 * 524288)
             sample_seed: Random seed for sampling
             use_kv_cache: Whether to use KV cache for generation
+            generation_verbose: Whether to print verbose progress during generation (default: False)
         """
         self.model = model
         self.eval_dataloader_builder = eval_dataloader_builder
@@ -308,6 +313,7 @@ class TrainingEvaluator:
         self.generation_log_file = generation_log_file
         self.sample_seed = sample_seed
         self.use_kv_cache = use_kv_cache
+        self.generation_verbose = generation_verbose
         self.batch_size = batch_size
         self.block_size = block_size
 
@@ -466,6 +472,7 @@ class TrainingEvaluator:
             device=self.device,
             random_number_generator=sample_rng,
             use_kv_cache=self.use_kv_cache,
+            verbose=self.generation_verbose,
         )
 
         elapsed_time = time.time() - start_time

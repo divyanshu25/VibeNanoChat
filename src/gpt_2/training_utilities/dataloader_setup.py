@@ -308,6 +308,7 @@ def setup_dataloaders(
             block_size=config.block_size,
             sample_seed=config.generation_seed,
             use_kv_cache=config.use_kv_cache,
+            generation_verbose=config.generation_verbose,
         )
     else:
         evaluator = None
