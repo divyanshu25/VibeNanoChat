@@ -400,8 +400,7 @@ def main():
 
     print("\n🚀 Usage in Training:")
     print("   1. Set in config.py:")
-    print(f"      data_dir_pretrain = '{args.output_dir}'")
-    print("      use_bos_aligned_dataloader = True")
+    print(f"      data_dir_pretrain_parquet = '{args.output_dir}'")
     print("\n   2. Dataloader behavior:")
     print("      • Reads all shards except last for training")
     print("      • Uses last shard for validation")

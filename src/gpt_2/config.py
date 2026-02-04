@@ -102,10 +102,7 @@ class GPTConfig:
     # Data Directories
     # ========================================================================
     # Standard binary dataloaders (streaming, no BOS alignment):
-    data_dir_pretrain: str = "/sensei-fs/users/divgoyal/fineweb_edu"
-
-    # Parquet dataloaders (BOS-aligned, nanochat-style):
-    # Set use_bos_aligned_dataloader=True and update paths below
+    # Parquet dataloader (BOS-aligned, nanochat-style) - now the only option
     data_dir_pretrain_parquet: str = "/sensei-fs/users/divgoyal/fineweb_edu_parquet"
 
     sft_cache_dir: str = (
@@ -115,9 +112,6 @@ class GPTConfig:
     # ========================================================================
     # Dataloader Configuration
     # ========================================================================
-    use_bos_aligned_dataloader: bool = (
-        False  # Use BOS-aligned Parquet dataloader (nanochat-style)
-    )
     bos_dataloader_buffer_size: int = (
         1000  # Document buffer size for BOS-aligned packing
     )

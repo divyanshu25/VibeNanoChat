@@ -22,7 +22,7 @@ This repo is a reorganization attempt at the original nanoGPT and nanochat codeb
 make environment
 
 # Get some data
-cd data/fineweb_edu && uv run python prepare.py && cd ../..
+cd data/fineweb_edu && uv run python prepare_parquet.py --config sample-10BT && cd ../..
 
 # Train
 make ddp-train NGPUS=8 MODE=pretraining
@@ -261,7 +261,7 @@ Training setup:
 High-quality educational content from the web (think Wikipedia, educational blogs, tutorials). Your model learns how language works and picks up world knowledge. Train for one epoch and you're done.
 
 ```bash
-cd data/fineweb_edu && uv run python prepare.py
+cd data/fineweb_edu && uv run python prepare_parquet.py --config sample-10BT
 make ddp-train NGPUS=8 MODE=pretraining
 ```
 
@@ -359,9 +359,9 @@ For base models you get raw text continuation. For mid-trained models you get pr
 ## Finetuning on your own data
 
 1. Format as text files (one doc per line, or use delimiters)
-2. Copy `data/fineweb_edu/prepare.py` and modify for your data
-3. Tokenize and save as `train.bin` / `val.bin`
-4. Run mid-training mode with a pretrained checkpoint
+2. Copy `data/fineweb_edu/prepare_parquet.py` and modify for your data
+3. Save as Parquet shards (see prepare_parquet.py for format details)
+4. Update config.py with your data directory path
 
 For chat format, use special tokens `<|im_start|>` and `<|im_end|>` (see TaskMixture for examples).
 

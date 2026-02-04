@@ -12,9 +12,9 @@ import time
 import torch
 
 import wandb
-# from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
 from gpt_2.config import GPTConfig
 from gpt_2.gpt2_model import GPT
+from gpt_2.muon import get_muon_momentum, get_muon_weight_decay
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
 from gpt_2.training_utilities import (setup_dataloaders, setup_logging,
                                       setup_wandb)
@@ -118,35 +118,6 @@ class Trainer:
         self._setup_optimizer_and_checkpoint()
         self._setup_wandb_wrapper()
         # self._setup_token_bytes()
-
-    def get_muon_momentum(self, step):
-        """
-        Muon momentum scheduler (nanochat-style).
-        Warms up from 0.85 to 0.95 over first 300 steps.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Momentum value for Muon optimizer
-        """
-        frac = min(step / 300, 1.0)
-        momentum = (1 - frac) * 0.85 + frac * 0.95
-        return momentum
-
-    def get_muon_weight_decay(self, step):
-        """
-        Muon weight decay scheduler (nanochat-style).
-        Linearly decays from initial value to 0 over the course of training.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Weight decay value for Muon optimizer
-        """
-        total_steps = self.max_steps * self.num_epochs
-        return self.weight_decay_scaled * (1 - step / total_steps)
 
     def _setup_model(self):
         """Initialize GPT model and wrap with DDP if needed."""
@@ -738,8 +709,13 @@ class Trainer:
                     )
 
                     # Get Muon schedulers
-                    muon_momentum = self.get_muon_momentum(global_step)
-                    muon_weight_decay = self.get_muon_weight_decay(global_step)
+                    muon_momentum = get_muon_momentum(global_step)
+                    muon_weight_decay = get_muon_weight_decay(
+                        global_step,
+                        self.max_steps,
+                        self.num_epochs,
+                        self.weight_decay_scaled,
+                    )
 
                     # Update all optimizers with nanochat-style scheduling
                     for opt in self.optimizers:

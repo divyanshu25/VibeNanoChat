@@ -1,6 +1,5 @@
 """Dataloader setup utilities for the trainer."""
 
-from dataloaders.fineweb_edu_dataloader import FinewebEduDataloader
 from dataloaders.fineweb_edu_parquet_bos_dataloader import \
     FinewebEduParquetBOSDataloader
 from eval_tasks import CoreEvaluator
@@ -76,29 +75,19 @@ def setup_pretraining_dataloaders(
     Returns:
         tuple: (train_dataloader, eval_dataloader)
     """
-    # Choose dataloader class and data directory based on config
-    if config.use_bos_aligned_dataloader:
-        DataloaderClass = FinewebEduParquetBOSDataloader
-        data_dir = config.data_dir_pretrain_parquet
-        extra_kwargs = {
-            "buffer_size": config.bos_dataloader_buffer_size,
-            "device": device,
-            "tokenizer_threads": 4,
-            "tokenizer_batch_size": 128,
-        }
-        if master_process:
-            print(
-                "📚 PRETRAINING: Using Parquet BOS-aligned dataloader (nanochat-style)"
-            )
-            print(f"   Data directory: {data_dir}")
-            print("   Expected token waste: ~35% (cropping for document boundaries)")
-    else:
-        DataloaderClass = FinewebEduDataloader
-        data_dir = config.data_dir_pretrain
-        extra_kwargs = {}
-        if master_process:
-            print("📚 PRETRAINING: Using standard streaming dataloader")
-            print(f"   Data directory: {data_dir}")
+    # Use Parquet BOS-aligned dataloader for pretraining
+    DataloaderClass = FinewebEduParquetBOSDataloader
+    data_dir = config.data_dir_pretrain_parquet
+    extra_kwargs = {
+        "buffer_size": config.bos_dataloader_buffer_size,
+        "device": device,
+        "tokenizer_threads": 4,
+        "tokenizer_batch_size": 128,
+    }
+    if master_process:
+        print("📚 PRETRAINING: Using Parquet BOS-aligned dataloader (nanochat-style)")
+        print(f"   Data directory: {data_dir}")
+        print("   Expected token waste: ~35% (cropping for document boundaries)")
 
     train_dataloader = DataloaderClass(
         data_dir=data_dir,
