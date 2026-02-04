@@ -385,10 +385,11 @@ def save_checkpoint(
     to ensure clean state_dict without 'module.' or other wrapper prefixes.
 
     Checkpoint filename format:
-        step{global_step}_d{depth}_{mode}.pt
+        step{global_step}_depth{depth}_{mode}.pt
+
     Examples:
-        step10000_d12_pretrain.pt
-        step5000_d18_sft.pt
+        step10000_depth14_pretrain.pt
+        step5000_depth18_sft.pt
 
     Args:
         model: Raw unwrapped model to save (not DDP/compile wrapped)
@@ -404,7 +405,7 @@ def save_checkpoint(
         num_epochs: Total number of epochs
         master_process: Whether this is the master process
         sft_training: Whether this is SFT training mode
-        depth: Model depth (for depth-based architecture)
+        depth: Model depth (for depth-based architecture, -1 if not using depth mode)
     """
     total_steps = max_steps * num_epochs
     should_save = (global_step > 0 and global_step % checkpoint_interval == 0) or (
@@ -448,8 +449,8 @@ def save_checkpoint(
     filename_parts = [f"step{global_step}"]
 
     # Add depth if provided
-    if depth is not None:
-        filename_parts.append(f"d{depth}")
+    if depth is not None and depth > 0:
+        filename_parts.append(f"depth{depth}")
 
     # Add training mode
     filename_parts.append(mode)
