@@ -913,6 +913,33 @@ class Trainer:
         training_end_time = time.time()
         total_training_time = training_end_time - training_start_time
 
+        # Log dataloader packing statistics at end of training
+        if self.master_process and hasattr(self.train_dataloader, "get_stats"):
+            try:
+                # Stop dataloader iterator to signal workers we're done
+                # This prevents background prefetching from overflowing the buffer
+                if (
+                    hasattr(self.train_dataloader, "_iterator")
+                    and self.train_dataloader._iterator is not None
+                ):
+                    del self.train_dataloader._iterator
+                    self.train_dataloader._iterator = None
+
+                # Give workers a moment to finish current operations
+                time.sleep(0.5)
+
+                stats = self.train_dataloader.get_stats()
+                print(f"\n{'='*80}")
+                print("📦 DATALOADER PACKING STATS (Final)")
+                print(f"{'='*80}")
+                print(f"   Total tokens processed: {stats['total_tokens']:,}")
+                print(f"   Cropped tokens: {stats['cropped_tokens']:,}")
+                print(f"   Crop percentage: {stats['crop_percentage']:.2f}%")
+                print(f"   Final buffer size: {stats['buffer_size']}")
+                print(f"{'='*80}\n")
+            except Exception as e:
+                print(f"⚠️  Could not retrieve dataloader stats: {e}")
+
         if self.master_process:
             # Format training time in human-readable format
             hours = int(total_training_time // 3600)

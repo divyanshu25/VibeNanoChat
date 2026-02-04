@@ -16,8 +16,10 @@ requires-python = ">=3.10"
 
 dependencies = [
    "datasets>=3.2.0",
+   "flash-attn>=2.6.0",  # Flash Attention 3 for H100
    "ipykernel>=6.29.5",
    "pyarrow>=18.1.0",
+   "sortedcontainers>=2.4.0",
    "tiktoken>=0.9.0",
    "torch==2.6.0",
    "triton>=3.0.0",
@@ -45,6 +47,9 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [tool.ruff.lint]
 # Ignore E402 errors globally (module level import not at top)

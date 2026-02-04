@@ -113,11 +113,13 @@ class GPTConfig:
     # Dataloader Configuration
     # ========================================================================
     bos_dataloader_buffer_size: int = (
-        1000  # Document buffer size for BOS-aligned packing
+        2048  # Document buffer size for BOS-aligned packing
     )
-    dataloader_num_workers: int = 4  # Number of DataLoader workers for parallel I/O
+    dataloader_num_workers: int = (
+        2  # Number of DataLoader workers for parallel I/O (reduced from 4 to prevent buffer overflow)
+    )
     dataloader_prefetch_factor: int = (
-        2  # Batches to prefetch per worker (8 total with 4 workers)
+        2  # Batches to prefetch per worker (4 total with 2 workers)
     )
     dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
 
@@ -133,7 +135,7 @@ class GPTConfig:
     # Evaluation Schedule
     # ========================================================================
     eval_interval: int = (
-        500  # Run validation loss evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
+        2000  # Run validation loss evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
     )
     core_eval_interval: int = (
         2000  # Run CORE benchmark evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
@@ -167,7 +169,7 @@ class GPTConfig:
     # CORE Benchmark Evaluation (multiple choice tasks)
     # ========================================================================
     core_eval_max_examples: int | None = (
-        None  # Max examples per task (None = all examples, int = limit for faster evals)
+        500  # Max examples per task (None = all examples, int = limit for faster evals)
     )
 
     # ========================================================================

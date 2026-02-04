@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: help uv uvlock venv dotenv environment jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
 
 .DEFAULT_GOAL := help
 
@@ -68,7 +68,14 @@ uvlock: ## Sync project with uv
 venv: dotenv ## Create virtual environment
 	@echo "🐍 Setting up your Python virtual environment..."
 	@$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) venv --python $(PYTHON_VERSION)
-	@$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) sync --frozen
+	@echo ""
+	@echo "📦 Installing dependencies (flash-attn will take 10-30 minutes to compile)..."
+	@echo "💡 Tip: Set MAX_JOBS to speed up compilation (e.g., make venv MAX_JOBS=8)"
+	@if [ -n "$(MAX_JOBS)" ]; then \
+		echo "⚡ Using $(MAX_JOBS) parallel jobs for compilation"; \
+		export MAX_JOBS=$(MAX_JOBS); \
+	fi; \
+	$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) sync --frozen
 	@echo "🎉 Virtual environment setup complete!"
 
 environment: uv uvlock venv ## Create environment
@@ -77,6 +84,18 @@ environment: uv uvlock venv ## Create environment
 	@echo "💡 Quick start commands:"
 	@echo "   👉  To activate: source .venv/bin/activate"
 	@echo "✨ Happy coding with NanoGPT!"
+
+flash-attn: ## Install/rebuild flash-attn with optimized compilation. Usage: make flash-attn [MAX_JOBS=8]
+	@echo "⚡ Installing flash-attn (this will take 10-30 minutes)..."
+	@if [ -n "$(MAX_JOBS)" ]; then \
+		echo "🔧 Using $(MAX_JOBS) parallel compilation jobs"; \
+		export MAX_JOBS=$(MAX_JOBS); \
+		$(uv) pip install --force-reinstall --no-deps flash-attn>=2.6.0; \
+	else \
+		echo "💡 Tip: Use 'make flash-attn MAX_JOBS=8' to speed up compilation"; \
+		$(uv) pip install --force-reinstall --no-deps flash-attn>=2.6.0; \
+	fi
+	@echo "✅ flash-attn installation complete!"
 
 
 jupyter-kernel: venv ## Register environment as Jupyter kernel

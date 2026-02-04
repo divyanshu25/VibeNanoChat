@@ -2,6 +2,7 @@
 import os
 import sys
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -10,6 +11,58 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from gpt_2.rope import apply_rotary_emb
+
+# Try to import Flash Attention 3 (falls back to PyTorch SDPA if not available)
+try:
+    from flash_attn import flash_attn_func
+
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
+
+
+def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
+    """
+    Unified attention interface that uses Flash Attention 3 if available,
+    otherwise falls back to PyTorch SDPA (which uses FA2).
+
+    Args:
+        q: Query tensor (B, n_head, T, head_dim)
+        k: Key tensor (B, n_kv_head, T, head_dim)
+        v: Value tensor (B, n_kv_head, T, head_dim)
+        is_causal: Whether to apply causal masking
+        enable_gqa: Whether grouped-query attention is being used
+
+    Returns:
+        Output tensor (B, n_head, T, head_dim)
+    """
+    if HAS_FLASH_ATTN:
+        # Flash Attention 3: Direct kernel call (fastest on H100)
+        # Requires shape: (B, T, n_head, head_dim) - different from SDPA!
+        B, n_head, T, head_dim = q.shape
+        _, n_kv_head, _, _ = k.shape
+
+        # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # flash_attn_func automatically handles GQA if n_head != n_kv_head
+        output = flash_attn_func(
+            q,
+            k,
+            v,
+            causal=is_causal,
+            # Flash Attention 3 automatically uses optimal algorithm for H100
+        )
+
+        # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
+        return output.transpose(1, 2)
+    else:
+        # Fallback to PyTorch SDPA (uses Flash Attention 2 internally)
+        return F.scaled_dot_product_attention(
+            q, k, v, is_causal=is_causal, enable_gqa=enable_gqa
+        )
 
 
 class CausalSelfAttention(nn.Module):
@@ -131,14 +184,14 @@ class CausalSelfAttention(nn.Module):
             # CASE 1: No KV cache (training) OR prefill phase (Tq == Tk)
             # Use standard causal attention: each position can only attend to
             # itself and previous positions
-            y = F.scaled_dot_product_attention(
+            y = attention_forward(
                 q, k, v, is_causal=True, enable_gqa=(self.n_kv_head < self.n_head)
             )
         elif Tq == 1:
             # CASE 2: Single token generation (most common during inference)
             # The single query token can attend to ALL cached tokens (no masking needed)
             # This is super efficient: only 1 token forward pass!
-            y = F.scaled_dot_product_attention(
+            y = attention_forward(
                 q, k, v, is_causal=False, enable_gqa=(self.n_kv_head < self.n_head)
             )
         else:
@@ -147,7 +200,10 @@ class CausalSelfAttention(nn.Module):
             # Need custom attention mask:
             # - Each query can attend to ALL cached tokens (prefix)
             # - Each query can only attend causally within the new tokens
-            import torch
+            #
+            # NOTE: We use F.scaled_dot_product_attention here instead of flash_attn_func
+            # because arbitrary attention masks are easier to handle with PyTorch SDPA.
+            # This case is rare (only during multi-token generation with cache).
 
             attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device)
             prefix_len = Tk - Tq
