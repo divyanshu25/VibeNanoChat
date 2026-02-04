@@ -273,6 +273,7 @@ class BestFitCollator:
         # Statistics tracking
         self.stats_total_tokens = 0
         self.stats_cropped_tokens = 0
+        self.stats_skipped_documents = 0
 
         # Pre-allocate buffers (same strategy as v1)
         self.row_buffer = torch.empty((batch_size, block_size + 1), dtype=torch.long)
@@ -390,6 +391,7 @@ class BestFitCollator:
             "cropped_tokens": self.stats_cropped_tokens,
             "crop_percentage": crop_pct,
             "buffer_size": len(self.doc_buffer),
+            "skipped_documents": self.stats_skipped_documents,
         }
 
 

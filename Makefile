@@ -38,7 +38,7 @@ dotenv: ## Initialize .env file
 	@echo "📝 Creating .env file from template..."
 	@cp -n .env.template $(ENV_TARGET_DIR)/.env || echo "⚠️  $(ENV_TARGET_DIR)/.env already exists. Skipping copy."
 
-
+# pkill -9 uv to kill any existing uv processes
 uv:  ## INSTALL UV
 ifeq ($(shell PATH=$(PATH) which uv),)
 ifneq ($(shell which brew),) #macos

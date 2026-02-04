@@ -88,7 +88,7 @@ class TestFinewebEduParquetBOSDataloader:
             block_size=32,
             split="train",
             master_process=False,  # Suppress print statements
-            buffer_size=20,
+            buffer_size=200,  # Increased to handle dataloader_batch_size=48
             device=device,
             num_workers=0,  # Single process for testing
         )
