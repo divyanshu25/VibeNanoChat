@@ -161,6 +161,7 @@ class BestFitCollator:
         # Statistics tracking
         self.stats_total_tokens = 0
         self.stats_cropped_tokens = 0
+        self.stats_skipped_documents = 0  # Documents skipped due to full buffer
 
         # Pre-allocate buffers (same strategy as v1)
         self.row_buffer = torch.empty((batch_size, block_size + 1), dtype=torch.long)
@@ -177,12 +178,14 @@ class BestFitCollator:
         Returns:
             Tuple of (inputs, targets) tensors of shape (batch_size, block_size)
         """
-        # Add new documents to buffer
-        self.doc_buffer.extend(batch_of_documents)
-
-        # Keep buffer from growing too large (memory management)
-        if len(self.doc_buffer) > self.buffer_size * 2:
-            self.doc_buffer = self.doc_buffer[-self.buffer_size :]
+        # Only refill buffer when it drops below 50% capacity
+        # This prevents accumulating too many documents and then truncating (losing data)
+        # When buffer is full, we skip the incoming documents rather than adding and truncating
+        if len(self.doc_buffer) < self.buffer_size // 2:
+            self.doc_buffer.extend(batch_of_documents)
+        else:
+            # Buffer is full - skip these documents to avoid overflow and truncation
+            self.stats_skipped_documents += len(batch_of_documents)
 
         # If buffer too small, we can't pack a batch yet
         # This should only happen at the very start
@@ -260,6 +263,7 @@ class BestFitCollator:
             "cropped_tokens": self.stats_cropped_tokens,
             "crop_percentage": crop_pct,
             "buffer_size": len(self.doc_buffer),
+            "skipped_documents": self.stats_skipped_documents,
         }
 
 
