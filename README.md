@@ -392,7 +392,7 @@ We wrote guides explaining everything in detail:
 | [README_STABILITY.md](docs/README_STABILITY.md) | Gradient clipping, QK-Layernorm, Z-loss |
 | [README_MULTIPLEX.md](docs/README_MULTIPLEX.md) | Multi-dataset training (how TaskMixture works) |
 | [README_CHATCORE_EVALUATOR.md](docs/README_CHATCORE_EVALUATOR.md) | Chat model evaluation (MT-Bench, AlpacaEval, IFEval) |
-| [async-prefetching-optimization.md](docs/async-prefetching-optimization.md) | BOS-aligned dataloader async prefetching (eliminating MFU jitter) |
+| [README-PREFETCHING-OPTIMIZATION.md](docs/README-PREFETCHING-OPTIMIZATION.md) | BOS-aligned dataloader async prefetching (eliminating MFU jitter) |
 
 **New to training LLMs?** Start with README_OPTIMIZATION.md to understand the basics, then README_DISTMUON.md for distributed training.
 
