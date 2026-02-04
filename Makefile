@@ -193,12 +193,12 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
 	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
 	@echo "⚡ Muon optimizer enabled for all runs"; \
-	for FLOPS in 1e18 2e18; do \
+	for FLOPS in 1e18 2e18 3e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 12 13 14; do \
+		for DEPTH in 10 11 12 13 14 15 16 17 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
 			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100 || exit 1; \
