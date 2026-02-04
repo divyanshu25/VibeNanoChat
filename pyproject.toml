@@ -17,6 +17,7 @@ requires-python = ">=3.10"
 dependencies = [
    "datasets>=3.2.0",
    "ipykernel>=6.29.5",
+   "pyarrow>=18.1.0",
    "tiktoken>=0.9.0",
    "torch==2.6.0",
    "triton>=3.0.0",
@@ -37,7 +38,6 @@ dev = [
     "ruff",   # For linting and formatting
     "pytest", # For running tests
     "pytest-cov", # For test coverage
-    "pyarrow", # For parquet file testing
     "wandb",  # For experiment tracking,
     "black",
     "types-torch",  # PyTorch type stubs

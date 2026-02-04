@@ -269,13 +269,13 @@ class TrainingEvaluator:
         device,
         master_process,
         ddp,
+        batch_size,
+        block_size,
         ddp_rank=0,
         ddp_world_size=1,
         generation_log_file=None,
         token_bytes_path=None,
         val_loss_tokens=None,
-        batch_size=None,
-        block_size=None,
         sample_seed=42,
         use_kv_cache=True,
     ):
@@ -288,13 +288,13 @@ class TrainingEvaluator:
             device: Device to run evaluation on
             master_process: Whether this is the master process
             ddp: Whether using DDP
+            batch_size: Batch size (required - used to calculate validation steps from tokens)
+            block_size: Sequence length (required - used to calculate validation steps from tokens)
             ddp_rank: DDP rank
             ddp_world_size: DDP world size
             generation_log_file: Path to save generation samples
             token_bytes_path: Path to token_bytes.pt for BPB calculation
             val_loss_tokens: Number of tokens to use for validation (nanochat default: 20 * 524288)
-            batch_size: Batch size (needed to calculate steps from tokens)
-            block_size: Sequence length (needed to calculate steps from tokens)
             sample_seed: Random seed for sampling
             use_kv_cache: Whether to use KV cache for generation
         """

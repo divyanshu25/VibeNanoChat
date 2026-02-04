@@ -271,7 +271,9 @@ def evaluate_task(
         max_examples: Optional limit on number of examples (useful for faster iteration during training)
 
     Returns:
-        Mean accuracy across all successfully evaluated examples (0.0 to 1.0)
+        Tuple of (mean_accuracy, num_examples_evaluated):
+            - mean_accuracy: Mean accuracy across all successfully evaluated examples (0.0 to 1.0)
+            - num_examples_evaluated: Number of examples successfully evaluated
     """
     # Get distributed training info (if applicable)
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -300,6 +302,6 @@ def evaluate_task(
     # Compute mean accuracy over successfully evaluated examples
     total_evaluated = evaluated.sum().item()
     if total_evaluated == 0:
-        return 0.0
+        return 0.0, 0
     mean_correct = correct.sum().item() / total_evaluated
-    return mean_correct
+    return mean_correct, int(total_evaluated)

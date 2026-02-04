@@ -150,8 +150,8 @@ class GPTConfig:
     # ========================================================================
     # CORE Benchmark Evaluation (multiple choice tasks)
     # ========================================================================
-    core_eval_max_examples: int = (
-        500  # Max examples per task (for faster evals during training)
+    core_eval_max_examples: int | None = (
+        None  # Max examples per task (None = all examples, int = limit for faster evals)
     )
 
     # ========================================================================

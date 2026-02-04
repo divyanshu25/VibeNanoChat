@@ -378,10 +378,16 @@ def main():
     print(f"\n📂 Output directory: {args.output_dir}")
     print("\n📊 Dataset Summary:")
     print(f"   Total shards: {len(all_shards)}")
-    print(
-        f"   Training shards: shard_00000 to shard_{len(all_shards)-2:05d} ({len(all_shards)-1} shards)"
-    )
-    print(f"   Validation shard: shard_{len(all_shards)-1:05d} (last full shard)")
+
+    # Handle edge case: single shard means only validation, no training data
+    if len(all_shards) == 1:
+        print("   Training shards: None (only 1 shard available)")
+        print("   Validation shard: shard_00000 (only shard)")
+    else:
+        print(
+            f"   Training shards: shard_00000 to shard_{len(all_shards)-2:05d} ({len(all_shards)-1} shards)"
+        )
+        print(f"   Validation shard: shard_{len(all_shards)-1:05d} (last full shard)")
 
     total_docs = len(shuffled_dataset)
     total_size = sum(
