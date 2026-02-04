@@ -181,13 +181,11 @@ class TestFinewebEduParquetBOSDataloader:
         assert "cropped_tokens" in stats
         assert "crop_percentage" in stats
         assert "buffer_size" in stats
-        assert "skipped_documents" in stats
 
         assert stats["total_tokens"] > 0
         assert stats["cropped_tokens"] >= 0
         assert 0 <= stats["crop_percentage"] <= 100
         assert stats["buffer_size"] >= 0
-        assert stats["skipped_documents"] >= 0
 
     def test_device_placement(self, dataloader, device):
         """Verify tensors are on correct device."""

@@ -12,13 +12,35 @@ sys.path.append(parent_dir)
 
 from gpt_2.rope import apply_rotary_emb
 
-# Try to import Flash Attention 3 (falls back to PyTorch SDPA if not available)
-try:
-    from flash_attn import flash_attn_func
 
-    HAS_FLASH_ATTN = True
-except ImportError:
-    HAS_FLASH_ATTN = False
+# =============================================================================
+# Flash Attention 3 Detection and Loading
+# =============================================================================
+def _load_flash_attention_3():
+    """Try to load Flash Attention 3 pre-compiled kernels (requires Hopper GPU, sm90)."""
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, _ = torch.cuda.get_device_capability()
+        # FA3 kernels are compiled for Hopper (sm90) only
+        if major != 9:
+            return None
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        from kernels import get_kernel
+
+        return get_kernel("varunneal/flash-attention-3").flash_attn_interface
+    except Exception:
+        return None
+
+
+_fa3 = _load_flash_attention_3()
+HAS_FA3 = _fa3 is not None
+
+# Print which backend is being used
+if HAS_FA3:
+    print("✅ Flash Attention 3 is available and will be used (pre-compiled kernels)")
+else:
+    print("⚠️  Flash Attention 3 not available, falling back to PyTorch SDPA")
 
 
 def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
@@ -36,36 +58,37 @@ def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
     Returns:
         Output tensor (B, n_head, T, head_dim)
     """
-    if HAS_FLASH_ATTN:
-        # Flash Attention 3: Direct kernel call (fastest on H100)
-        # Requires shape: (B, T, n_head, head_dim) - different from SDPA!
-        B, n_head, T, head_dim = q.shape
-        _, n_kv_head, _, _ = k.shape
+    # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
+    B, n_head, T, head_dim = q.shape
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
 
-        # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+    # Use FA3 only if available AND tensors are on CUDA (FA3 doesn't support CPU)
+    # Use FA3 only if:
+    # 1. FA3 is available
+    # 2. Tensors are on CUDA (FA3 doesn't support CPU)
+    # 3. Dtype is supported (fp16, bf16, or fp8_e4m3)
+    supported_dtypes = (torch.float16, torch.bfloat16, torch.float8_e4m3fn)
+    use_fa3 = HAS_FA3 and q.is_cuda and q.dtype in supported_dtypes
 
-        # flash_attn_func automatically handles GQA if n_head != n_kv_head
-        output = flash_attn_func(
-            q,
-            k,
-            v,
-            causal=is_causal,
-            # Flash Attention 3 automatically uses optimal algorithm for H100
-        )
-
-        # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
-        return output.transpose(1, 2)
+    if use_fa3:
+        # Use Flash Attention 3 pre-compiled kernels
+        output = _fa3.flash_attn_func(q, k, v, causal=is_causal)
     else:
-        # Fallback to PyTorch SDPA (uses Flash Attention 2 internally)
-        return F.scaled_dot_product_attention(
+        # Fallback to PyTorch SDPA (works on CPU, CUDA, and all dtypes)
+        output = F.scaled_dot_product_attention(
             q, k, v, is_causal=is_causal, enable_gqa=enable_gqa
         )
 
+    # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
+    return output.transpose(1, 2)
+
 
 class CausalSelfAttention(nn.Module):
+    # Class variable to track if we've printed attention info (shared across all instances)
+    _printed_attention_info = False
+
     def __init__(self, config, layer_idx=None):
         """
         Initialize Causal Self-Attention layer.

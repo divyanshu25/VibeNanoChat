@@ -85,19 +85,6 @@ environment: uv uvlock venv ## Create environment
 	@echo "   👉  To activate: source .venv/bin/activate"
 	@echo "✨ Happy coding with NanoGPT!"
 
-flash-attn: ## Install/rebuild flash-attn with optimized compilation. Usage: make flash-attn [MAX_JOBS=8]
-	@echo "⚡ Installing flash-attn (this will take 10-30 minutes)..."
-	@if [ -n "$(MAX_JOBS)" ]; then \
-		echo "🔧 Using $(MAX_JOBS) parallel compilation jobs"; \
-		export MAX_JOBS=$(MAX_JOBS); \
-		$(uv) pip install --force-reinstall --no-deps flash-attn>=2.6.0; \
-	else \
-		echo "💡 Tip: Use 'make flash-attn MAX_JOBS=8' to speed up compilation"; \
-		$(uv) pip install --force-reinstall --no-deps flash-attn>=2.6.0; \
-	fi
-	@echo "✅ flash-attn installation complete!"
-
-
 jupyter-kernel: venv ## Register environment as Jupyter kernel
 	@echo "📝 Registering Jupyter kernel..."
 	@$(uv) pip install ipykernel

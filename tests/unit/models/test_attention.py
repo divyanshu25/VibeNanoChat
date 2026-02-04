@@ -343,7 +343,7 @@ class TestRoPEIntegration:
         attn = CausalSelfAttention(config, layer_idx=0).to(device)
         attn.eval()
 
-        B, T, C = 1, 32, 256
+        B, T, C = 1, 128, 256  # Use longer sequence for clearer RoPE effect
 
         # Create varied input at different positions to see position encoding effect
         x = torch.randn(B, T, C, device=device)

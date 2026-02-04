@@ -42,7 +42,11 @@ def forward_model(model, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.T
         predictions: Tensor of shape (batch_size, seq_len) with argmax predictions at each position
     """
     batch_size, seq_len = input_ids.size()
-    model_output = model(input_ids)
+
+    # Use autocast for evaluation (needed for FA3 and faster inference)
+    device_type = "cuda" if input_ids.is_cuda else "cpu"
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        model_output = model(input_ids)
 
     # Handle both single tensor output and tuple output (logits, loss)
     if isinstance(model_output, tuple):
