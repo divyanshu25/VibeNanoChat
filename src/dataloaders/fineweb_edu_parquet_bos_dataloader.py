@@ -79,7 +79,7 @@ def list_parquet_files(data_dir):
 
 
 def document_batches(
-    split, data_dir, ddp_rank, ddp_world_size, tokenizer_batch_size=128
+    split, parquet_paths, ddp_rank, ddp_world_size, tokenizer_batch_size=128
 ):
     """
     Infinite iterator over document batches from Parquet files.
@@ -89,7 +89,7 @@ def document_batches(
 
     Args:
         split: 'train' or 'val'
-        data_dir: Directory containing shard_NNNNN.parquet files
+        parquet_paths: List of parquet file paths for this split
         ddp_rank: Rank of current process
         ddp_world_size: Total number of processes
         tokenizer_batch_size: Number of documents per batch
@@ -100,16 +100,6 @@ def document_batches(
             - epoch: Current epoch number (starts at 1)
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
-
-    # Get all parquet files sorted by name (shard_00000.parquet, shard_00001.parquet, etc.)
-    parquet_paths = list_parquet_files(data_dir)
-    assert len(parquet_paths) > 0, f"No parquet files found in {data_dir}"
-
-    # Nanochat convention: last shard is validation, all others are training
-    # Example: If we have shard_00000 to shard_00180:
-    #   - train split gets: shard_00000 to shard_00179 (180 shards)
-    #   - val split gets: shard_00180 (1 shard)
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
 
     epoch = 1  # Track current epoch for logging/curriculum learning
 
@@ -215,6 +205,11 @@ class FinewebEduParquetBOSDataloader:
         self.block_size = block_size
         self.buffer_size = buffer_size  # Number of docs to keep in memory for best-fit
         self.device = device
+        self.data_dir = data_dir  # Store for compute_val_steps
+        self.ddp_world_size = ddp_world_size
+        self.ddp_rank = ddp_rank
+        self.split = split
+        self.tokenizer_batch_size = tokenizer_batch_size
 
         assert split in ["train", "val"], "split must be 'train' or 'val'"
 
@@ -235,18 +230,25 @@ class FinewebEduParquetBOSDataloader:
             print(f"Tokenizer threads: {tokenizer_threads}")
 
         # Verify data directory exists and has parquet files
-        parquet_files = list_parquet_files(data_dir)
-        if len(parquet_files) == 0:
+        # Cache parquet files list to avoid repeated filesystem calls
+        self.parquet_files = list_parquet_files(data_dir)
+        if len(self.parquet_files) == 0:
             raise FileNotFoundError(f"No parquet files found in {data_dir}")
 
+        # Split files: train gets all but last, val gets only last file
+        if split == "train":
+            self.split_parquet_files = self.parquet_files[:-1]
+        else:
+            self.split_parquet_files = self.parquet_files[-1:]
+
         if master_process:
-            print(f"Found {len(parquet_files)} parquet files")
+            print(f"Found {len(self.parquet_files)} parquet files")
             if split == "train":
                 print(
-                    f"Using files: {os.path.basename(parquet_files[0])} to {os.path.basename(parquet_files[-2])}"
+                    f"Using files: {os.path.basename(self.parquet_files[0])} to {os.path.basename(self.parquet_files[-2])}"
                 )
             else:
-                print(f"Using file: {os.path.basename(parquet_files[-1])}")
+                print(f"Using file: {os.path.basename(self.parquet_files[-1])}")
             print(f"{'='*80}\n")
 
         # Pre-allocate buffers for efficient batching (avoids repeated allocations)
@@ -308,7 +310,11 @@ class FinewebEduParquetBOSDataloader:
         # Create infinite iterator that yields document batches
         # This handles reading parquet files, DDP sharding, and multi-epoch cycling
         self.batches = document_batches(
-            split, data_dir, ddp_rank, ddp_world_size, tokenizer_batch_size
+            split,
+            self.split_parquet_files,
+            ddp_rank,
+            ddp_world_size,
+            tokenizer_batch_size,
         )
 
         # Row Group (1024 documents)

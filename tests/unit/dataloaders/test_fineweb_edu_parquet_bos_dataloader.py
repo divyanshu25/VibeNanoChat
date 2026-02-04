@@ -81,9 +81,13 @@ class TestDocumentBatches:
 
     def test_yields_train_documents(self, mock_parquet_data):
         """Verify it yields training documents from correct files."""
+        # Get parquet files and filter for train split
+        parquet_files = list_parquet_files(str(mock_parquet_data))
+        train_files = parquet_files[:-1]  # All but last
+
         gen = document_batches(
             split="train",
-            data_dir=str(mock_parquet_data),
+            parquet_paths=train_files,
             ddp_rank=0,
             ddp_world_size=1,
             tokenizer_batch_size=10,
@@ -97,9 +101,13 @@ class TestDocumentBatches:
 
     def test_yields_val_documents(self, mock_parquet_data):
         """Verify it yields validation documents from last file."""
+        # Get parquet files and filter for val split
+        parquet_files = list_parquet_files(str(mock_parquet_data))
+        val_files = parquet_files[-1:]  # Only last
+
         gen = document_batches(
             split="val",
-            data_dir=str(mock_parquet_data),
+            parquet_paths=val_files,
             ddp_rank=0,
             ddp_world_size=1,
             tokenizer_batch_size=5,
@@ -111,9 +119,13 @@ class TestDocumentBatches:
 
     def test_cycles_through_epochs(self, mock_parquet_data):
         """Verify epoch counter increments after full pass."""
+        # Get parquet files and filter for val split
+        parquet_files = list_parquet_files(str(mock_parquet_data))
+        val_files = parquet_files[-1:]  # Only last
+
         gen = document_batches(
             split="val",  # Use val (smaller) for faster testing
-            data_dir=str(mock_parquet_data),
+            parquet_paths=val_files,
             ddp_rank=0,
             ddp_world_size=1,
             tokenizer_batch_size=100,

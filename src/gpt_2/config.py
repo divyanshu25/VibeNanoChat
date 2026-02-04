@@ -115,6 +115,8 @@ class GPTConfig:
     bos_dataloader_buffer_size: int = (
         1000  # Document buffer size for BOS-aligned packing
     )
+    tokenizer_threads: int = 4  # Number of threads for parallel tokenization
+    tokenizer_batch_size: int = 128  # Number of documents to tokenize per batch
 
     # ========================================================================
     # Checkpointing
@@ -133,8 +135,8 @@ class GPTConfig:
     core_eval_interval: int = (
         2000  # Run CORE benchmark evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
     )
-    val_loss_eval_batches: int = (
-        76  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
+    val_loss_eval_tokens: int | None = (
+        10485760  # Number of tokens for validation loss estimation (None = use nanochat default: 20 * 524288 = ~10.5M tokens)
     )
 
     # ========================================================================

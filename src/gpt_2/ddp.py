@@ -172,7 +172,6 @@ def run_pretraining(
     target_flops=None,
     eval_interval=None,
     core_eval_interval=None,
-    use_muon=True,
 ):
     """
     Execute the pretraining phase.
@@ -198,7 +197,6 @@ def run_pretraining(
         target_flops (float, optional): Target total FLOPs for training
         eval_interval (int, optional): Steps between validation evaluations
         core_eval_interval (int, optional): Steps between CORE evaluations
-        use_muon (bool): Use hybrid AdamW+Muon optimizer (default: True)
 
     Returns:
         str: Path to the final checkpoint saved after pretraining
@@ -239,7 +237,6 @@ def run_pretraining(
         target_flops=target_flops,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
-        use_muon=use_muon,
     )
     trainer.train()
 
@@ -273,7 +270,6 @@ def run_sft(
     head_dim=None,
     eval_interval=None,
     core_eval_interval=None,
-    use_muon=True,
 ):
     """
     Execute the SFT (Supervised Fine-Tuning) phase.
@@ -298,7 +294,6 @@ def run_sft(
         head_dim (int, optional): Target head dimension
         eval_interval (int, optional): Steps between validation evaluations
         core_eval_interval (int, optional): Steps between CORE evaluations
-        use_muon (bool): Use hybrid AdamW+Muon optimizer (default: True)
 
     Returns:
         str: Path to the final checkpoint saved after SFT
@@ -354,7 +349,6 @@ def run_sft(
         head_dim=head_dim,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
-        use_muon=use_muon,
     )
     trainer.train()
 
@@ -397,7 +391,6 @@ def run_trainer(args):
             - run_chatcore_evals: Whether to run ChatCORE evaluations
             - depth, aspect_ratio, head_dim: Architecture parameters
             - target_flops: Target compute budget
-            - use_muon: Whether to use hybrid AdamW+Muon optimizer
     """
     # -----------------------------------------------------------------------
     # Initialize Distributed Environment
@@ -435,7 +428,6 @@ def run_trainer(args):
                 target_flops=args.target_flops,
                 eval_interval=args.eval_interval,
                 core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
             )
 
         # -------------------------------------------------------------------
@@ -461,7 +453,6 @@ def run_trainer(args):
                 head_dim=args.head_dim,
                 eval_interval=args.eval_interval,
                 core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
             )
 
         else:
@@ -593,17 +584,6 @@ Examples:
     # ========================================================================
     # Optimizer Configuration
     # ========================================================================
-    # Muon optimizer is enabled by default (nanochat-style hybrid approach)
-    # Use --no-muon to disable and use AdamW-only optimization
-    # Note: Muon LR is configured in config.py (default: 0.02)
-    parser.add_argument(
-        "--no-muon",
-        dest="use_muon",
-        action="store_false",
-        default=True,
-        help="Disable Muon optimizer and use AdamW-only (default: Muon enabled)",
-    )
-
     # Parse and process arguments
     args = parser.parse_args()
     args.run_evals = not args.no_evals  # Convert --no-evals flag to positive boolean

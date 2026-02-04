@@ -265,7 +265,7 @@ class TrainingEvaluator:
     def __init__(
         self,
         model,
-        eval_dataloader,
+        eval_dataloader_builder,
         device,
         master_process,
         ddp,
@@ -273,21 +273,59 @@ class TrainingEvaluator:
         ddp_world_size=1,
         generation_log_file=None,
         token_bytes_path=None,
-        val_loss_steps=39,
+        val_loss_tokens=None,
+        batch_size=None,
+        block_size=None,
         sample_seed=42,
         use_kv_cache=True,
     ):
+        """
+        Initialize training evaluator (nanochat-style).
+
+        Args:
+            model: The model to evaluate
+            eval_dataloader_builder: Callable that returns a fresh validation dataloader
+            device: Device to run evaluation on
+            master_process: Whether this is the master process
+            ddp: Whether using DDP
+            ddp_rank: DDP rank
+            ddp_world_size: DDP world size
+            generation_log_file: Path to save generation samples
+            token_bytes_path: Path to token_bytes.pt for BPB calculation
+            val_loss_tokens: Number of tokens to use for validation (nanochat default: 20 * 524288)
+            batch_size: Batch size (needed to calculate steps from tokens)
+            block_size: Sequence length (needed to calculate steps from tokens)
+            sample_seed: Random seed for sampling
+            use_kv_cache: Whether to use KV cache for generation
+        """
         self.model = model
-        self.eval_dataloader = eval_dataloader
+        self.eval_dataloader_builder = eval_dataloader_builder
         self.device = device
         self.master_process = master_process
         self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.ddp_world_size = ddp_world_size
         self.generation_log_file = generation_log_file
-        self.val_loss_steps = val_loss_steps
         self.sample_seed = sample_seed
         self.use_kv_cache = use_kv_cache
+        self.batch_size = batch_size
+        self.block_size = block_size
+
+        # Nanochat-style: Calculate validation steps from tokens (not row groups)
+        # Default: 20 * 524288 = 10,485,760 tokens
+        if val_loss_tokens is None:
+            val_loss_tokens = 20 * 524288  # nanochat default
+
+        # Calculate steps: eval_tokens / (batch_size * block_size * world_size)
+        tokens_per_batch = batch_size * block_size * ddp_world_size
+        self.val_loss_steps = val_loss_tokens // tokens_per_batch
+        self.val_loss_tokens = val_loss_tokens
+
+        if master_process:
+            print("✓ Validation config (nanochat-style):")
+            print(f"   Tokens per validation: {val_loss_tokens:,}")
+            print(f"   Tokens per batch: {tokens_per_batch:,}")
+            print(f"   Validation steps: {self.val_loss_steps}")
 
         # Load pre-computed token_bytes tensor for BPB calculation
         if token_bytes_path is not None:
@@ -302,6 +340,9 @@ class TrainingEvaluator:
         Estimate average loss on validation set and compute bits per byte (BPB).
         BPB is tokenization-independent: normalized by actual byte length of tokens.
 
+        Nanochat-style: Creates a fresh validation dataloader each time to ensure
+        consistent starting point for validation.
+
         Args:
             step: Current step within epoch
             global_step: Global step across all epochs (for wandb logging)
@@ -313,7 +354,10 @@ class TrainingEvaluator:
         start_time = time.time()
 
         self.model.eval()
-        self.eval_dataloader.reset()
+
+        # Nanochat-style: Create a fresh validation dataloader each time
+        # This ensures we always start from the beginning of validation set
+        eval_dataloader = self.eval_dataloader_builder()
         val_loss_steps = self.val_loss_steps
 
         token_bytes = self._token_bytes
@@ -326,7 +370,7 @@ class TrainingEvaluator:
 
         with torch.no_grad():
             for k in range(val_loss_steps):
-                X, Y = self.eval_dataloader.next_batch()
+                X, Y = eval_dataloader.next_batch()
                 X = X.to(self.device)
                 Y = Y.to(self.device)
                 with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
