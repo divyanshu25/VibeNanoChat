@@ -29,6 +29,7 @@ def generate(
     verbose=True,
     temperature=0.8,
     top_k=50,
+    repetition_penalty=1.2,
 ):
     """
     Generate text sequences using the trained GPT model with optional KV caching.
@@ -52,6 +53,8 @@ def generate(
         verbose (bool): Whether to print progress updates (default: True)
         temperature (float): Sampling temperature (default: 0.8). Higher = more random
         top_k (int): Top-k sampling parameter (default: 50)
+        repetition_penalty (float): Penalty for repeating tokens (default: 1.2).
+            Values > 1.0 discourage repetition. Higher values = stronger penalty.
 
     Returns:
         list: List of decoded text sequences
@@ -84,6 +87,7 @@ def generate(
     print(f"  - KV cache enabled: {use_kv_cache}")
     print(f"  - Temperature: {temperature}")
     print(f"  - Top-k: {top_k}")
+    print(f"  - Repetition penalty: {repetition_penalty}")
     print(f"{'='*60}\n")
 
     # Set random seed for reproducible generation
@@ -174,7 +178,26 @@ def generate(
     tokens_to_generate = max_length - x.size(1)
     while x.size(1) < max_length:
         # =====================================================================
-        # STEP 1: Apply temperature scaling for diversity
+        # STEP 1: Apply repetition penalty to discourage repeating tokens
+        # =====================================================================
+        if repetition_penalty != 1.0:
+            # Penalize tokens that already appeared in the sequence
+            # This reduces the probability of tokens we've seen before
+            for i in range(x.size(0)):  # For each sequence in batch
+                # Get unique tokens that have appeared in this sequence
+                previous_tokens = set(x[i].tolist())
+
+                for previous_token in previous_tokens:
+                    # Apply penalty: divide logits by penalty value
+                    # If logit > 0: divide by penalty (reduce probability)
+                    # If logit < 0: multiply by penalty (reduce probability more)
+                    if logits[i, previous_token] > 0:
+                        logits[i, previous_token] /= repetition_penalty
+                    else:
+                        logits[i, previous_token] *= repetition_penalty
+
+        # =====================================================================
+        # STEP 2: Apply temperature scaling for diversity
         # =====================================================================
         # Temperature controls randomness:
         # - temperature < 1.0: More focused (peaks become sharper)
@@ -187,7 +210,7 @@ def generate(
         probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
 
         # =====================================================================
-        # STEP 2: Apply top-k sampling for diverse generation
+        # STEP 3: Apply top-k sampling for diverse generation
         # =====================================================================
         # This helps avoid repetitive text by sampling from top-k most likely tokens
         topk_probs, topk_indices = torch.topk(
@@ -302,6 +325,7 @@ class TrainingEvaluator:
         generation_verbose=False,
         temperature=0.8,
         top_k=50,
+        repetition_penalty=1.2,
     ):
         """
         Initialize training evaluator (nanochat-style).
@@ -340,6 +364,7 @@ class TrainingEvaluator:
         self.block_size = block_size
         self.temperature = temperature
         self.top_k = top_k
+        self.repetition_penalty = repetition_penalty
 
         # Nanochat-style: Calculate validation steps from tokens (not row groups)
         # Default: 20 * 524288 = 10,485,760 tokens
@@ -506,6 +531,7 @@ class TrainingEvaluator:
             verbose=self.generation_verbose,
             temperature=self.temperature,
             top_k=self.top_k,
+            repetition_penalty=self.repetition_penalty,
         )
 
         # =====================================================================

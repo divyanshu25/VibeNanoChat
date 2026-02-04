@@ -115,6 +115,15 @@ def document_batches(
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 
+    # Validate that we have data files to iterate over
+    if len(parquet_paths) == 0:
+        raise ValueError(
+            f"No parquet files available for split='{split}'. "
+            f"This typically occurs when there is only 1 total shard (used for validation) "
+            f"but split='train' is requested. Please ensure you have at least 2 shards "
+            f"(one for training, one for validation)."
+        )
+
     epoch = 1  # Track current epoch for logging/curriculum learning
 
     # Infinite loop: allows multi-epoch training without recreating dataloader

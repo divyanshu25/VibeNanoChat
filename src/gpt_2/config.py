@@ -156,6 +156,9 @@ class GPTConfig:
         0.8  # Sampling temperature for generation (higher = more random)
     )
     generation_top_k: int = 50  # Top-k sampling parameter
+    generation_repetition_penalty: float = (
+        1.2  # Penalty for repeating tokens (>1.0 discourages repetition)
+    )
 
     # ========================================================================
     # CORE Benchmark Evaluation (multiple choice tasks)

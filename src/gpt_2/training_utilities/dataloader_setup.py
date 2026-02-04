@@ -311,6 +311,7 @@ def setup_dataloaders(
             generation_verbose=config.generation_verbose,
             temperature=config.generation_temperature,
             top_k=config.generation_top_k,
+            repetition_penalty=config.generation_repetition_penalty,
         )
     else:
         evaluator = None
