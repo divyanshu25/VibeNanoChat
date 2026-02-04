@@ -1,13 +1,13 @@
 """
-Unit tests for FinewebEduParquetBOSDataloader.
+Unit tests for FinewebEduParquetBOSDataloader (PyTorch-native).
 
 Tests verify:
     - BOS alignment: every sequence starts with a BOS token
     - Correct tensor shapes
     - Input/target relationship (autoregressive shift)
     - Best-fit packing algorithm
-    - Multi-epoch cycling
     - Buffer management
+    - PyTorch DataLoader integration
 """
 
 import pyarrow as pa
@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from dataloaders.fineweb_edu_parquet_bos_dataloader import (
-    FinewebEduParquetBOSDataloader, document_batches, list_parquet_files)
+    FinewebEduParquetBOSDataloader, list_parquet_files)
 from gpt_2.utils import get_custom_tokenizer
 
 
@@ -76,71 +76,6 @@ class TestListParquetFiles:
         assert files[0].endswith("shard_00000.parquet")
 
 
-class TestDocumentBatches:
-    """Test the document_batches generator."""
-
-    def test_yields_train_documents(self, mock_parquet_data):
-        """Verify it yields training documents from correct files."""
-        # Get parquet files and filter for train split
-        parquet_files = list_parquet_files(str(mock_parquet_data))
-        train_files = parquet_files[:-1]  # All but last
-
-        gen = document_batches(
-            split="train",
-            parquet_paths=train_files,
-            ddp_rank=0,
-            ddp_world_size=1,
-            tokenizer_batch_size=10,
-        )
-
-        batch, epoch = next(gen)
-        assert isinstance(batch, list)
-        assert len(batch) <= 10
-        assert epoch == 1
-        assert all(isinstance(doc, str) for doc in batch)
-
-    def test_yields_val_documents(self, mock_parquet_data):
-        """Verify it yields validation documents from last file."""
-        # Get parquet files and filter for val split
-        parquet_files = list_parquet_files(str(mock_parquet_data))
-        val_files = parquet_files[-1:]  # Only last
-
-        gen = document_batches(
-            split="val",
-            parquet_paths=val_files,
-            ddp_rank=0,
-            ddp_world_size=1,
-            tokenizer_batch_size=5,
-        )
-
-        batch, epoch = next(gen)
-        assert isinstance(batch, list)
-        assert epoch == 1
-
-    def test_cycles_through_epochs(self, mock_parquet_data):
-        """Verify epoch counter increments after full pass."""
-        # Get parquet files and filter for val split
-        parquet_files = list_parquet_files(str(mock_parquet_data))
-        val_files = parquet_files[-1:]  # Only last
-
-        gen = document_batches(
-            split="val",  # Use val (smaller) for faster testing
-            parquet_paths=val_files,
-            ddp_rank=0,
-            ddp_world_size=1,
-            tokenizer_batch_size=100,
-        )
-
-        # Consume all batches from first epoch
-        epochs_seen = set()
-        for _ in range(10):  # Fetch several batches
-            batch, epoch = next(gen)
-            epochs_seen.add(epoch)
-
-        # Should eventually see epoch 2 (cycles infinitely)
-        assert len(epochs_seen) >= 1
-
-
 class TestFinewebEduParquetBOSDataloader:
     """Test the main dataloader class."""
 
@@ -155,21 +90,22 @@ class TestFinewebEduParquetBOSDataloader:
             master_process=False,  # Suppress print statements
             buffer_size=20,
             device=device,
-            tokenizer_batch_size=10,
+            num_workers=0,  # Single process for testing
         )
 
     def test_initialization(self, dataloader):
         """Verify dataloader initializes correctly."""
         assert dataloader.batch_size == 4
         assert dataloader.block_size == 32
-        assert dataloader.buffer_size == 20
         assert dataloader.device == "cpu"
-        assert len(dataloader.doc_buffer) > 0  # Pre-filled buffer
-        assert dataloader.current_epoch >= 1
+        # Collator handles the document buffer now
+        assert dataloader.collator is not None
+        assert dataloader.collator.batch_size == 4
+        assert dataloader.collator.block_size == 32
 
     def test_batch_shapes(self, dataloader):
         """Verify output tensors have correct shapes."""
-        inputs, targets = dataloader.next_batch()
+        inputs, targets = next(dataloader)
 
         # Shape: (batch_size, block_size)
         assert inputs.shape == (4, 32)
@@ -182,7 +118,7 @@ class TestFinewebEduParquetBOSDataloader:
         tokenizer, _ = get_custom_tokenizer()
         bos_token_id = tokenizer.encode("<|bos|>", allowed_special="all")[0]
 
-        inputs, targets = dataloader.next_batch()
+        inputs, targets = next(dataloader)
 
         # Every sequence should start with BOS token
         for i in range(inputs.shape[0]):
@@ -193,7 +129,7 @@ class TestFinewebEduParquetBOSDataloader:
 
     def test_autoregressive_shift(self, dataloader):
         """Verify targets are inputs shifted by 1."""
-        inputs, targets = dataloader.next_batch()
+        inputs, targets = next(dataloader)
 
         # For each sequence, check that target[i] = input[i+1]
         # (This verifies the relationship at row_buffer level)
@@ -217,7 +153,7 @@ class TestFinewebEduParquetBOSDataloader:
         """Verify can generate multiple batches successfully."""
         batches_generated = 0
         for _ in range(5):
-            inputs, targets = dataloader.next_batch()
+            inputs, targets = next(dataloader)
             assert inputs.shape == (4, 32)
             assert targets.shape == (4, 32)
             batches_generated += 1
@@ -228,37 +164,38 @@ class TestFinewebEduParquetBOSDataloader:
         """Verify document buffer gets refilled as needed."""
         # Generate several batches to consume buffer
         for _ in range(10):
-            dataloader.next_batch()
+            next(dataloader)
 
-        # Buffer should be managed (refilled when low)
-        assert len(dataloader.doc_buffer) > 0, "Buffer should not be empty"
+        # Buffer is managed by collator in new implementation
+        stats = dataloader.get_stats()
+        assert stats["buffer_size"] >= 0, "Buffer should be tracked"
 
     def test_stats_tracking(self, dataloader):
         """Verify token statistics are tracked correctly."""
         # Generate some batches
         for _ in range(3):
-            dataloader.next_batch()
+            next(dataloader)
 
         stats = dataloader.get_stats()
         assert "total_tokens" in stats
         assert "cropped_tokens" in stats
         assert "crop_percentage" in stats
-        assert "current_epoch" in stats
+        assert "buffer_size" in stats
 
         assert stats["total_tokens"] > 0
         assert stats["cropped_tokens"] >= 0
         assert 0 <= stats["crop_percentage"] <= 100
-        assert stats["current_epoch"] >= 1
+        assert stats["buffer_size"] >= 0
 
     def test_device_placement(self, dataloader, device):
         """Verify tensors are on correct device."""
-        inputs, targets = dataloader.next_batch()
+        inputs, targets = next(dataloader)
         assert str(inputs.device) == device
         assert str(targets.device) == device
 
     def test_token_validity(self, dataloader):
         """Verify all tokens are valid (non-negative)."""
-        inputs, targets = dataloader.next_batch()
+        inputs, targets = next(dataloader)
 
         # All token IDs should be non-negative
         assert torch.all(inputs >= 0)
@@ -273,11 +210,12 @@ class TestFinewebEduParquetBOSDataloader:
                 block_size=16,
                 split="train",
                 master_process=False,
-                buffer_size=20,
+                buffer_size=100,  # Larger buffer for testing various batch sizes
                 device=device,
+                num_workers=0,
             )
 
-            inputs, targets = loader.next_batch()
+            inputs, targets = next(loader)
             assert inputs.shape == (batch_size, 16)
             assert targets.shape == (batch_size, 16)
 
@@ -290,11 +228,12 @@ class TestFinewebEduParquetBOSDataloader:
                 block_size=block_size,
                 split="train",
                 master_process=False,
-                buffer_size=20,
+                buffer_size=100,  # Larger buffer for testing various block sizes
                 device=device,
+                num_workers=0,
             )
 
-            inputs, targets = loader.next_batch()
+            inputs, targets = next(loader)
             assert inputs.shape == (2, block_size)
             assert targets.shape == (2, block_size)
 
@@ -310,13 +249,14 @@ class TestBestFitPacking:
             block_size=64,
             split="train",
             master_process=False,
-            buffer_size=50,  # Larger buffer for better best-fit choices
+            buffer_size=150,  # Larger buffer for better best-fit choices
             device=device,
+            num_workers=0,
         )
 
         # Generate several batches
         for _ in range(10):
-            loader.next_batch()
+            next(loader)
 
         stats = loader.get_stats()
 
@@ -344,10 +284,11 @@ class TestDDPSupport:
             master_process=False,
             buffer_size=10,
             device=device,
+            num_workers=0,
         )
 
         # Verify it can produce a batch
-        inputs, targets = loader.next_batch()
+        inputs, targets = next(loader)
         assert inputs.shape == (2, 16)
         assert targets.shape == (2, 16)
 

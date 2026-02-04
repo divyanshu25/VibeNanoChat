@@ -641,7 +641,7 @@ class Trainer:
 
                 for micro_step in range(self.grad_accumulation_steps):
                     # Get training batch and move to device
-                    x, y = self.train_dataloader.next_batch()
+                    x, y = next(self.train_dataloader)
                     x, y = x.to(self.device), y.to(self.device)
 
                     # Forward pass: compute per-token loss

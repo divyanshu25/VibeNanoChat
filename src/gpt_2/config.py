@@ -115,8 +115,11 @@ class GPTConfig:
     bos_dataloader_buffer_size: int = (
         1000  # Document buffer size for BOS-aligned packing
     )
-    tokenizer_threads: int = 4  # Number of threads for parallel tokenization
-    tokenizer_batch_size: int = 128  # Number of documents to tokenize per batch
+    dataloader_num_workers: int = 4  # Number of DataLoader workers for parallel I/O
+    dataloader_prefetch_factor: int = (
+        2  # Batches to prefetch per worker (8 total with 4 workers)
+    )
+    dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
 
     # ========================================================================
     # Checkpointing

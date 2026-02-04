@@ -1,532 +1,212 @@
 """
-Parquet-based BOS-aligned dataloader with async prefetching (nanochat-style + optimized).
+PyTorch-native BOS-aligned dataloader with best-fit packing.
 
-This module provides a BOS-aligned data loader that reads from Parquet shards,
-tokenizes documents on-the-fly, and packs them using best-fit cropping algorithm.
+This dataloader leverages PyTorch's DataLoader infrastructure:
+- Uses torch.utils.data.IterableDataset for document streaming
+- Leverages DataLoader's num_workers for parallel I/O and tokenization
+- Built-in prefetching via prefetch_factor
+- Automatic pin_memory and non_blocking transfers
+- Custom collate_fn for best-fit packing algorithm
 
-This is based on nanochat's approach with critical optimizations:
-- Reads from Parquet files with 'text' column
-- Each document is tokenized on-the-fly with BOS token prepended
-- Best-fit algorithm minimizes token waste (~35% for longer documents, ~3% for shorter documents)
-- 100% batch utilization (no padding)
-- Supports DDP and multi-epoch training
-- **Async prefetching**: Background thread prevents I/O blocking → smooth MFU
-
-Why BOS Alignment?
-    Traditional dataloaders concatenate all documents and randomly slice them into sequences.
-    This means sequences often start mid-document, making it harder for the model to learn
-    document boundaries. BOS alignment ensures EVERY sequence starts at a document boundary
-    with a BOS token, teaching the model that <|bos|> signifies a fresh start.
-
-Best-Fit Packing Algorithm:
-    Given a sequence of length T and a buffer of N documents:
-    1. Greedily select the LARGEST document that fits in remaining space
-    2. If no document fits entirely, crop the SHORTEST document to fill exactly
-    3. Repeat until sequence is full (T+1 tokens)
-
-    This minimizes waste compared to naive first-fit or random selection.
-    Example with T=1024 and docs of length [100, 500, 800]:
-        - Pack 800 → 224 remaining
-        - Pack 100 → 124 remaining
-        - Crop 500 to 124 → Full (only 376 tokens wasted = 27%)
+Key features:
+- Simpler code (no manual threading)
+- Better multiprocessing (leverages PyTorch's worker pool)
+- Automatic worker lifecycle management
+- Full integration with PyTorch ecosystem
+- Reliable shutdown (no thread leaks)
 
 Architecture:
-    [Background Thread]
-        Parquet Files → Read Row Groups → Tokenize with BOS → Prefetch Queue
-                                                                    ↓
-    [Main Thread]                                                   ↓
-        Document Buffer ← (non-blocking get) ← ← ← ← ← ← ← ← ← ← ←
-              ↓
-        Best-Fit Packing → Batches (B, T)
-
-Key Optimization:
-    The background prefetch thread continuously reads from disk and tokenizes documents,
-    keeping a queue of 4 ready-to-use batches. The main training thread NEVER waits for
-    I/O or tokenization, eliminating MFU jitter from ~35-47% oscillation to steady ~47%.
-
-Example:
-    >>> dataloader = FinewebEduParquetBOSDataloader(
-    ...     data_dir="/sensei-fs/users/divgoyal/fineweb_edu_parquet",
-    ...     batch_size=16,
-    ...     block_size=1024,
-    ...     split="train"
-    ... )
-    >>> for inputs, targets in dataloader:
-    ...     # Every inputs[i, 0] is BOS token (50257)
-    ...     loss = model(inputs, targets)
+    [PyTorch Worker Pool (num_workers=4)]
+        Parquet Files → Read → Tokenize → Document Queue (prefetch_factor=2)
+                                                    ↓
+    [Main Thread]                                   ↓
+        Custom collate_fn: Buffer + Best-Fit → Batches (B, T)
 """
 
 import glob
 import os
-import queue
-import threading
+from typing import Iterator, List, Optional, Tuple
 
 import pyarrow.parquet as pq
 import torch
+from torch.utils.data import DataLoader, IterableDataset
 
 from gpt_2.utils import get_custom_tokenizer
 
 
-def list_parquet_files(data_dir):
-    """
-    List all Parquet files in directory, sorted by name.
-
-    Args:
-        data_dir: Directory containing .parquet files (e.g., shard_00000.parquet, shard_00001.parquet, ...)
-
-    Returns:
-        list: Sorted list of full paths to .parquet files
-
-    Note:
-        - Files are sorted alphabetically, so shard_00000 comes before shard_00001
-        - Skips .tmp files (used during dataset creation)
-        - Nanochat convention: last file is validation, rest are training
-    """
+def list_parquet_files(data_dir: str) -> List[str]:
+    """List all Parquet files in directory, sorted by name."""
     parquet_files = sorted(
         [
             filepath
             for filepath in glob.glob(os.path.join(data_dir, "*.parquet"))
-            if not filepath.endswith(".tmp")  # Skip temporary files
+            if not filepath.endswith(".tmp")
         ]
     )
     return parquet_files
 
 
-def document_batches(
-    split, parquet_paths, ddp_rank, ddp_world_size, tokenizer_batch_size=128
-):
+class ParquetDocumentDataset(IterableDataset):
     """
-    Infinite iterator over document batches from Parquet files.
+    PyTorch IterableDataset that streams tokenized documents from Parquet files.
 
-    Yields batches of raw text documents, handles DDP sharding, and supports
-    multi-epoch training by cycling through data indefinitely.
-
-    Args:
-        split: 'train' or 'val'
-        parquet_paths: List of parquet file paths for this split
-        ddp_rank: Rank of current process
-        ddp_world_size: Total number of processes
-        tokenizer_batch_size: Number of documents per batch
-
-    Yields:
-        tuple: (text_batch, epoch) where:
-            - text_batch: List of document strings
-            - epoch: Current epoch number (starts at 1)
-    """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-
-    # Validate that we have data files to iterate over
-    if len(parquet_paths) == 0:
-        raise ValueError(
-            f"No parquet files available for split='{split}'. "
-            f"This typically occurs when there is only 1 total shard (used for validation) "
-            f"but split='train' is requested. Please ensure you have at least 2 shards "
-            f"(one for training, one for validation)."
-        )
-
-    epoch = 1  # Track current epoch for logging/curriculum learning
-
-    # Infinite loop: allows multi-epoch training without recreating dataloader
-    while True:
-        # Iterate through all parquet shards (train: 180 shards, val: 1 shard)
-        for shard_idx, filepath in enumerate(parquet_paths):
-            parquet_file = pq.ParquetFile(
-                filepath
-            )  # this will read the parquet file and return a ParquetFile object
-
-            # DDP Sharding Strategy: Each rank reads different row groups to avoid duplication
-            # Example with 8 GPUs reading a file with 24 row groups:
-            #   - Rank 0 reads: row groups 0, 8, 16
-            #   - Rank 1 reads: row groups 1, 9, 17
-            #   - Rank 2 reads: row groups 2, 10, 18
-            #   - ... etc
-            # This ensures each GPU sees different data with no overlap
-            # Use range(start, stop, step) to iterate: start at rank, skip by world_size
-            for row_group_idx in range(
-                ddp_rank, parquet_file.num_row_groups, ddp_world_size
-            ):
-                # Read a single row group (contains ~1024 documents)
-                row_group = parquet_file.read_row_group(row_group_idx)
-                texts = row_group.column(
-                    "text"
-                ).to_pylist()  # Extract text column as Python list
-
-                # Yield documents in smaller batches for efficient parallel tokenization
-                # Example: If row group has 1024 docs and batch_size=128:
-                #   - Yields 8 batches of 128 documents each
-                for start_idx in range(0, len(texts), tokenizer_batch_size):
-                    batch = texts[start_idx : start_idx + tokenizer_batch_size]
-                    yield batch, epoch
-
-        # After reading all shards once, increment epoch counter
-        epoch += 1
-
-
-class FinewebEduParquetBOSDataloader:
-    """
-    BOS-aligned dataloader with best-fit cropping (nanochat implementation).
-
-    This loader reads Parquet shards, tokenizes documents on-the-fly, and packs
-    them into batches using best-fit algorithm to minimize token waste.
-
-    Key Features:
-        1. BOS Alignment: Every sequence starts with a document boundary (BOS token)
-        2. Best-Fit Packing: Minimizes token waste by intelligently selecting documents
-        3. DDP Support: Each rank reads different row groups for parallel training
-        4. Multi-Epoch: Infinite iterator automatically cycles through data
-        5. Efficient Memory: Pre-allocated buffers and pinned memory for fast GPU transfer
-
-    Algorithm Overview:
-        Parquet Files → Row Groups (DDP sharded) → Documents → Tokenize with BOS →
-        Document Buffer → Best-Fit Packing → Batches (B, T)
+    Each worker handles a subset of row groups (DDP + DataLoader sharding).
+    Documents are tokenized with BOS token prepended on-the-fly.
 
     Attributes:
-        batch_size (int): Number of sequences per batch (B)
-        block_size (int): Length of each sequence (T)
-        device (str): Device ('cuda' or 'cpu')
-        buffer_size (int): Number of documents to buffer for best-fit
-        tokenizer: Custom tokenizer with special tokens
-        doc_buffer (list): Buffer of tokenized documents
-        batches (iterator): Document batch iterator
-        current_epoch (int): Current epoch number
-        stats_total_tokens (int): Total tokens processed
-        stats_cropped_tokens (int): Tokens discarded due to cropping
+        parquet_paths: List of parquet file paths
+        tokenizer: Tokenizer with BOS support
+        ddp_rank: DDP process rank
+        ddp_world_size: Total DDP processes
+        split: 'train' or 'val'
     """
 
     def __init__(
         self,
-        data_dir,
-        batch_size,
-        block_size,
-        ddp_world_size=1,
-        ddp_rank=0,
-        split="train",
-        master_process=True,
-        buffer_size=1000,
-        device="cuda",
-        tokenizer_threads=4,
-        tokenizer_batch_size=128,
+        parquet_paths: List[str],
+        tokenizer,
+        ddp_rank: int = 0,
+        ddp_world_size: int = 1,
+        split: str = "train",
     ):
-        """
-        Initialize the Parquet BOS-aligned dataloader.
+        super().__init__()
+        self.parquet_paths = parquet_paths
+        self.tokenizer = tokenizer
+        self.ddp_rank = ddp_rank
+        self.ddp_world_size = ddp_world_size
+        self.split = split
 
-        Args:
-            data_dir (str): Directory containing shard_NNNNN.parquet files
-            batch_size (int): Batch size (B)
-            block_size (int): Sequence length (T)
-            ddp_world_size (int): Number of processes
-            ddp_rank (int): Current process rank
-            split (str): 'train' or 'val'
-            master_process (bool): Whether this is master process
-            buffer_size (int): Document buffer size for best-fit
-            device (str): 'cuda' or 'cpu'
-            tokenizer_threads (int): Threads for parallel tokenization
-            tokenizer_batch_size (int): Documents per tokenization batch
+    def __iter__(self) -> Iterator[List[int]]:
         """
-        # Store configuration parameters (only those used after init)
+        Yield tokenized documents with BOS token.
+
+        Handles both DDP sharding and DataLoader worker sharding automatically.
+        """
+        # Get worker info for DataLoader multiprocessing
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is None:
+            # Single-process mode
+            worker_id = 0
+            num_workers = 1
+        else:
+            # Multi-process mode: each worker gets different data
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+
+        # Total sharding: DDP_world_size * num_workers
+        # Example: 8 GPUs, 4 workers = 32 total shards
+        total_shards = self.ddp_world_size * num_workers
+        shard_id = self.ddp_rank * num_workers + worker_id
+
+        # Infinite loop for multi-epoch training
+        epoch = 1
+        while True:
+            for shard_idx, filepath in enumerate(self.parquet_paths):
+                parquet_file = pq.ParquetFile(filepath)
+
+                # Each shard reads different row groups
+                # Example: With 32 total shards and 128 row groups:
+                #   - Shard 0: row groups 0, 32, 64, 96
+                #   - Shard 1: row groups 1, 33, 65, 97
+                #   - etc.
+                for row_group_idx in range(
+                    shard_id, parquet_file.num_row_groups, total_shards
+                ):
+                    row_group = parquet_file.read_row_group(row_group_idx)
+                    texts = row_group.column("text").to_pylist()
+
+                    # Tokenize each document with BOS prepended
+                    for document_text in texts:
+                        token_ids = self.tokenizer.encode(
+                            f"<|bos|>{document_text}", allowed_special="all"
+                        )
+                        if len(token_ids) > 0:  # Skip empty documents
+                            yield token_ids
+
+            epoch += 1
+
+
+class BestFitCollator:
+    """
+    Custom collate function that packs documents using best-fit algorithm.
+
+    Maintains a document buffer and uses best-fit cropping to minimize waste.
+    This is the core packing logic from the original implementation.
+
+    Attributes:
+        batch_size: Number of sequences per batch (B)
+        block_size: Length of each sequence (T)
+        buffer_size: Number of documents to buffer for best-fit
+        device: Target device ('cuda' or 'cpu')
+        doc_buffer: Buffer of tokenized documents
+        stats_*: Statistics for monitoring packing efficiency
+    """
+
+    def __init__(
+        self,
+        batch_size: int,
+        block_size: int,
+        buffer_size: int = 1000,
+        device: str = "cuda",
+    ):
         self.batch_size = batch_size
         self.block_size = block_size
-        self.buffer_size = buffer_size  # Number of docs to keep in memory for best-fit
+        self.buffer_size = buffer_size
         self.device = device
-        self.data_dir = data_dir  # Store for compute_val_steps
-        self.ddp_world_size = ddp_world_size
-        self.ddp_rank = ddp_rank
-        self.split = split
-        self.tokenizer_batch_size = tokenizer_batch_size
 
-        assert split in ["train", "val"], "split must be 'train' or 'val'"
+        # Document buffer for best-fit algorithm
+        self.doc_buffer: List[List[int]] = []
 
-        # Initialize tokenizer
-        # BOS (Beginning of Sequence) token is prepended to each document
-        self.tokenizer, _ = get_custom_tokenizer()
-        bos_token_id = self.tokenizer.encode("<|bos|>", allowed_special="all")[0]
+        # Statistics tracking
+        self.stats_total_tokens = 0
+        self.stats_cropped_tokens = 0
 
-        if master_process:
-            print(f"\n{'='*80}")
-            print(f"📚 Parquet BOS-Aligned Dataloader ({split})")
-            print(f"{'='*80}")
-            print(f"Data directory: {data_dir}")
-            print(f"Batch size: {batch_size}")
-            print(f"Block size: {block_size}")
-            print(f"Buffer size: {buffer_size}")
-            print(f"BOS token ID: {bos_token_id}")
-            print(f"Tokenizer threads: {tokenizer_threads}")
-
-        # Verify data directory exists and has parquet files
-        # Cache parquet files list to avoid repeated filesystem calls
-        self.parquet_files = list_parquet_files(data_dir)
-        if len(self.parquet_files) == 0:
-            raise FileNotFoundError(f"No parquet files found in {data_dir}")
-
-        # Split files: train gets all but last, val gets only last file
-        if split == "train":
-            self.split_parquet_files = self.parquet_files[:-1]
-        else:
-            self.split_parquet_files = self.parquet_files[-1:]
-
-        if master_process:
-            print(f"Found {len(self.parquet_files)} parquet files")
-            if split == "train":
-                print(
-                    f"Using files: {os.path.basename(self.parquet_files[0])} to {os.path.basename(self.parquet_files[-2])}"
-                )
-            else:
-                print(f"Using file: {os.path.basename(self.parquet_files[-1])}")
-            print(f"{'='*80}\n")
-
-        # Pre-allocate buffers for efficient batching (avoids repeated allocations)
-        # Memory layout strategy:
-        #   1. row_buffer: Working buffer on CPU for packing documents
-        #   2. cpu_buffer: Pinned CPU memory for fast HtoD transfer
-        #   3. gpu_buffer: Final GPU memory for training
-
-        use_cuda = device == "cuda"
-
-        # Row buffer: (batch_size, T+1) - used for assembling sequences with best-fit
-        # We need T+1 tokens because:
-        #   - T tokens for input (x)
-        #   - T tokens for target (y), which is input shifted by 1
-        # Shape example with B=16, T=1024: (16, 1025)
+        # Pre-allocate buffers (same strategy as v1)
         self.row_buffer = torch.empty((batch_size, block_size + 1), dtype=torch.long)
 
-        # CPU buffer: Flat buffer holding both inputs and targets (2 * B * T total)
-        # We use pinned memory (page-locked) for faster GPU transfers
-        # Shape: (2 * batch_size * block_size,) - will be split and reshaped
-        self.cpu_buffer = torch.empty(
-            2 * batch_size * block_size, dtype=torch.long, pin_memory=use_cuda
-        )
-
-        # GPU buffer: Same layout as CPU buffer, but on GPU device
-        # This is the final destination for training data
-        self.gpu_buffer = torch.empty(
-            2 * batch_size * block_size, dtype=torch.long, device=device
-        )
-
-        # Create views into buffers (no data copying, just different shapes)
-        # This allows us to:
-        #   1. Fill buffers as flat arrays (efficient)
-        #   2. Access them as 2D tensors (convenient)
-
-        # CPU views: First half is inputs, second half is targets
-        self.cpu_inputs = self.cpu_buffer[: batch_size * block_size].view(
-            batch_size, block_size
-        )  # Shape: (B, T)
-        self.cpu_targets = self.cpu_buffer[batch_size * block_size :].view(
-            batch_size, block_size
-        )  # Shape: (B, T)
-
-        # GPU views: Same split as CPU
-        self.gpu_inputs = self.gpu_buffer[: batch_size * block_size].view(
-            batch_size, block_size
-        )  # Shape: (B, T)
-        self.gpu_targets = self.gpu_buffer[batch_size * block_size :].view(
-            batch_size, block_size
-        )  # Shape: (B, T)
-
-        # Initialize document buffer and iterator
-        # doc_buffer: List of tokenized documents waiting to be packed
-        #   Example: [[50257, 464, 2068, ...], [50257, 1135, 318, ...], ...]
-        #   Each inner list is a tokenized document starting with BOS
-        self.doc_buffer = []
-        self.current_epoch = 1
-
-        # Create infinite iterator that yields document batches
-        # This handles reading parquet files, DDP sharding, and multi-epoch cycling
-        self.batches = document_batches(
-            split,
-            self.split_parquet_files,
-            ddp_rank,
-            ddp_world_size,
-            tokenizer_batch_size,
-        )
-
-        # Async prefetching infrastructure to prevent I/O blocking
-        # The prefetch queue holds pre-tokenized document batches ready to use
-        # maxsize=4: Keep 4 batches ready (512 docs = ~2-4 training batches worth)
-        # This ensures the main thread never waits for disk I/O or tokenization
-        self.prefetch_queue = queue.Queue(maxsize=4)
-        self.prefetch_stop = threading.Event()  # Signal to stop prefetch thread
-        self.prefetch_thread = threading.Thread(
-            target=self._prefetch_worker,
-            daemon=True,
-            name=f"Prefetch-{split}-rank{ddp_rank}",
-        )
-        self.prefetch_thread.start()
-
-        # Row Group (1024 documents)
-        #     ↓
-        # Split into chunks of tokenizer_batch_size=128
-        #     ↓
-        # Yields 8 batches: [128 docs, 128 docs, 128 docs, ..., 128 docs]
-        #     ↓
-        # Each batch gets tokenized
-        #     ↓
-        # Documents go into doc_buffer
-        #     ↓
-        # Best-fit packing creates training batches of size batch_size=16
-
-        # Statistics for tracking packing efficiency
-        # Goal: Keep crop_percentage around 35% (mentioned in nanochat docs)
-        self.stats_total_tokens = 0  # Total tokens used (including cropped)
-        self.stats_cropped_tokens = 0  # Tokens discarded due to cropping
-
-        # Pre-fill buffer before starting training
-        # This ensures the best-fit algorithm has enough choices from the start
-        if master_process:
-            print("Pre-filling document buffer...")
-        self._refill_buffer(initial=True)
-        if master_process:
-            print(f"✓ Buffer initialized with {len(self.doc_buffer)} documents\n")
-
-    def _prefetch_worker(self):
+    def __call__(
+        self, batch_of_documents: List[List[int]]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Background thread that continuously fetches and tokenizes documents.
-
-        This worker runs independently from the training loop, performing expensive
-        I/O and tokenization operations asynchronously. It feeds the prefetch_queue
-        with ready-to-use tokenized documents, ensuring the main thread never blocks.
-
-        Pipeline:
-            Parquet File → Read Row Group → Tokenize Batch → Queue → Main Thread
-
-        The worker will:
-            1. Fetch raw text from Parquet files (disk I/O)
-            2. Tokenize documents with BOS prepended (CPU-intensive)
-            3. Put results in queue (blocks only if queue is full)
-            4. Continue indefinitely until training ends (daemon thread)
-        """
-        try:
-            while not self.prefetch_stop.is_set():
-                # Fetch next batch of raw text documents from parquet iterator
-                # This is the expensive disk I/O operation we want to move off main thread
-                text_batch, epoch = next(self.batches)
-
-                # Tokenize all documents in the batch with BOS prepended
-                # This is the CPU-intensive operation we want to parallelize
-                tokenized_documents = []
-                for document_text in text_batch:
-                    # Convert text to tokens: "<|bos|>" + document_text
-                    # Example: "<|bos|>The quick brown fox..." -> [50257, 464, 2068, ...]
-                    token_ids = self.tokenizer.encode(
-                        f"<|bos|>{document_text}", allowed_special="all"
-                    )
-                    if len(token_ids) > 0:  # Skip empty documents
-                        tokenized_documents.append(token_ids)
-
-                # Put tokenized documents in queue for main thread to consume
-                # This blocks if queue is full (maxsize=4), which provides backpressure
-                # to prevent unbounded memory growth. The queue being full means we're
-                # keeping up with training - this is the desired steady state!
-                if not self.prefetch_stop.is_set():
-                    self.prefetch_queue.put((tokenized_documents, epoch))
-
-        except StopIteration:
-            # This shouldn't happen with infinite iterator, but handle gracefully
-            pass
-        except Exception as e:
-            # If prefetch worker crashes, log it but don't crash training
-            # Main thread will continue with whatever is left in the buffer
-            if not self.prefetch_stop.is_set():  # Only log if not shutting down
-                print(f"⚠️  Prefetch worker error (rank {self.ddp_rank}): {e}")
-                import traceback
-
-                traceback.print_exc()
-
-    def _refill_buffer(self, initial=False):
-        """
-        Refill the document buffer from the prefetch queue (non-blocking).
-
-        This method consumes pre-tokenized documents from the background prefetch
-        thread's queue. Unlike the old implementation, this NEVER blocks on I/O
-        or tokenization - it only processes already-ready data.
+        Pack a batch of documents into fixed-size sequences using best-fit.
 
         Args:
-            initial (bool): If True, fills to buffer_size (blocking for initial fill).
-                          Otherwise adds buffer_size // 2 (non-blocking).
-
-        Key difference from old implementation:
-            - Old: Blocked on disk I/O and tokenization (causing MFU jitter)
-            - New: Only reads from memory queue (instant, no jitter)
-        """
-        # Buffer management strategy:
-        #   - Initial fill: Fill completely to buffer_size (e.g., 1000 docs)
-        #   - Subsequent fills: Only add buffer_size // 2 (e.g., 500 docs)
-        # This keeps a mix of old and new documents for better best-fit choices
-        target_size = self.buffer_size if initial else self.buffer_size // 2
-        docs_to_add = target_size - len(self.doc_buffer)
-
-        # Buffer is still full enough, don't need to refill yet
-        if docs_to_add <= 0:
-            return
-
-        documents_added = 0
-        while documents_added < docs_to_add:
-            try:
-                # Try to get pre-tokenized documents from queue
-                # For initial fill: block until data is ready (timeout=5s per batch)
-                # For refills during training: non-blocking, return immediately if empty
-                timeout = 5.0 if initial else 0.001
-                tokenized_documents, epoch = self.prefetch_queue.get(timeout=timeout)
-                self.current_epoch = epoch
-
-                # Add tokenized documents to buffer
-                # Documents are already tokenized with BOS in the prefetch worker
-                for token_ids in tokenized_documents:
-                    self.doc_buffer.append(token_ids)
-                    documents_added += 1
-                    if documents_added >= docs_to_add:
-                        break
-
-            except queue.Empty:
-                # Queue is empty - prefetch thread is still working
-                if initial:
-                    # For initial fill, keep waiting (this should be rare)
-                    continue
-                else:
-                    # For training refills, don't block - use what we have
-                    # The prefetch thread will catch up soon
-                    # This prevents any blocking in the training loop
-                    break
-
-    def next_batch(self):
-        """
-        Get the next BOS-aligned batch using best-fit cropping.
+            batch_of_documents: List of tokenized documents from DataLoader
 
         Returns:
-            tuple: (inputs, targets) where:
-                - inputs: Tensor of shape (batch_size, block_size)
-                - targets: Tensor of shape (batch_size, block_size)
-
-        Each row starts with BOS token at a document boundary.
+            Tuple of (inputs, targets) tensors of shape (batch_size, block_size)
         """
-        # Fill each row in the batch using best-fit packing algorithm
-        # Goal: Pack documents into fixed-length sequences with minimal waste
+        # Add new documents to buffer
+        self.doc_buffer.extend(batch_of_documents)
+
+        # Keep buffer from growing too large (memory management)
+        if len(self.doc_buffer) > self.buffer_size * 2:
+            self.doc_buffer = self.doc_buffer[-self.buffer_size :]
+
+        # If buffer too small, we can't pack a batch yet
+        # This should only happen at the very start
+        if len(self.doc_buffer) < self.batch_size:
+            # Return empty batch (training loop should handle this gracefully)
+            # Or we could block until buffer fills, but that breaks PyTorch's flow
+            raise RuntimeError(
+                f"Buffer too small for packing: {len(self.doc_buffer)} docs "
+                f"< {self.batch_size} required. Increase buffer_size or "
+                f"prefetch_factor in DataLoader."
+            )
+
+        # Pack documents into batch using best-fit algorithm
         for row_idx in range(self.batch_size):
-            current_position = 0  # Current position in the row (0 to block_size + 1)
+            current_position = 0
 
-            # Keep packing documents until row is full
             while current_position < self.block_size + 1:
-                # Refill buffer if it's getting low (below 25% capacity)
-                # This ensures we always have enough documents for good best-fit choices
-                if len(self.doc_buffer) < self.buffer_size // 4:
-                    self._refill_buffer()
+                remaining_tokens = self.block_size + 1 - current_position
 
-                remaining_tokens = (
-                    self.block_size + 1 - current_position
-                )  # How many tokens can still fit
-
-                # BEST-FIT ALGORITHM: Find the LARGEST document that fits completely
-                # Example: If remaining=500, and we have docs of length [100, 450, 600, 200]:
-                #   - Doc 100: fits, but not largest
-                #   - Doc 450: fits, and is largest so far ✓
-                #   - Doc 600: doesn't fit (too big)
-                #   - Doc 200: fits, but smaller than 450
-                # Best choice: 450 (minimizes leftover space = 50 tokens)
+                # BEST-FIT: Find largest document that fits
                 best_fit_idx = -1
                 best_fit_length = 0
                 for buffer_idx, token_ids in enumerate(self.doc_buffer):
                     document_length = len(token_ids)
-                    # Document fits AND is larger than current best
                     if (
                         document_length <= remaining_tokens
                         and document_length > best_fit_length
@@ -535,121 +215,218 @@ class FinewebEduParquetBOSDataloader:
                         best_fit_length = document_length
 
                 if best_fit_idx >= 0:
-                    # SUCCESS: Found a document that fits entirely (no cropping needed)
-                    token_ids = self.doc_buffer.pop(best_fit_idx)  # Remove from buffer
+                    # Found a document that fits entirely
+                    token_ids = self.doc_buffer.pop(best_fit_idx)
                     document_length = len(token_ids)
-                    # Copy tokens into row buffer at current position
                     self.row_buffer[
                         row_idx, current_position : current_position + document_length
                     ] = torch.tensor(token_ids, dtype=torch.long)
-                    current_position += document_length  # Advance position
-                    self.stats_total_tokens += document_length  # Track for statistics
+                    current_position += document_length
+                    self.stats_total_tokens += document_length
                 else:
-                    # FALLBACK: No document fits entirely, must crop one
-                    # Strategy: Crop the SHORTEST document to minimize waste
-                    # Why shortest? Large docs might fit in future rows better
-
+                    # No document fits, crop the shortest
                     if len(self.doc_buffer) == 0:
-                        # Emergency: buffer is empty, refill immediately
-                        self._refill_buffer()
-                        continue
+                        raise RuntimeError(
+                            "Document buffer exhausted during packing. "
+                            "Increase buffer_size or prefetch_factor."
+                        )
 
-                    # Find shortest document in buffer
                     shortest_doc_idx = min(
                         range(len(self.doc_buffer)),
                         key=lambda idx: len(self.doc_buffer[idx]),
                     )
                     token_ids = self.doc_buffer.pop(shortest_doc_idx)
-
-                    # Crop document to fit exactly in remaining space
-                    # Example: If remaining=50 and doc has 200 tokens:
-                    #   - Use first 50 tokens: doc[:50]
-                    #   - Discard last 150 tokens (waste)
                     cropped_tokens = token_ids[:remaining_tokens]
                     self.row_buffer[
                         row_idx, current_position : current_position + remaining_tokens
                     ] = torch.tensor(cropped_tokens, dtype=torch.long)
                     self.stats_total_tokens += remaining_tokens
-                    self.stats_cropped_tokens += (
-                        len(token_ids) - remaining_tokens
-                    )  # Track waste
-                    current_position += remaining_tokens  # Row is now full
+                    self.stats_cropped_tokens += len(token_ids) - remaining_tokens
+                    current_position += remaining_tokens
 
-        # Now row_buffer contains (B, T+1) tokens for each sequence
-        # Split into inputs and targets using sequence shift:
-        #   - inputs: first T tokens  [0:T]   (what model sees)
-        #   - targets: last T tokens [1:T+1]  (what model should predict)
-        # This creates autoregressive training pairs
-        self.cpu_inputs.copy_(self.row_buffer[:, :-1])  # (B, T) - remove last token
-        self.cpu_targets.copy_(self.row_buffer[:, 1:])  # (B, T) - remove first token
+        # Split into inputs and targets
+        inputs = self.row_buffer[:, :-1].clone()  # (B, T)
+        targets = self.row_buffer[:, 1:].clone()  # (B, T)
 
-        # Transfer from CPU to GPU in one efficient batch
-        # non_blocking=True allows CPU to continue while GPU copies (pipelining)
-        use_cuda = self.device == "cuda"
-        self.gpu_buffer.copy_(self.cpu_buffer, non_blocking=use_cuda)
+        # Return CPU tensors - training loop will handle device transfer
+        # (Cannot move to CUDA in DataLoader worker processes)
+        return inputs, targets
 
-        # Return GPU tensors (views into gpu_buffer)
-        return self.gpu_inputs, self.gpu_targets
-
-    def __iter__(self):
-        """
-        Make dataloader iterable.
-
-        This allows using the dataloader in a for loop:
-            for inputs, targets in dataloader:
-                loss = model(inputs, targets)
-        """
-        return self
-
-    def __next__(self):
-        """
-        Get next batch (for iterator protocol).
-
-        Called automatically when iterating:
-            for inputs, targets in dataloader:  # Calls __next__ each iteration
-                ...
-
-        Returns:
-            tuple: (inputs, targets) both of shape (batch_size, block_size)
-        """
-        return self.next_batch()
-
-    def get_stats(self):
-        """
-        Get token usage statistics for monitoring packing efficiency.
-
-        Returns:
-            dict: Statistics with:
-                - total_tokens: Total tokens processed
-                - cropped_tokens: Tokens discarded due to cropping
-                - crop_percentage: Percentage of tokens wasted (target: ~35%)
-                - current_epoch: Current epoch number
-                - prefetch_queue_size: Number of batches waiting in prefetch queue
-
-        Interpretation:
-            - Lower crop_percentage = better packing efficiency
-            - Nanochat reports ~35% cropping for longer documents
-            - Very low (<5%) suggests most docs are short
-            - Very high (>50%) suggests poor buffer size or doc length distribution
-            - prefetch_queue_size should stay near maxsize (4) for optimal performance
-        """
+    def get_stats(self) -> dict:
+        """Get packing efficiency statistics."""
         crop_pct = 100.0 * self.stats_cropped_tokens / max(1, self.stats_total_tokens)
         return {
             "total_tokens": self.stats_total_tokens,
             "cropped_tokens": self.stats_cropped_tokens,
             "crop_percentage": crop_pct,
-            "current_epoch": self.current_epoch,
-            "prefetch_queue_size": self.prefetch_queue.qsize(),
+            "buffer_size": len(self.doc_buffer),
         }
 
-    def __del__(self):
-        """
-        Cleanup: Stop the prefetch thread when dataloader is destroyed.
 
-        This ensures clean shutdown and prevents the background thread from
-        continuing to run after training ends.
+class FinewebEduParquetBOSDataloader:
+    """
+    PyTorch-native BOS-aligned dataloader with best-fit packing.
+
+    Implementation using PyTorch's DataLoader infrastructure:
+    - Leverages num_workers for parallel I/O and tokenization
+    - Built-in prefetching and pin_memory
+    - Automatic worker lifecycle management
+    - Custom collate_fn for best-fit packing
+
+    Usage:
+        >>> dataloader = FinewebEduParquetBOSDataloader(
+        ...     data_dir="/path/to/fineweb_edu_parquet",
+        ...     batch_size=16,
+        ...     block_size=1024,
+        ...     num_workers=4,
+        ... )
+        >>> for inputs, targets in dataloader:
+        ...     loss = model(inputs, targets)
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        batch_size: int,
+        block_size: int,
+        ddp_world_size: int = 1,
+        ddp_rank: int = 0,
+        split: str = "train",
+        master_process: bool = True,
+        buffer_size: int = 1000,
+        device: str = "cuda",
+        num_workers: int = 4,
+        prefetch_factor: Optional[int] = 2,
+        persistent_workers: bool = True,
+    ):
         """
-        if hasattr(self, "prefetch_stop"):
-            self.prefetch_stop.set()
-        if hasattr(self, "prefetch_thread") and self.prefetch_thread.is_alive():
-            self.prefetch_thread.join(timeout=2.0)  # Wait up to 2s for clean exit
+        Initialize PyTorch-native BOS dataloader.
+
+        Args:
+            data_dir: Directory containing parquet shards
+            batch_size: Batch size (B)
+            block_size: Sequence length (T)
+            ddp_world_size: Number of DDP processes
+            ddp_rank: Current DDP rank
+            split: 'train' or 'val'
+            master_process: Whether this is master process
+            buffer_size: Document buffer size for best-fit
+            device: Target device ('cuda' or 'cpu')
+            num_workers: Number of DataLoader workers (parallel I/O)
+            prefetch_factor: Batches to prefetch per worker (None=auto)
+            persistent_workers: Keep workers alive between epochs
+        """
+        self.batch_size = batch_size
+        self.block_size = block_size
+        self.device = device
+        self.split = split
+
+        # Initialize tokenizer
+        tokenizer, _ = get_custom_tokenizer()
+        bos_token_id = tokenizer.encode("<|bos|>", allowed_special="all")[0]
+
+        if master_process:
+            print(f"\n{'='*80}")
+            print(f"📚 PyTorch-Native BOS Dataloader ({split})")
+            print(f"{'='*80}")
+            print(f"Data directory: {data_dir}")
+            print(f"Batch size: {batch_size}")
+            print(f"Block size: {block_size}")
+            print(f"Buffer size: {buffer_size}")
+            print(f"BOS token ID: {bos_token_id}")
+            print(f"Num workers: {num_workers}")
+            print(f"Prefetch factor: {prefetch_factor}")
+            print(f"Persistent workers: {persistent_workers}")
+
+        # Get parquet files
+        parquet_files = list_parquet_files(data_dir)
+        if len(parquet_files) == 0:
+            raise FileNotFoundError(f"No parquet files found in {data_dir}")
+
+        # Split files: train gets all but last, val gets only last
+        if split == "train":
+            split_parquet_files = parquet_files[:-1]
+        else:
+            split_parquet_files = parquet_files[-1:]
+
+        if len(split_parquet_files) == 0:
+            raise ValueError(
+                f"No parquet files for split='{split}'. "
+                f"Need at least 2 shards (one for train, one for val)."
+            )
+
+        if master_process:
+            print(f"Found {len(parquet_files)} parquet files")
+            if split == "train":
+                print(
+                    f"Using files: {os.path.basename(parquet_files[0])} to "
+                    f"{os.path.basename(parquet_files[-2])}"
+                )
+            else:
+                print(f"Using file: {os.path.basename(parquet_files[-1])}")
+            print(f"{'='*80}\n")
+
+        # Create dataset
+        dataset = ParquetDocumentDataset(
+            split_parquet_files,
+            tokenizer,
+            ddp_rank,
+            ddp_world_size,
+            split,
+        )
+
+        # Create collator for best-fit packing
+        self.collator = BestFitCollator(batch_size, block_size, buffer_size, device)
+
+        # PyTorch DataLoader requires prefetch_factor=None when num_workers=0
+        # Also, persistent_workers must be False when num_workers=0
+        if num_workers == 0:
+            prefetch_factor = None
+            persistent_workers = False
+
+        # Create PyTorch DataLoader with all optimizations
+        # Key features:
+        # - num_workers: Parallel I/O and tokenization
+        # - prefetch_factor: Each worker prefetches N batches (None for single-process)
+        # - pin_memory: Pinned CPU memory for faster GPU transfer
+        # - persistent_workers: Avoid worker startup overhead between epochs
+        #
+        # DataLoader batch_size: Number of documents to feed to collate_fn at once
+        # For best-fit to work well, we need enough documents in the buffer
+        # Use max(buffer_size // 4, batch_size * 4) to ensure enough documents
+        dataloader_batch_size = max(buffer_size // 4, batch_size * 4)
+
+        # Enable pin_memory for faster CPU-to-GPU transfers when using CUDA
+        use_pin_memory = device == "cuda" and num_workers > 0
+
+        self.dataloader = DataLoader(
+            dataset,
+            batch_size=dataloader_batch_size,  # Documents per collate call
+            collate_fn=self.collator,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            pin_memory=use_pin_memory,  # Pin memory for faster GPU transfer
+            persistent_workers=persistent_workers,
+            drop_last=False,
+        )
+
+        self._iterator = None
+
+        if master_process:
+            pin_status = "✓ enabled" if use_pin_memory else "✗ disabled"
+            print(f"✓ DataLoader initialized (pin_memory: {pin_status})\n")
+
+    def __iter__(self):
+        """Make dataloader iterable."""
+        self._iterator = iter(self.dataloader)
+        return self
+
+    def __next__(self):
+        """Get next batch."""
+        if self._iterator is None:
+            self._iterator = iter(self.dataloader)
+        return next(self._iterator)
+
+    def get_stats(self) -> dict:
+        """Get token packing statistics."""
+        return self.collator.get_stats()

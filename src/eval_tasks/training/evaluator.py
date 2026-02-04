@@ -425,7 +425,7 @@ class TrainingEvaluator:
 
         with torch.no_grad():
             for k in range(val_loss_steps):
-                X, Y = eval_dataloader.next_batch()
+                X, Y = next(eval_dataloader)
                 X = X.to(self.device)
                 Y = Y.to(self.device)
                 with torch.autocast(device_type=self.device, dtype=torch.bfloat16):

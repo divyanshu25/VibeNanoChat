@@ -30,18 +30,22 @@ def setup_pretraining_dataloaders(
     Note:
         Validation dataloader is created on-demand via builder pattern (nanochat-style)
     """
-    # Use Parquet BOS-aligned dataloader for pretraining
+    # Use Parquet BOS-aligned dataloader for pretraining (PyTorch-native)
     DataloaderClass = FinewebEduParquetBOSDataloader
     data_dir = config.data_dir_pretrain_parquet
     extra_kwargs = {
         "buffer_size": config.bos_dataloader_buffer_size,
         "device": device,
-        "tokenizer_threads": config.tokenizer_threads,
-        "tokenizer_batch_size": config.tokenizer_batch_size,
+        "num_workers": config.dataloader_num_workers,
+        "prefetch_factor": config.dataloader_prefetch_factor,
+        "persistent_workers": config.dataloader_persistent_workers,
     }
     if master_process:
-        print("📚 PRETRAINING: Using Parquet BOS-aligned dataloader (nanochat-style)")
+        print("📚 PRETRAINING: Using PyTorch-native BOS-aligned dataloader")
         print(f"   Data directory: {data_dir}")
+        print(
+            f"   Workers: {config.dataloader_num_workers}, Prefetch: {config.dataloader_prefetch_factor}"
+        )
         print("   Expected token waste: ~35% (cropping for document boundaries)")
 
     train_dataloader = DataloaderClass(
@@ -276,7 +280,7 @@ def setup_dataloaders(
 
             def eval_dataloader_builder():
                 if master_process:
-                    print("🔄 Creating fresh validation dataloader (nanochat-style)...")
+                    print("🔄 Creating fresh validation dataloader...")
                 return FinewebEduParquetBOSDataloader(
                     data_dir=config.data_dir_pretrain_parquet,
                     batch_size=config.batch_size,
@@ -287,8 +291,9 @@ def setup_dataloaders(
                     master_process=False,  # Don't print banner each time
                     buffer_size=config.bos_dataloader_buffer_size,
                     device=device,
-                    tokenizer_threads=config.tokenizer_threads,
-                    tokenizer_batch_size=config.tokenizer_batch_size,
+                    num_workers=config.dataloader_num_workers,
+                    prefetch_factor=config.dataloader_prefetch_factor,
+                    persistent_workers=config.dataloader_persistent_workers,
                 )
 
     # Create evaluator if needed
