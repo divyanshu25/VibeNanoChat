@@ -157,7 +157,6 @@ class Trainer:
         self.max_steps = hyperparams["max_steps"]
         self.flops_per_token = hyperparams["flops_per_token"]
         self.peak_flops = hyperparams["peak_flops"]
-        self.warmup_steps = hyperparams["warmup_steps"]
         self.run_evals_after = hyperparams["run_evals_after"]
         self.run_core_evals_after = hyperparams["run_core_evals_after"]
 
@@ -357,7 +356,6 @@ class Trainer:
             master_process=self.master_process,
             sft_training=self.sft_training,
             config=self.config,
-            warmup_steps=self.warmup_steps,
             max_steps=self.max_steps,
             num_epochs=self.num_epochs,
             run_evals=self.run_evals,

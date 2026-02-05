@@ -36,7 +36,6 @@ def setup_hyperparameters(
             - max_steps: Maximum steps per epoch
             - flops_per_token: FLOPs per token
             - peak_flops: Peak FLOPs of device
-            - warmup_steps: Number of warmup steps
             - run_evals_after: Validation eval interval
             - run_core_evals_after: Core eval interval
     """
@@ -92,9 +91,6 @@ def setup_hyperparameters(
     else:
         peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
 
-    # Set warmup steps based on training phase (calculated as % of max_steps)
-    warmup_steps = int(max_steps * config.warmup_ratio)
-
     # Set adaptive eval intervals based on total training steps
     # Val loss: frequent (good learning curve), Core evals: sparse (expensive benchmarks)
     total_steps = max_steps * num_epochs
@@ -128,7 +124,6 @@ def setup_hyperparameters(
         "max_steps": max_steps,
         "flops_per_token": flops_per_token,
         "peak_flops": peak_flops,
-        "warmup_steps": warmup_steps,
         "run_evals_after": run_evals_after,
         "run_core_evals_after": run_core_evals_after,
     }

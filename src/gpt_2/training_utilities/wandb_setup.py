@@ -7,7 +7,6 @@ def setup_wandb(
     master_process: bool,
     sft_training: bool,
     config,
-    warmup_steps: int,
     max_steps: int,
     num_epochs: int,
     run_evals: bool,
@@ -24,7 +23,6 @@ def setup_wandb(
         master_process: Whether this is the master process
         sft_training: Whether doing SFT training
         config: GPTConfig instance
-        warmup_steps: Number of warmup steps
         max_steps: Maximum steps per epoch
         num_epochs: Number of training epochs
         run_evals: Whether running evaluations
@@ -62,7 +60,6 @@ def setup_wandb(
             "training_mode": training_mode,
             "batch_size": config.batch_size,
             "block_size": config.block_size,
-            "warmup_steps": warmup_steps,
             "max_steps": max_steps,
             "num_epochs": num_epochs,
             "weight_decay": config.weight_decay,
