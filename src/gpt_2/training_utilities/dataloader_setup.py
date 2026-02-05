@@ -262,8 +262,9 @@ def setup_dataloaders(
         if run_evals:
 
             def eval_dataloader_builder():
-                if master_process:
-                    print("🔄 Using SFT validation dataloader...")
+                # Reset the iterator for SFT dataloader as well
+                if hasattr(eval_dataloader, "reset"):
+                    eval_dataloader.reset()
                 return eval_dataloader
 
     else:
@@ -275,26 +276,29 @@ def setup_dataloaders(
             device=device,
         )
 
-        # Nanochat-style: Create a builder function that returns a fresh dataloader each time
+        # Create validation dataloader once (with persistent workers for efficiency)
         if run_evals:
+            if master_process:
+                print("🔄 Creating validation dataloader (one-time setup)...")
+            eval_dataloader = FinewebEduParquetBOSDataloader(
+                data_dir=config.data_dir_pretrain_parquet,
+                batch_size=config.batch_size,
+                block_size=config.block_size,
+                ddp_world_size=ddp_world_size,
+                ddp_rank=ddp_rank,
+                split="val",
+                master_process=False,  # Don't print banner each time
+                buffer_size=config.bos_dataloader_buffer_size,
+                device=device,
+                num_workers=config.dataloader_num_workers,
+                prefetch_factor=config.dataloader_prefetch_factor,
+                persistent_workers=config.dataloader_persistent_workers,
+            )
 
             def eval_dataloader_builder():
-                if master_process:
-                    print("🔄 Creating fresh validation dataloader...")
-                return FinewebEduParquetBOSDataloader(
-                    data_dir=config.data_dir_pretrain_parquet,
-                    batch_size=config.batch_size,
-                    block_size=config.block_size,
-                    ddp_world_size=ddp_world_size,
-                    ddp_rank=ddp_rank,
-                    split="val",
-                    master_process=False,  # Don't print banner each time
-                    buffer_size=config.bos_dataloader_buffer_size,
-                    device=device,
-                    num_workers=config.dataloader_num_workers,
-                    prefetch_factor=config.dataloader_prefetch_factor,
-                    persistent_workers=config.dataloader_persistent_workers,
-                )
+                # Reset the iterator instead of creating fresh dataloader
+                eval_dataloader.reset()
+                return eval_dataloader
 
     # Create evaluator if needed
     if run_evals:
@@ -317,6 +321,7 @@ def setup_dataloaders(
             temperature=config.generation_temperature,
             top_k=config.generation_top_k,
             repetition_penalty=config.generation_repetition_penalty,
+            eval_dataloader=eval_dataloader,  # Pass for cleanup
         )
     else:
         evaluator = None

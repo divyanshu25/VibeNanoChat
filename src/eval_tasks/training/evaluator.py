@@ -326,6 +326,7 @@ class TrainingEvaluator:
         temperature=0.8,
         top_k=50,
         repetition_penalty=1.2,
+        eval_dataloader=None,
     ):
         """
         Initialize training evaluator (nanochat-style).
@@ -348,9 +349,11 @@ class TrainingEvaluator:
             generation_verbose: Whether to print verbose progress during generation (default: False)
             temperature: Sampling temperature for generation (default: 0.8)
             top_k: Top-k sampling parameter (default: 50)
+            eval_dataloader: Optional eval dataloader instance for cleanup (default: None)
         """
         self.model = model
         self.eval_dataloader_builder = eval_dataloader_builder
+        self.eval_dataloader = eval_dataloader
         self.device = device
         self.master_process = master_process
         self.ddp = ddp

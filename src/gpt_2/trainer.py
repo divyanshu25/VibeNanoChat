@@ -726,6 +726,16 @@ class Trainer:
                     self.train_dataloader.cleanup()
                     time.sleep(0.5)  # let workers finish gracefully
 
+                # Cleanup eval dataloader if it exists
+                if (
+                    self.evaluator is not None
+                    and hasattr(self.evaluator, "eval_dataloader")
+                    and self.evaluator.eval_dataloader is not None
+                    and hasattr(self.evaluator.eval_dataloader, "cleanup")
+                ):
+                    self.evaluator.eval_dataloader.cleanup()
+                    time.sleep(0.5)  # let workers finish gracefully
+
                 stats = self.train_dataloader.get_stats()
                 print(f"\n{'='*80}")
                 print("📦 DATALOADER PACKING STATS (Final)")

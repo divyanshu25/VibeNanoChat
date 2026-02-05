@@ -523,6 +523,19 @@ class FinewebEduParquetBOSDataloader:
         """Returns packing efficiency stats from collator"""
         return self.collator.get_stats()
 
+    def reset(self):
+        """
+        Reset the dataloader iterator to start from the beginning.
+
+        This is more efficient than creating a fresh dataloader for validation,
+        as it preserves the worker processes and just resets the iteration state.
+        """
+        if self._iterator is not None:
+            # Delete the old iterator to clean up resources
+            del self._iterator
+        # Create a new iterator (workers are persistent, so this is fast)
+        self._iterator = iter(self.dataloader)
+
     def cleanup(self):
         """
         Gracefully cleanup dataloader resources (nanochat-style).
