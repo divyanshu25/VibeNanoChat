@@ -765,10 +765,13 @@ class Trainer:
                 print(f"   Total tokens processed: {stats['total_tokens']:,}")
                 print(f"   Cropped tokens: {stats['cropped_tokens']:,}")
                 print(f"   Crop percentage: {stats['crop_percentage']:.2f}%")
-                if stats.get("dropped_tokens", 0) > 0:
-                    print(f"   Dropped tokens: {stats['dropped_tokens']:,}")
-                    print(f"   Buffer overflows: {stats['buffer_overflows']}")
-                    print(f"   Total waste %: {stats['total_waste_percentage']:.2f}%")
+                print(f"   Dropped tokens: {stats.get('dropped_tokens', 0):,}")
+                print(f"   Buffer overflows: {stats.get('buffer_overflows', 0)}")
+                print(
+                    f"   Total waste percentage: {stats.get('total_waste_percentage', 0.0):.2f}%"
+                )
+                print(f"   Empty docs skipped: {stats.get('empty_docs', 0):,}")
+                print(f"   Corrupted docs skipped: {stats.get('corrupted_docs', 0):,}")
                 print(f"   Final buffer size: {stats['buffer_size']}")
                 print(f"{'='*80}\n")
             except Exception as e:
