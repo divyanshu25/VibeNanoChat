@@ -33,8 +33,6 @@ def setup_hyperparameters(
             - num_epochs: Number of training epochs
             - grad_accumulation_steps: Gradient accumulation steps
             - total_batch_size: Total batch size across all devices
-            - max_learning_rate: Maximum learning rate
-            - min_learning_rate: Minimum learning rate
             - max_steps: Maximum steps per epoch
             - flops_per_token: FLOPs per token
             - peak_flops: Peak FLOPs of device
@@ -67,35 +65,6 @@ def setup_hyperparameters(
         print(f"Total batch size: {total_batch_size}")
         print(f"Grad accumulation steps: {grad_accumulation_steps}")
 
-    # Learning rate scheduling parameters
-    max_learning_rate = config.max_learning_rate
-    min_learning_rate = max_learning_rate * config.min_lr_ratio
-
-    # Apply nanochat-style depth-aware LR scaling if using depth mode
-    # LR ∝ 1/√model_dim (tuned at model_dim=768, depth=12)
-    if config._depth_mode:
-        # Learning rate scaling: LR ∝ 1/√model_dim
-        # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
-        reference_dim = 768
-        lr_scale = (config.n_embed / reference_dim) ** -0.5
-        max_learning_rate *= lr_scale
-        min_learning_rate *= lr_scale
-
-        if master_process:
-            print(f"\n📐 DEPTH-AWARE SCALING (depth={config.depth})")
-            print(f"   n_layer: {config.n_layer}")
-            print(
-                f"   n_embed: {config.n_embed} (base: {config._base_dim}, nudge: {config._nudge:+d})"
-            )
-            print(f"   n_head: {config.n_head}")
-            print(f"   head_dim: {config.n_embed // config.n_head}")
-            print(
-                f"   LR scaling: {lr_scale:.6f} (∝ 1/√({config.n_embed}/{reference_dim}))"
-            )
-            print(
-                f"   Max LR: {config.max_learning_rate:.2e} → {max_learning_rate:.2e}"
-            )
-
     # Automatically calculate steps based on config settings for all phases
     if master_process:
         print("\n" + "=" * 80)
@@ -124,10 +93,7 @@ def setup_hyperparameters(
         peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
 
     # Set warmup steps based on training phase (calculated as % of max_steps)
-    if sft_training:
-        warmup_steps = int(max_steps * config.lr_warmup_ratio_sft)
-    else:
-        warmup_steps = int(max_steps * config.lr_warmup_ratio_pretrain)
+    warmup_steps = int(max_steps * config.warmup_ratio)
 
     # Set adaptive eval intervals based on total training steps
     # Val loss: frequent (good learning curve), Core evals: sparse (expensive benchmarks)
@@ -159,8 +125,6 @@ def setup_hyperparameters(
         "num_epochs": num_epochs,
         "grad_accumulation_steps": grad_accumulation_steps,
         "total_batch_size": total_batch_size,
-        "max_learning_rate": max_learning_rate,
-        "min_learning_rate": min_learning_rate,
         "max_steps": max_steps,
         "flops_per_token": flops_per_token,
         "peak_flops": peak_flops,

@@ -220,11 +220,9 @@ class GPT(nn.Module):
 
     def configure_optimizers(
         self,
-        learning_rate,
         weight_decay,
         device,
         config=None,
-        muon_lr=0.02,
         ddp=False,
         master_process=True,
         embedding_lr=None,
@@ -241,11 +239,9 @@ class GPT(nn.Module):
         - Muon: transformer block weights (2D parameters)
 
         Args:
-            learning_rate (float): Learning rate for AdamW
             weight_decay (float): Weight decay coefficient
             device (str): Device type ('cuda', 'mps', 'cpu')
             config (GPTConfig, optional): Unused, kept for API compatibility
-            muon_lr (float): Learning rate for Muon optimizer
             ddp (bool): Distributed training flag
             embedding_lr (float): Learning rate for embeddings (nanochat-style)
             unembedding_lr (float): Learning rate for output head (nanochat-style)
@@ -334,12 +330,19 @@ class GPT(nn.Module):
         # - AdamW's adaptive per-parameter scaling provides built-in safety
         # - Muon's orthogonalization prevents instability at high LRs
 
-        _unembedding_lr = (
-            unembedding_lr if unembedding_lr is not None else learning_rate
-        )
-        _embedding_lr = embedding_lr if embedding_lr is not None else learning_rate
-        _matrix_lr = matrix_lr if matrix_lr is not None else muon_lr
-        _scalar_lr = scalar_lr if scalar_lr is not None else learning_rate
+        if unembedding_lr is None:
+            raise ValueError("unembedding_lr must be specified")
+        if embedding_lr is None:
+            raise ValueError("embedding_lr must be specified")
+        if scalar_lr is None:
+            raise ValueError("scalar_lr must be specified")
+        if matrix_lr is None:
+            raise ValueError("matrix_lr must be specified")
+
+        _unembedding_lr = unembedding_lr
+        _embedding_lr = embedding_lr
+        _matrix_lr = matrix_lr
+        _scalar_lr = scalar_lr
 
         # ========== STEP 4: Build Combined Parameter Groups (Nanochat-style) ==========
         # Create unified parameter groups for the combined optimizer.

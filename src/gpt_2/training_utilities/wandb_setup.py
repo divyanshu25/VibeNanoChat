@@ -7,8 +7,6 @@ def setup_wandb(
     master_process: bool,
     sft_training: bool,
     config,
-    max_learning_rate: float,
-    min_learning_rate: float,
     warmup_steps: int,
     max_steps: int,
     num_epochs: int,
@@ -26,8 +24,6 @@ def setup_wandb(
         master_process: Whether this is the master process
         sft_training: Whether doing SFT training
         config: GPTConfig instance
-        max_learning_rate: Maximum learning rate
-        min_learning_rate: Minimum learning rate
         warmup_steps: Number of warmup steps
         max_steps: Maximum steps per epoch
         num_epochs: Number of training epochs
@@ -66,8 +62,6 @@ def setup_wandb(
             "training_mode": training_mode,
             "batch_size": config.batch_size,
             "block_size": config.block_size,
-            "max_learning_rate": max_learning_rate,
-            "min_learning_rate": min_learning_rate,
             "warmup_steps": warmup_steps,
             "max_steps": max_steps,
             "num_epochs": num_epochs,

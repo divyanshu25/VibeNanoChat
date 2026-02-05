@@ -154,8 +154,6 @@ class Trainer:
         self.num_epochs = hyperparams["num_epochs"]
         self.grad_accumulation_steps = hyperparams["grad_accumulation_steps"]
         self.total_batch_size = hyperparams["total_batch_size"]
-        self.max_learning_rate = hyperparams["max_learning_rate"]
-        self.min_learning_rate = hyperparams["min_learning_rate"]
         self.max_steps = hyperparams["max_steps"]
         self.flops_per_token = hyperparams["flops_per_token"]
         self.peak_flops = hyperparams["peak_flops"]
@@ -250,10 +248,8 @@ class Trainer:
 
         # Create optimizer(s) - may return single optimizer or list [AdamW, Muon]
         optimizer_result = self.raw_model.configure_optimizers(
-            learning_rate=self.max_learning_rate,
             weight_decay=weight_decay,
             device=self.device,
-            muon_lr=self.config.muon_lr,
             ddp=self.ddp,
             master_process=self.master_process,
             embedding_lr=embedding_lr,
@@ -361,8 +357,6 @@ class Trainer:
             master_process=self.master_process,
             sft_training=self.sft_training,
             config=self.config,
-            max_learning_rate=self.max_learning_rate,
-            min_learning_rate=self.min_learning_rate,
             warmup_steps=self.warmup_steps,
             max_steps=self.max_steps,
             num_epochs=self.num_epochs,

@@ -231,7 +231,7 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 
 run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-sweep [NGPUS=4] [PARAM_DATA_RATIO=10] [CORE_EVALS=true] [EVAL_INTERVAL=500]
 	@echo "🔬 Starting depth sweep experiments..."
-	@echo "📐 Training depths: 8, 10, 12, 14, 16, 18, 20"
+	@echo "📐 Training depths: 16" 
 	@NGPUS=$${NGPUS:-4}; \
 	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-10}; \
 	CORE_EVALS=$${CORE_EVALS:-true}; \
@@ -247,8 +247,10 @@ run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-s
 	fi; \
 	echo "⚡ Muon optimizer enabled for all runs"; \
 	echo ""; \
-	for DEPTH in 8 10 12 14 16 18 20; do \
-		echo ""; \
+	for DEPTH in 16; do \
+		echo "  🧹 GPU cleanup..."; \
+		$(MAKE) kill-gpu; \
+		sleep 20; \
 		echo "================================================================="; \
 		echo "📐 Training depth=$$DEPTH"; \
 		echo "================================================================="; \
@@ -258,12 +260,9 @@ run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-s
 		fi; \
 		$(MAKE) ddp-train NGPUS=$$NGPUS MODE=pretraining CORE_EVALS=$$CORE_EVALS DEPTH=$$DEPTH PARAM_DATA_RATIO=$$PARAM_DATA_RATIO $$EXTRA_ARGS || exit 1; \
 		echo ""; \
-		echo "  🧹 Cleaning up GPUs..."; \
-		$(MAKE) kill-gpu; \
-		sleep 20; \
-		echo "  🧹 Double-checking GPU cleanup..."; \
-		$(MAKE) kill-gpu; \
-		sleep 20; \
+	echo "  🧹 Cleaning up GPUs..."; \
+	$(MAKE) kill-gpu; \
+	sleep 20; \
 	done
 	@echo ""
 	@echo "✅ All depth sweep experiments complete!"

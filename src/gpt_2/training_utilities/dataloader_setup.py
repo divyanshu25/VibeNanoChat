@@ -46,10 +46,6 @@ def setup_pretraining_dataloaders(
     if master_process:
         print("📚 PRETRAINING: Using PyTorch-native BOS-aligned dataloader")
         print(f"   Data directory: {data_dir}")
-        print(
-            f"   Workers: {config.dataloader_num_workers}, Prefetch: {config.dataloader_prefetch_factor}"
-        )
-        print("   Expected token waste: ~35% (cropping for document boundaries)")
 
     train_dataloader = DataloaderClass(
         data_dir=data_dir,
