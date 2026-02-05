@@ -113,13 +113,11 @@ class GPTConfig:
     # Dataloader Configuration
     # ========================================================================
     bos_dataloader_buffer_size: int = (
-        2048  # Document buffer size for BOS-aligned packing
+        4096  # Document buffer size for BOS-aligned packing (increased for 4 workers × 2 prefetch)
     )
-    dataloader_num_workers: int = (
-        2  # Number of DataLoader workers for parallel I/O (reduced from 4 to prevent buffer overflow)
-    )
+    dataloader_num_workers: int = 4  # Number of DataLoader workers for parallel I/O
     dataloader_prefetch_factor: int = (
-        2  # Batches to prefetch per worker (4 total with 2 workers)
+        4  # Batches to prefetch per worker (4 total with 2 workers)
     )
     dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
 

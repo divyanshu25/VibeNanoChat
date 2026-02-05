@@ -12,14 +12,11 @@ import time
 import torch
 
 import wandb
-from gpt_2.config import GPTConfig
-from gpt_2.gpt2_model import GPT
 from gpt_2.muon import get_muon_momentum, get_muon_weight_decay
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
-from gpt_2.training_utilities import (setup_dataloaders, setup_logging,
-                                      setup_wandb)
-from gpt_2.utils import (calculate_num_iterations, get_peak_flops,
-                         load_checkpoint, save_checkpoint)
+from gpt_2.training_utilities import (setup_dataloaders, setup_hyperparameters,
+                                      setup_logging, setup_model, setup_wandb)
+from gpt_2.utils import load_checkpoint, save_checkpoint
 
 
 class Trainer:
@@ -112,241 +109,49 @@ class Trainer:
             )
 
         # Setup components
-        self._setup_model()
+        self.config, self.raw_model, self.model = setup_model(
+            depth_override=self.depth_override,
+            aspect_ratio_override=self.aspect_ratio_override,
+            head_dim_override=self.head_dim_override,
+            target_flops_override=self.target_flops_override,
+            param_data_ratio_override=self.param_data_ratio_override,
+            eval_interval_override=self.eval_interval_override,
+            device=self.device,
+            ddp=self.ddp,
+            master_process=self.master_process,
+        )
         # Setup logging after model so we have depth info for filename
         self.generation_log_file = setup_logging(
             self.master_process,
             depth=self.config.depth if self.config._depth_mode else None,
             sft_training=self.sft_training,
         )
-        self._setup_hyperparameters()
+        hyperparams = setup_hyperparameters(
+            config=self.config,
+            raw_model=self.raw_model,
+            sft_training=self.sft_training,
+            ddp_world_size=self.ddp_world_size,
+            device=self.device,
+            eval_interval_override=self.eval_interval_override,
+            core_eval_interval_override=self.core_eval_interval_override,
+            master_process=self.master_process,
+        )
+        # Unpack hyperparameters
+        self.num_epochs = hyperparams["num_epochs"]
+        self.grad_accumulation_steps = hyperparams["grad_accumulation_steps"]
+        self.total_batch_size = hyperparams["total_batch_size"]
+        self.max_learning_rate = hyperparams["max_learning_rate"]
+        self.min_learning_rate = hyperparams["min_learning_rate"]
+        self.max_steps = hyperparams["max_steps"]
+        self.flops_per_token = hyperparams["flops_per_token"]
+        self.peak_flops = hyperparams["peak_flops"]
+        self.warmup_steps = hyperparams["warmup_steps"]
+        self.run_evals_after = hyperparams["run_evals_after"]
+        self.run_core_evals_after = hyperparams["run_core_evals_after"]
         self._setup_dataloaders_wrapper()
         self._setup_optimizer_and_checkpoint()
         self._setup_wandb_wrapper()
         # self._setup_token_bytes()
-
-    def _setup_model(self):
-        """Initialize GPT model and wrap with DDP if needed."""
-        self.config = GPTConfig()
-
-        # Override architecture parameters using depth-based parameterization
-        if self.depth_override is not None:
-            if self.master_process:
-                print(f"🔢 Using depth-based architecture: depth={self.depth_override}")
-            self.config.depth = self.depth_override
-            if self.aspect_ratio_override is not None:
-                self.config.aspect_ratio = self.aspect_ratio_override
-            if self.head_dim_override is not None:
-                self.config.head_dim = self.head_dim_override
-            # __post_init__ will auto-calculate n_layer, n_embed, n_head
-            self.config.__post_init__()
-
-            # Auto-scale batch size based on model size to avoid OOM
-            # Small models can use larger batch sizes for faster training
-            # Large models need smaller batch sizes to fit in memory
-            # Reference: tuned on 2x H100 80GB
-            if self.depth_override <= 8:
-                auto_batch_size = 32  # ~100M params: high throughput
-            elif self.depth_override <= 10:
-                auto_batch_size = 32  # ~100M params: high throughput
-            elif self.depth_override <= 14:
-                auto_batch_size = 16  # ~150M-210M params: balanced
-            elif self.depth_override <= 18:
-                auto_batch_size = 8  # ~280M-360M params: conservative
-            elif self.depth_override <= 22:
-                auto_batch_size = 4  # ~560M-700M params: tight fit
-            else:
-                auto_batch_size = 2  # ~1B+ params: minimal batch
-
-            if self.master_process:
-                if auto_batch_size != self.config.batch_size:
-                    print(
-                        f"   Auto-scaling batch_size: {self.config.batch_size} → {auto_batch_size} (for depth={self.depth_override})"
-                    )
-                else:
-                    print(
-                        f"   Batch size: {auto_batch_size} (optimal for depth={self.depth_override})"
-                    )
-            self.config.batch_size = auto_batch_size
-        else:
-            # Use default config values
-            if self.master_process:
-                print(
-                    f"📝 Using default architecture: n_layer={self.config.n_layer}, n_embed={self.config.n_embed}"
-                )
-
-        # Override target_flops if provided
-        if self.target_flops_override is not None:
-            if self.master_process:
-                print(
-                    f"🎯 Overriding target_flops: {self.config.target_flops:.2e} → {self.target_flops_override:.2e}"
-                )
-            self.config.target_flops = self.target_flops_override
-
-        # Override param_data_ratio if provided
-        if self.param_data_ratio_override is not None:
-            if self.master_process:
-                print(
-                    f"🎯 Overriding param_data_ratio: {self.config.target_param_data_ratio} → {self.param_data_ratio_override}"
-                )
-            self.config.target_param_data_ratio = self.param_data_ratio_override
-
-        # Override eval_interval if provided
-        if self.eval_interval_override is not None:
-            if self.master_process:
-                print(
-                    f"⏱️  Overriding eval_interval: {self.config.eval_interval} → {self.eval_interval_override}"
-                )
-            self.config.eval_interval = self.eval_interval_override
-
-        # Create raw model and keep reference BEFORE any wrapping
-        # This reference will always point to the unwrapped model with updated weights
-        self.raw_model = GPT(self.config, master_process=self.master_process)
-        self.raw_model.to(self.device)
-
-        # Wrap with torch.compile for faster training
-        # Use dynamic=False because input shapes never change during training (nanochat-style)
-        # Requires PyTorch 2.9.0+ to avoid none_dealloc crash
-        self.model = torch.compile(self.raw_model, dynamic=False)
-        # self.model = self.raw_model
-
-        # Nanochat-style: NO DDP wrapper when using combined optimizer with Muon
-        # The DistMuonAdamW optimizer handles gradient synchronization internally
-        # This provides better overlap of communication with computation
-        #
-        # Nanochat-style: NO DDP wrapper when using Muon optimizer
-        # The DistMuonAdamW optimizer handles gradient synchronization internally
-        if self.ddp:
-            if self.master_process:
-                print(
-                    "Using DistMuonAdamW optimizer - skipping DDP wrapper (nanochat-style)"
-                )
-
-        # Note: self.raw_model stays unchanged and shares parameters with self.model
-        # This allows clean checkpoint saving without unwrapping
-
-    def _setup_hyperparameters(self):
-        """Configure training hyperparameters based on training mode."""
-        self.num_epochs = self.config.num_epochs
-        # Note: self.run_evals_after will be set adaptively after we know max_steps
-
-        # Batch size and gradient accumulation
-        if self.sft_training:
-            # For SFT, we count examples (conversations) not tokens
-            # No gradient accumulation - process each batch immediately
-            self.grad_accumulation_steps = 1
-            self.total_batch_size = self.config.batch_size * self.ddp_world_size
-        else:
-            # For pretrain/midtrain, we count tokens
-            self.total_batch_size = self.config.total_batch_size
-            self.grad_accumulation_steps = self.total_batch_size // (
-                self.config.batch_size * self.config.block_size * self.ddp_world_size
-            )
-
-            assert (
-                self.total_batch_size
-                % (
-                    self.config.batch_size
-                    * self.config.block_size
-                    * self.ddp_world_size
-                )
-                == 0
-            ), "Total batch size must be divisible by batch_size * block_size * world_size"
-
-        if self.master_process:
-            print(f"Total batch size: {self.total_batch_size}")
-            print(f"Grad accumulation steps: {self.grad_accumulation_steps}")
-
-        # Learning rate scheduling parameters
-        self.max_learning_rate = self.config.max_learning_rate
-        self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
-
-        # Apply nanochat-style depth-aware LR scaling if using depth mode
-        # LR ∝ 1/√model_dim (tuned at model_dim=768, depth=12)
-        if self.config._depth_mode:
-            # Learning rate scaling: LR ∝ 1/√model_dim
-            # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
-            reference_dim = 768
-            lr_scale = (self.config.n_embed / reference_dim) ** -0.5
-            self.max_learning_rate *= lr_scale
-            self.min_learning_rate *= lr_scale
-
-            if self.master_process:
-                print(f"\n📐 DEPTH-AWARE SCALING (depth={self.config.depth})")
-                print(f"   n_layer: {self.config.n_layer}")
-                print(
-                    f"   n_embed: {self.config.n_embed} (base: {self.config._base_dim}, nudge: {self.config._nudge:+d})"
-                )
-                print(f"   n_head: {self.config.n_head}")
-                print(f"   head_dim: {self.config.n_embed // self.config.n_head}")
-                print(
-                    f"   LR scaling: {lr_scale:.6f} (∝ 1/√({self.config.n_embed}/{reference_dim}))"
-                )
-                print(
-                    f"   Max LR: {self.config.max_learning_rate:.2e} → {self.max_learning_rate:.2e}"
-                )
-
-        # Automatically calculate steps based on config settings for all phases
-        if self.master_process:
-            print("\n" + "=" * 80)
-            if self.sft_training:
-                print("📊 CALCULATING SFT TRAINING STEPS")
-            else:
-                print("📊 CALCULATING PRETRAINING STEPS")
-            print("=" * 80)
-
-        num_iterations, flops_per_token, _ = calculate_num_iterations(
-            self.raw_model, self.config, self.master_process
-        )
-        self.max_steps = num_iterations
-        self.flops_per_token = flops_per_token
-
-        if self.master_process:
-            print("=" * 80 + "\n")
-
-        # Initialize peak FLOPs for MFU calculation
-        if self.device.startswith("cuda"):
-            device_name = torch.cuda.get_device_name(self.device)
-            self.peak_flops = get_peak_flops(device_name)
-            if self.master_process:
-                print(f"GPU: {device_name}")
-                print(f"Peak FLOPS (BF16): {self.peak_flops:.2e}\n")
-        else:
-            self.peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
-
-        # Set warmup steps based on training phase (calculated as % of max_steps)
-        if self.sft_training:
-            self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
-        else:
-            self.warmup_steps = int(
-                self.max_steps * self.config.lr_warmup_ratio_pretrain
-            )
-
-        # Set adaptive eval intervals based on total training steps
-        # Val loss: frequent (good learning curve), Core evals: sparse (expensive benchmarks)
-        total_steps = self.max_steps * self.num_epochs
-
-        # Validation loss interval (faster, more frequent)
-        if self.eval_interval_override is not None:
-            self.run_evals_after = self.eval_interval_override
-        else:
-            # Adaptive: target ~8-12 val loss measurements for smooth learning curve
-            adaptive_val_interval = max(100, total_steps // 10)  # min 100 steps
-            adaptive_val_interval = min(
-                adaptive_val_interval, 500
-            )  # max 500 steps (don't spam)
-            self.run_evals_after = adaptive_val_interval
-
-        # Core evaluation interval (slower, less frequent)
-        if self.core_eval_interval_override is not None:
-            self.run_core_evals_after = self.core_eval_interval_override
-        else:
-            # Adaptive: target ~3-5 core eval measurements (expensive, 80s each)
-            adaptive_core_interval = max(250, total_steps // 4)  # min 250 steps
-            adaptive_core_interval = min(
-                adaptive_core_interval, total_steps // 2
-            )  # at least 2 evals
-            self.run_core_evals_after = adaptive_core_interval
 
     def _setup_dataloaders_wrapper(self):
         """Wrapper to setup dataloaders using utility functions."""
@@ -916,17 +721,10 @@ class Trainer:
         # Log dataloader packing statistics at end of training
         if self.master_process and hasattr(self.train_dataloader, "get_stats"):
             try:
-                # Stop dataloader iterator to signal workers we're done
-                # This prevents background prefetching from overflowing the buffer
-                if (
-                    hasattr(self.train_dataloader, "_iterator")
-                    and self.train_dataloader._iterator is not None
-                ):
-                    del self.train_dataloader._iterator
-                    self.train_dataloader._iterator = None
-
-                # Give workers a moment to finish current operations
-                time.sleep(0.5)
+                # Cleanup dataloader: stop iterator and signal workers we're done
+                if hasattr(self.train_dataloader, "cleanup"):
+                    self.train_dataloader.cleanup()
+                    time.sleep(0.5)  # let workers finish gracefully
 
                 stats = self.train_dataloader.get_stats()
                 print(f"\n{'='*80}")
@@ -935,8 +733,31 @@ class Trainer:
                 print(f"   Total tokens processed: {stats['total_tokens']:,}")
                 print(f"   Cropped tokens: {stats['cropped_tokens']:,}")
                 print(f"   Crop percentage: {stats['crop_percentage']:.2f}%")
+                if stats.get("dropped_tokens", 0) > 0:
+                    print(f"   Dropped tokens: {stats['dropped_tokens']:,}")
+                    print(f"   Buffer overflows: {stats['buffer_overflows']}")
+                    print(f"   Total waste %: {stats['total_waste_percentage']:.2f}%")
                 print(f"   Final buffer size: {stats['buffer_size']}")
                 print(f"{'='*80}\n")
+
+                # Log to wandb
+                if self.use_wandb:
+                    wandb.log(
+                        {
+                            "dataloader/total_tokens": stats["total_tokens"],
+                            "dataloader/cropped_tokens": stats["cropped_tokens"],
+                            "dataloader/crop_percentage": stats["crop_percentage"],
+                            "dataloader/dropped_tokens": stats.get("dropped_tokens", 0),
+                            "dataloader/buffer_overflows": stats.get(
+                                "buffer_overflows", 0
+                            ),
+                            "dataloader/total_waste_percentage": stats.get(
+                                "total_waste_percentage", stats["crop_percentage"]
+                            ),
+                            "dataloader/final_buffer_size": stats["buffer_size"],
+                        },
+                        step=self.step,
+                    )
             except Exception as e:
                 print(f"⚠️  Could not retrieve dataloader stats: {e}")
 
