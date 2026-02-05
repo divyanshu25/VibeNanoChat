@@ -40,12 +40,13 @@ def mock_parquet_data(temp_dir):
     # Create PyArrow table for training data
     train_table = pa.table({"text": train_documents})
     train_path = temp_dir / "shard_00000.parquet"
-    pq.write_table(train_table, train_path)
+    # Write with multiple row groups to support DDP testing (strided reading)
+    pq.write_table(train_table, train_path, row_group_size=50)
 
     # Create PyArrow table for validation data
     val_table = pa.table({"text": val_documents})
     val_path = temp_dir / "shard_00001.parquet"
-    pq.write_table(val_table, val_path)
+    pq.write_table(val_table, val_path, row_group_size=10)
 
     return temp_dir
 
@@ -293,6 +294,170 @@ class TestDDPSupport:
         inputs, targets = next(loader)
         assert inputs.shape == (2, 16)
         assert targets.shape == (2, 16)
+
+
+class TestStatsAggregation:
+    """Test stats aggregation across workers and DDP ranks."""
+
+    def test_stats_aggregation_across_batches(self, mock_parquet_data, device):
+        """Verify stats correctly aggregate across multiple batches."""
+        loader = FinewebEduParquetBOSDataloader(
+            data_dir=str(mock_parquet_data),
+            batch_size=4,
+            block_size=32,
+            split="train",
+            master_process=False,
+            buffer_size=200,
+            device=device,
+            num_workers=0,
+        )
+
+        # Generate multiple batches
+        num_batches = 5
+        for _ in range(num_batches):
+            next(loader)
+
+        stats = loader.get_stats()
+
+        # Stats should be cumulative across all batches
+        assert stats["total_tokens"] > 0, "Should have processed tokens"
+        assert stats["processed_tokens"] > 0, "Should have packed tokens"
+
+        # Verify percentage calculations
+        assert 0 <= stats["cropped_tokens_pct"] <= 100
+        assert 0 <= stats["dropped_tokens_pct"] <= 100
+        assert 0 <= stats["total_waste_pct"] <= 100
+
+        # Total waste should be sum of cropped and dropped
+        expected_waste = (
+            (stats["cropped_tokens"] + stats["dropped_tokens"])
+            / max(1, stats["total_tokens"])
+            * 100
+        )
+        assert abs(stats["total_waste_pct"] - expected_waste) < 0.01
+
+    def test_simulated_ddp_stats_aggregation(self, mock_parquet_data, device):
+        """Verify DDP all-reduce aggregation with actual dataloaders (2 GPU ranks)."""
+        # Create 2 separate dataloader instances (simulating 2 GPU ranks)
+        num_ranks = 2
+        loaders = []
+
+        for rank in range(num_ranks):
+            loader = FinewebEduParquetBOSDataloader(
+                data_dir=str(mock_parquet_data),
+                batch_size=2,
+                block_size=16,
+                ddp_world_size=num_ranks,
+                ddp_rank=rank,
+                split="train",
+                master_process=(rank == 0),
+                buffer_size=30,  # Small buffer for fast test
+                device=device,
+                num_workers=0,  # Single-threaded for determinism
+            )
+            loaders.append(loader)
+
+        # Generate batches from each "rank" (each rank processes different data shards)
+        num_batches = 2
+        for loader in loaders:
+            for _ in range(num_batches):
+                next(loader)
+
+        # Collect per-rank stats
+        per_rank_stats = [loader.get_stats() for loader in loaders]
+
+        # Simulate torch.distributed.all_reduce(SUM) behavior
+        # This is exactly what the trainer code does (lines 764-786)
+        aggregated = {
+            "total_tokens": sum(s["total_tokens"] for s in per_rank_stats),
+            "processed_tokens": sum(s["processed_tokens"] for s in per_rank_stats),
+            "cropped_tokens": sum(s["cropped_tokens"] for s in per_rank_stats),
+            "dropped_tokens": sum(s["dropped_tokens"] for s in per_rank_stats),
+            "dropped_files": sum(s["dropped_files"] for s in per_rank_stats),
+            "buffer_overflows": sum(s["buffer_overflows"] for s in per_rank_stats),
+            "corrupted_docs": sum(s["corrupted_docs"] for s in per_rank_stats),
+            "empty_docs": sum(s["empty_docs"] for s in per_rank_stats),
+        }
+
+        # Recalculate percentages with aggregated totals (as trainer does on lines 788-792)
+        aggregated["cropped_tokens_pct"] = (
+            100.0 * aggregated["cropped_tokens"] / max(1, aggregated["total_tokens"])
+        )
+        aggregated["dropped_tokens_pct"] = (
+            100.0 * aggregated["dropped_tokens"] / max(1, aggregated["total_tokens"])
+        )
+        total_waste = aggregated["cropped_tokens"] + aggregated["dropped_tokens"]
+        aggregated["total_waste_pct"] = (
+            100.0 * total_waste / max(1, aggregated["total_tokens"])
+        )
+
+        # Verify aggregated stats are reasonable
+        assert aggregated["total_tokens"] > 0, "Should have tokens from all ranks"
+        assert aggregated["processed_tokens"] > 0, "Should have processed tokens"
+
+        # Each rank processes different data shards (due to strided row group indexing)
+        # So aggregated total should be sum of both ranks
+        rank0_total = per_rank_stats[0]["total_tokens"]
+        rank1_total = per_rank_stats[1]["total_tokens"]
+        assert aggregated["total_tokens"] == rank0_total + rank1_total, (
+            f"Aggregated total ({aggregated['total_tokens']}) should equal "
+            f"rank0 ({rank0_total}) + rank1 ({rank1_total})"
+        )
+
+        # Percentages should be in valid range
+        assert 0 <= aggregated["cropped_tokens_pct"] <= 100
+        assert 0 <= aggregated["dropped_tokens_pct"] <= 100
+        assert 0 <= aggregated["total_waste_pct"] <= 100
+
+        # Verify the aggregation math is correct
+        expected_crop_pct = (
+            100.0 * aggregated["cropped_tokens"] / aggregated["total_tokens"]
+        )
+        expected_waste_pct = (
+            100.0
+            * (aggregated["cropped_tokens"] + aggregated["dropped_tokens"])
+            / aggregated["total_tokens"]
+        )
+        assert abs(aggregated["cropped_tokens_pct"] - expected_crop_pct) < 0.01
+        assert abs(aggregated["total_waste_pct"] - expected_waste_pct) < 0.01
+
+        # Verify stats are properly sharded (each rank sees different data)
+        # In DDP, ranks process non-overlapping data shards
+        assert rank0_total > 0, "Rank 0 should have processed tokens"
+        assert rank1_total > 0, "Rank 1 should have processed tokens"
+
+    def test_stats_reset_between_iterations(self, mock_parquet_data, device):
+        """Verify stats accumulate correctly across multiple iteration cycles."""
+        loader = FinewebEduParquetBOSDataloader(
+            data_dir=str(mock_parquet_data),
+            batch_size=4,
+            block_size=32,
+            split="train",
+            master_process=False,
+            buffer_size=200,
+            device=device,
+            num_workers=0,
+        )
+
+        # First iteration
+        for _ in range(3):
+            next(loader)
+
+        stats_after_first = loader.get_stats()
+        first_total = stats_after_first["total_tokens"]
+
+        # Second iteration (without resetting dataloader)
+        for _ in range(3):
+            next(loader)
+
+        stats_after_second = loader.get_stats()
+        second_total = stats_after_second["total_tokens"]
+
+        # Stats should be cumulative (not reset)
+        assert second_total > first_total, "Stats should accumulate across iterations"
+        assert (
+            second_total >= first_total * 1.5
+        ), "After 6 batches should have significantly more tokens than after 3"
 
 
 if __name__ == "__main__":

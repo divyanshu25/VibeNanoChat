@@ -109,7 +109,7 @@ class ParquetDocumentDataset(IterableDataset):
 
         if self.ddp_rank == 0 and worker_id == 0:  # print once to avoid spam
             print(
-                f"Sharding: {global_num_workers} total workers "
+                f"Sharding files across: {global_num_workers} total workers "
                 f"({self.ddp_world_size} GPUs × {num_workers} workers/GPU)"
             )
 
@@ -231,35 +231,41 @@ class BestFitCollator:
 
         self.doc_buffer = SortedList()  # sorted by length for O(log n) best-fit search
 
-        # track packing efficiency (nanochat-style stats)
-        self.stats_total_tokens = 0
-        self.stats_cropped_tokens = 0
-        self.stats_dropped_tokens = 0  # tokens dropped due to buffer overflow
-        self.stats_buffer_overflows = 0  # count of buffer overflow events
-        self.stats_empty_docs = 0  # count of empty/invalid documents skipped
-        self.stats_corrupted_docs = 0  # count of corrupted documents skipped
-
         # pre-allocate once (nanochat-style): row_capacity = T + 1 for autoregressive split
         self.row_buffer = torch.empty((batch_size, block_size + 1), dtype=torch.long)
 
     def __call__(
         self, batch_of_documents: List[List[int]]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
         """
         BOS-aligned best-fit packing (nanochat algorithm).
 
-        Returns: (inputs, targets) where inputs[:, t] predicts targets[:, t]
+        Returns: (inputs, targets, stats) where inputs[:, t] predicts targets[:, t]
+                 and stats contains per-batch metrics (deltas, not cumulative)
         """
+        # Per-batch counters (track deltas only, not cumulative)
+        batch_total_tokens = 0
+        batch_cropped_tokens = 0
+        batch_processed_tokens = 0
+        batch_dropped_tokens = 0
+        batch_dropped_files = 0
+        batch_buffer_overflows = 0
+        batch_corrupted_docs = 0
+        batch_empty_docs = 0
+
         # Filter out empty or invalid documents and track stats
         valid_documents = []
         for doc in batch_of_documents:
             if not doc or len(doc) <= 1:  # empty or only BOS token
-                self.stats_empty_docs += 1
+                batch_empty_docs += 1
             else:
                 valid_documents.append(doc)
 
         # refill buffer with valid documents (O(log n) insert per doc)
         self.doc_buffer.update(SortedDocument(doc) for doc in valid_documents)
+
+        # Track total tokens in THIS batch only
+        batch_total_tokens = sum(len(doc) for doc in valid_documents)
 
         # graceful degradation: if buffer grows too large, randomly drop 25% of documents
         # this prevents OOM while signaling misconfiguration via stats
@@ -272,22 +278,22 @@ class BestFitCollator:
 
             # track dropped documents as wastage (sum their tokens)
             dropped_tokens = sum(self.doc_buffer[i].length for i in dropped_indices)
-            self.stats_dropped_tokens += dropped_tokens
-            self.stats_buffer_overflows += 1
+            batch_dropped_tokens += dropped_tokens
+            batch_dropped_files += num_to_drop
+            batch_buffer_overflows += 1
 
             # remove documents in reverse order to maintain indices
             for idx in sorted(dropped_indices, reverse=True):
                 self.doc_buffer.pop(idx)
 
-            # warn first time (avoid spam)
-            if self.stats_buffer_overflows == 1:
-                warnings.warn(
-                    f"Buffer overflow: dropped {num_to_drop} documents ({dropped_tokens} tokens). "
-                    f"Buffer: {len(self.doc_buffer)}/{max_buffer}. "
-                    f"Consider reducing num_workers or increasing buffer_size. "
-                    f"Training continues with graceful degradation.",
-                    RuntimeWarning,
-                )
+            # warn every time overflow happens (helps with debugging)
+            warnings.warn(
+                f"Buffer overflow: dropped {num_to_drop} documents ({dropped_tokens} tokens). "
+                f"Buffer: {len(self.doc_buffer)}/{max_buffer}. "
+                f"Consider reducing num_workers or increasing buffer_size. "
+                f"Training continues with graceful degradation.",
+                RuntimeWarning,
+            )
 
         # pack B sequences of length T+1 (nanochat row_capacity)
         for row_idx in range(self.batch_size):
@@ -310,14 +316,14 @@ class BestFitCollator:
                             doc.tokens, dtype=torch.long
                         )
                         pos += doc.length
-                        self.stats_total_tokens += doc.length
+                        batch_processed_tokens += doc.length
                     except Exception as e:
                         # handle corrupted token IDs gracefully
                         warnings.warn(
                             f"Invalid tokens in document (len={doc.length}): {e}",
                             RuntimeWarning,
                         )
-                        self.stats_corrupted_docs += 1
+                        batch_corrupted_docs += 1
                         continue  # skip this doc and try next
                 else:
                     # CASE 2: No doc fits - crop one to fill gap exactly (nanochat step 3)
@@ -336,10 +342,8 @@ class BestFitCollator:
                         self.row_buffer[row_idx, pos : pos + space] = torch.tensor(
                             cropped, dtype=torch.long
                         )
-                        self.stats_total_tokens += space
-                        self.stats_cropped_tokens += (
-                            doc.length - space
-                        )  # track waste (~35%)
+                        batch_processed_tokens += space
+                        batch_cropped_tokens += doc.length - space
                         pos += space
                     except Exception as e:
                         # handle corrupted token IDs gracefully
@@ -347,35 +351,26 @@ class BestFitCollator:
                             f"Invalid tokens while cropping document: {e}",
                             RuntimeWarning,
                         )
-                        self.stats_corrupted_docs += 1
+                        batch_corrupted_docs += 1
                         continue  # skip and try next doc
 
         # autoregressive split (nanochat-style): input[t] → target[t]
         inputs = self.row_buffer[:, :-1].clone()  # (B, T): tokens [0, T-1]
         targets = self.row_buffer[:, 1:].clone()  # (B, T): tokens [1, T]
 
-        return inputs, targets  # CPU tensors (workers can't access GPU)
-
-    def get_stats(self) -> dict:
-        """Packing efficiency and data quality stats"""
-        crop_pct = 100.0 * self.stats_cropped_tokens / max(1, self.stats_total_tokens)
-        total_waste = self.stats_cropped_tokens + self.stats_dropped_tokens
-        total_waste_pct = (
-            100.0
-            * total_waste
-            / max(1, self.stats_total_tokens + self.stats_dropped_tokens)
-        )
-        return {
-            "total_tokens": self.stats_total_tokens,
-            "cropped_tokens": self.stats_cropped_tokens,
-            "crop_percentage": crop_pct,
-            "dropped_tokens": self.stats_dropped_tokens,
-            "buffer_overflows": self.stats_buffer_overflows,
-            "total_waste_percentage": total_waste_pct,
-            "buffer_size": len(self.doc_buffer),
-            "empty_docs": self.stats_empty_docs,
-            "corrupted_docs": self.stats_corrupted_docs,
+        # Return per-batch stats (deltas only, not cumulative)
+        batch_stats = {
+            "total_tokens": batch_total_tokens,
+            "cropped_tokens": batch_cropped_tokens,
+            "processed_tokens": batch_processed_tokens,
+            "dropped_tokens": batch_dropped_tokens,
+            "dropped_files": batch_dropped_files,
+            "buffer_overflows": batch_buffer_overflows,
+            "corrupted_docs": batch_corrupted_docs,
+            "empty_docs": batch_empty_docs,
         }
+
+        return inputs, targets, batch_stats  # CPU tensors (workers can't access GPU)
 
 
 class FinewebEduParquetBOSDataloader:
@@ -510,24 +505,24 @@ class FinewebEduParquetBOSDataloader:
             # Inverse scaling with depth (matches model_setup.py batch_size scaling)
             if depth <= 8:
                 dataloader_multiplier = (
-                    10  # shallow models: high throughput needs more docs
+                    8  # shallow models: high throughput needs more docs
                 )
-                min_docs = 160  # minimum for good packing
+                min_docs = 128  # minimum for good packing
             elif depth <= 10:
-                dataloader_multiplier = 10
-                min_docs = 160
-            elif depth <= 14:
-                dataloader_multiplier = 8  # medium models: moderate doc buffer
+                dataloader_multiplier = 8
                 min_docs = 128
+            elif depth <= 14:
+                dataloader_multiplier = 6  # medium models: moderate doc buffer
+                min_docs = 96
             elif depth <= 18:
-                dataloader_multiplier = 6  # deeper models: reduced doc buffer
-                min_docs = 48
+                dataloader_multiplier = 4  # deeper models: reduced doc buffer
+                min_docs = 64
             elif depth <= 22:
-                dataloader_multiplier = 4  # deep models: conservative doc buffer
-                min_docs = 16
+                dataloader_multiplier = 3  # deep models: conservative doc buffer
+                min_docs = 32
             else:
-                dataloader_multiplier = 3  # very deep models: minimal doc buffer
-                min_docs = 6
+                dataloader_multiplier = 2  # very deep models: minimal doc buffer
+                min_docs = 16
 
             dataloader_batch_size = max(batch_size * dataloader_multiplier, min_docs)
 
@@ -561,6 +556,17 @@ class FinewebEduParquetBOSDataloader:
             pin_status = "✓" if use_pin_memory else "✗"
             print(f"✓ DataLoader ready (pin_memory: {pin_status})\n")
 
+        self.aggregated_stats = {
+            "total_tokens": 0,
+            "cropped_tokens": 0,
+            "processed_tokens": 0,
+            "dropped_tokens": 0,
+            "dropped_files": 0,
+            "buffer_overflows": 0,
+            "corrupted_docs": 0,
+            "empty_docs": 0,
+        }
+
     def __iter__(self):
         self._iterator = iter(self.dataloader)
         return self
@@ -568,11 +574,10 @@ class FinewebEduParquetBOSDataloader:
     def __next__(self):
         if self._iterator is None:
             self._iterator = iter(self.dataloader)
-        return next(self._iterator)
-
-    def get_stats(self) -> dict:
-        """Returns packing efficiency stats from collator"""
-        return self.collator.get_stats()
+        inputs, targets, batch_stats = next(self._iterator)
+        for key, value in batch_stats.items():
+            self.aggregated_stats[key] += value
+        return inputs, targets
 
     def reset(self):
         """
@@ -586,6 +591,42 @@ class FinewebEduParquetBOSDataloader:
             del self._iterator
         # Create a new iterator (workers are persistent, so this is fast)
         self._iterator = iter(self.dataloader)
+
+    def get_stats(self) -> dict:
+        """Returns aggregated stats from all batches (across all workers)."""
+        cropped_tokens_pct = (
+            100.0
+            * self.aggregated_stats["cropped_tokens"]
+            / max(1, self.aggregated_stats["total_tokens"])
+        )
+        dropped_tokens_pct = (
+            100.0
+            * self.aggregated_stats["dropped_tokens"]
+            / max(1, self.aggregated_stats["total_tokens"])
+        )
+        total_waste = (
+            self.aggregated_stats["cropped_tokens"]
+            + self.aggregated_stats["dropped_tokens"]
+        )
+        total_waste_pct = (
+            100.0 * total_waste / max(1, self.aggregated_stats["total_tokens"])
+        )
+
+        return {
+            "total_tokens": self.aggregated_stats["total_tokens"],
+            "processed_tokens": self.aggregated_stats["processed_tokens"],
+            "cropped_tokens": self.aggregated_stats["cropped_tokens"],
+            "cropped_tokens_pct": cropped_tokens_pct,
+            "crop_percentage": cropped_tokens_pct,  # backward compatibility alias
+            "dropped_tokens": self.aggregated_stats["dropped_tokens"],
+            "dropped_tokens_pct": dropped_tokens_pct,
+            "total_waste_pct": total_waste_pct,
+            "dropped_files": self.aggregated_stats["dropped_files"],
+            "buffer_overflows": self.aggregated_stats["buffer_overflows"],
+            "corrupted_docs": self.aggregated_stats["corrupted_docs"],
+            "empty_docs": self.aggregated_stats["empty_docs"],
+            "buffer_size": 0,  # Not tracked in aggregated stats (worker-local state)
+        }
 
     def cleanup(self):
         """

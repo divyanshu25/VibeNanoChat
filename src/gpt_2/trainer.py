@@ -749,33 +749,110 @@ class Trainer:
         training_end_time = time.time()
         total_training_time = training_end_time - training_start_time
 
-        # Print dataloader packing stats (shows how efficiently we're using data)
+        # Print and log dataloader packing stats (master only, aggregated across all ranks)
         # High crop % is fine for pretraining (we see all tokens eventually)
         # High crop % is concerning for SFT (we're wasting instruction-following examples)
-        if self.master_process and hasattr(self.train_dataloader, "get_stats"):
+        if hasattr(self.train_dataloader, "get_stats"):
             try:
-                # Gracefully shutdown dataloaders
-                self._cleanup_dataloaders()
-
-                # Print packing efficiency stats
+                # Get per-rank stats (already aggregated across dataloader workers)
                 stats = self.train_dataloader.get_stats()
-                print(f"\n{'='*80}")
-                print("📦 DATALOADER PACKING STATS (Final)")
-                print(f"{'='*80}")
-                print(f"   Total tokens processed: {stats['total_tokens']:,}")
-                print(f"   Cropped tokens: {stats['cropped_tokens']:,}")
-                print(f"   Crop percentage: {stats['crop_percentage']:.2f}%")
-                print(f"   Dropped tokens: {stats.get('dropped_tokens', 0):,}")
-                print(f"   Buffer overflows: {stats.get('buffer_overflows', 0)}")
-                print(
-                    f"   Total waste percentage: {stats.get('total_waste_percentage', 0.0):.2f}%"
-                )
-                print(f"   Empty docs skipped: {stats.get('empty_docs', 0):,}")
-                print(f"   Corrupted docs skipped: {stats.get('corrupted_docs', 0):,}")
-                print(f"   Final buffer size: {stats['buffer_size']}")
-                print(f"{'='*80}\n")
+
+                # Aggregate stats across all GPU ranks using torch.distributed.all_reduce
+                if self.ddp:
+                    # Pack stats into tensor for all_reduce (SUM operation)
+                    # Order matters - must unpack in same order
+                    stats_tensor = torch.tensor(
+                        [
+                            stats["total_tokens"],
+                            stats["processed_tokens"],
+                            stats["cropped_tokens"],
+                            stats["dropped_tokens"],
+                            stats["dropped_files"],
+                            stats["buffer_overflows"],
+                            stats["corrupted_docs"],
+                            stats["empty_docs"],
+                        ],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+
+                    # Sum stats from all ranks
+                    torch.distributed.all_reduce(
+                        stats_tensor, op=torch.distributed.ReduceOp.SUM
+                    )
+
+                    # Unpack aggregated stats back to dict
+                    stats["total_tokens"] = stats_tensor[0].item()
+                    stats["processed_tokens"] = stats_tensor[1].item()
+                    stats["cropped_tokens"] = stats_tensor[2].item()
+                    stats["dropped_tokens"] = stats_tensor[3].item()
+                    stats["dropped_files"] = stats_tensor[4].item()
+                    stats["buffer_overflows"] = stats_tensor[5].item()
+                    stats["corrupted_docs"] = stats_tensor[6].item()
+                    stats["empty_docs"] = stats_tensor[7].item()
+
+                    # Recalculate percentages with global totals
+                    stats["cropped_tokens_pct"] = (
+                        100.0 * stats["cropped_tokens"] / max(1, stats["total_tokens"])
+                    )
+                    stats["dropped_tokens_pct"] = (
+                        100.0 * stats["dropped_tokens"] / max(1, stats["total_tokens"])
+                    )
+                    total_waste = stats["cropped_tokens"] + stats["dropped_tokens"]
+                    stats["total_waste_pct"] = (
+                        100.0 * total_waste / max(1, stats["total_tokens"])
+                    )
+
+                # Only master prints and logs (all ranks now have same stats after all_reduce)
+                if self.master_process:
+                    rank_label = (
+                        f"All {self.ddp_world_size} Ranks"
+                        if self.ddp
+                        else "Single Process"
+                    )
+                    print(f"\n{'='*80}")
+                    print(f"📦 DATALOADER PACKING STATS (Final - {rank_label})")
+                    print(f"{'='*80}")
+                    print(f"   Total tokens received: {stats['total_tokens']:,}")
+                    print(
+                        f"   Processed tokens (packed): {stats['processed_tokens']:,}"
+                    )
+                    print(
+                        f"   Cropped tokens: {stats['cropped_tokens']:,} ({stats['cropped_tokens_pct']:.2f}%)"
+                    )
+                    print(
+                        f"   Dropped tokens: {stats['dropped_tokens']:,} ({stats['dropped_tokens_pct']:.2f}%)"
+                    )
+                    print(f"   Total waste: {stats['total_waste_pct']:.2f}%")
+                    print(f"   Dropped files: {stats['dropped_files']:,}")
+                    print(f"   Buffer overflows: {stats['buffer_overflows']}")
+                    print(f"   Corrupted docs: {stats['corrupted_docs']:,}")
+                    print(f"   Empty docs: {stats['empty_docs']:,}")
+                    print(f"{'='*80}\n")
+
+                    # Log dataloader stats to wandb
+                    wandb.log(
+                        {
+                            "dataloader/total_tokens": stats["total_tokens"],
+                            "dataloader/processed_tokens": stats["processed_tokens"],
+                            "dataloader/cropped_tokens": stats["cropped_tokens"],
+                            "dataloader/cropped_tokens_pct": stats[
+                                "cropped_tokens_pct"
+                            ],
+                            "dataloader/dropped_tokens": stats["dropped_tokens"],
+                            "dataloader/dropped_tokens_pct": stats[
+                                "dropped_tokens_pct"
+                            ],
+                            "dataloader/total_waste_pct": stats["total_waste_pct"],
+                            "dataloader/dropped_files": stats["dropped_files"],
+                            "dataloader/buffer_overflows": stats["buffer_overflows"],
+                            "dataloader/corrupted_docs": stats["corrupted_docs"],
+                            "dataloader/empty_docs": stats["empty_docs"],
+                        }
+                    )
             except Exception as e:
-                print(f"⚠️  Could not retrieve dataloader stats: {e}")
+                if self.master_process:
+                    print(f"⚠️  Could not retrieve dataloader stats: {e}")
 
         if self.master_process:
             # Print final training summary
@@ -798,7 +875,12 @@ class Trainer:
             print(f"📊 Average time per step: {total_training_time/global_step:.2f}s")
             print("=" * 80 + "\n")
 
-        wandb.finish()
+            # Close wandb (master only)
+            wandb.finish()
+
+        # Gracefully shutdown dataloaders (ALL processes must do this!)
+        # Each GPU rank has its own dataloader with worker processes that need cleanup
+        self._cleanup_dataloaders()
 
     def _cleanup_dataloaders(self):
         """Gracefully shutdown dataloader workers."""
