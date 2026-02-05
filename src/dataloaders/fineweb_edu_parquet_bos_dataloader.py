@@ -269,8 +269,8 @@ class BestFitCollator:
 
         # graceful degradation: if buffer grows too large, randomly drop 25% of documents
         # this prevents OOM while signaling misconfiguration via stats
-        # allow large headroom (50x) since startup can cause temporary spikes
-        max_buffer = self.buffer_size * 50
+        # allow large headroom (100x) since startup can cause temporary spikes
+        max_buffer = self.buffer_size * 100
         if len(self.doc_buffer) > max_buffer:
             # drop 25% of documents randomly to prevent unbounded growth
             num_to_drop = len(self.doc_buffer) // 4
@@ -499,40 +499,40 @@ class FinewebEduParquetBOSDataloader:
 
         # DataLoader batch_size = documents per collate call (NOT model batch size!)
         # want enough docs for good best-fit, but not so many that buffer overflows
-        # Scale inversely with model depth (similar to batch_size scaling)
+
+        # Scale inversely with model depth (Heuristic)
         # Deeper models → smaller batch → less data consumed → need fewer docs
         if depth is not None:
             # Inverse scaling with depth (matches model_setup.py batch_size scaling)
-            if depth <= 8:
-                dataloader_multiplier = (
-                    8  # shallow models: high throughput needs more docs
-                )
-                min_docs = 128  # minimum for good packing
-            elif depth <= 10:
-                dataloader_multiplier = 8
-                min_docs = 128
-            elif depth <= 14:
-                dataloader_multiplier = 6  # medium models: moderate doc buffer
-                min_docs = 96
-            elif depth <= 18:
-                dataloader_multiplier = 4  # deeper models: reduced doc buffer
-                min_docs = 64
-            elif depth <= 22:
-                dataloader_multiplier = 3  # deep models: conservative doc buffer
-                min_docs = 32
-            else:
-                dataloader_multiplier = 2  # very deep models: minimal doc buffer
-                min_docs = 16
+            # Conservative multipliers for FineWeb-Edu (long docs)
+            # Format: max_depth: (multiplier, min_docs)
+            depth_scaling_config = {
+                8: (4, 128),  # shallow models: high throughput needs more docs
+                10: (4, 96),  #
+                14: (3, 72),  # medium models: moderate doc buffer
+                18: (2, 48),  # deeper models: reduced doc buffer
+                22: (2, 32),  # deep models: conservative doc buffer
+                float("inf"): (2, 32),  # very deep models: minimal doc buffer
+            }
 
-            dataloader_batch_size = max(batch_size * dataloader_multiplier, min_docs)
+            # Find appropriate config for this depth
+            for max_depth, (multiplier, min_docs) in depth_scaling_config.items():
+                if depth <= max_depth:
+                    dataloader_multiplier = multiplier
+                    min_docs_threshold = min_docs
+                    break
+
+            dataloader_batch_size = max(
+                int(batch_size * dataloader_multiplier), min_docs_threshold
+            )
 
             if master_process:
                 print(
-                    f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs})"
+                    f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs_threshold})"
                 )
         else:
-            # Default: batch_size * 10 with minimum 160 docs
-            dataloader_batch_size = max(batch_size * 10, 160)
+            # Default: batch_size * 4 (was 10) - conservative default
+            dataloader_batch_size = max(batch_size * 4, 64)
 
         # pin_memory enables async CPU→GPU transfers (DMA), only works with workers>0
         use_pin_memory = device.startswith("cuda") and num_workers > 0

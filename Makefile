@@ -231,10 +231,10 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 
 run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-sweep [NGPUS=4] [PARAM_DATA_RATIO=10] [CORE_EVALS=true] [EVAL_INTERVAL=500]
 	@echo "🔬 Starting depth sweep experiments..."
-	@echo "📐 Training depths: 16" 
+	@echo "📐 Training depths: 8 12 16" 
 	@NGPUS=$${NGPUS:-4}; \
 	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-10}; \
-	CORE_EVALS=$${CORE_EVALS:-true}; \
+	CORE_EVALS=$${CORE_EVALS:-false}; \
 	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
 	echo "📊 Configuration:"; \
 	echo "   GPUs: $$NGPUS"; \
@@ -247,7 +247,7 @@ run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-s
 	fi; \
 	echo "⚡ Muon optimizer enabled for all runs"; \
 	echo ""; \
-	for DEPTH in 16; do \
+	for DEPTH in 8 12 16; do \
 		echo "  🧹 GPU cleanup..."; \
 		$(MAKE) kill-gpu; \
 		sleep 20; \
