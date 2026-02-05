@@ -250,8 +250,16 @@ class BestFitCollator:
 
         Returns: (inputs, targets) where inputs[:, t] predicts targets[:, t]
         """
-        # refill buffer with incoming documents (O(log n) insert per doc)
-        self.doc_buffer.update(SortedDocument(doc) for doc in batch_of_documents)
+        # Filter out empty or invalid documents and track stats
+        valid_documents = []
+        for doc in batch_of_documents:
+            if not doc or len(doc) <= 1:  # empty or only BOS token
+                self.stats_empty_docs += 1
+            else:
+                valid_documents.append(doc)
+
+        # refill buffer with valid documents (O(log n) insert per doc)
+        self.doc_buffer.update(SortedDocument(doc) for doc in valid_documents)
 
         # graceful degradation: if buffer grows too large, randomly drop 25% of documents
         # this prevents OOM while signaling misconfiguration via stats

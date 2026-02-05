@@ -266,9 +266,11 @@ class CausalSelfAttention(nn.Module):
                 torch.ones((Tq, Tq), dtype=torch.bool, device=q.device)
             )
 
-            # Note: enable_gqa is not a valid parameter for F.scaled_dot_product_attention
-            # PyTorch SDPA handles GQA automatically when k/v have fewer heads than q
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+            # PyTorch 2.5+ supports enable_gqa parameter for efficient GQA head broadcasting
+            # This is more memory efficient than manually repeating K/V heads
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, enable_gqa=(self.n_kv_head < self.n_head)
+            )
 
         # =====================================================================
         # STEP 4: Re-assemble heads and project output
