@@ -6,7 +6,6 @@ including the custom tokenizer with special tokens for chat format,
 learning rate scheduling, and checkpoint management.
 """
 
-import math
 import os
 
 import tiktoken
@@ -179,49 +178,6 @@ def get_lr_multiplier(
         raise ValueError(
             f"Unknown training_phase: {training_phase}. Must be one of: pretrain, sft, rl"
         )
-
-
-def get_lr(
-    global_step: int,
-    warmup_steps: int,
-    max_steps: int,
-    num_epochs: int,
-    max_learning_rate: float,
-    min_learning_rate: float,
-) -> float:
-    """
-    Implement learning rate scheduling with warmup and cosine annealing.
-
-    - Warmup: Linear increase from 0 to max_lr over warmup_steps
-    - Cosine annealing: Smooth decay from max_lr to min_lr using cosine function
-    - Constant: min_lr after total_steps
-
-    Args:
-        global_step: Current global training step (across all epochs)
-        warmup_steps: Number of steps for linear warmup
-        max_steps: Maximum steps per epoch
-        num_epochs: Total number of epochs
-        max_learning_rate: Peak learning rate
-        min_learning_rate: Minimum learning rate after decay
-
-    Returns:
-        float: Learning rate for current step
-    """
-    total_steps = max_steps * num_epochs
-
-    if global_step < warmup_steps:
-        # Linear warmup: gradually increase learning rate
-        lr = max_learning_rate * (global_step + 1) / warmup_steps
-    elif global_step > total_steps:
-        # After total steps, use minimum learning rate
-        lr = min_learning_rate
-    else:
-        # Cosine annealing: smooth decay using cosine function
-        decay_ratio = (global_step - warmup_steps) / (total_steps - warmup_steps)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        lr = min_learning_rate + coeff * (max_learning_rate - min_learning_rate)
-    return lr
 
 
 def load_checkpoint(
