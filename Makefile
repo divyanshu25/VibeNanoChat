@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: help uv uvlock venv dotenv environment jupyter-kernel format lint check kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law run-depth-sweep chat-server
 
 .DEFAULT_GOAL := help
 
@@ -38,7 +38,7 @@ dotenv: ## Initialize .env file
 	@echo "📝 Creating .env file from template..."
 	@cp -n .env.template $(ENV_TARGET_DIR)/.env || echo "⚠️  $(ENV_TARGET_DIR)/.env already exists. Skipping copy."
 
-
+# pkill -9 uv to kill any existing uv processes
 uv:  ## INSTALL UV
 ifeq ($(shell PATH=$(PATH) which uv),)
 ifneq ($(shell which brew),) #macos
@@ -68,7 +68,14 @@ uvlock: ## Sync project with uv
 venv: dotenv ## Create virtual environment
 	@echo "🐍 Setting up your Python virtual environment..."
 	@$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) venv --python $(PYTHON_VERSION)
-	@$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) sync --frozen
+	@echo ""
+	@echo "📦 Installing dependencies (flash-attn will take 10-30 minutes to compile)..."
+	@echo "💡 Tip: Set MAX_JOBS to speed up compilation (e.g., make venv MAX_JOBS=8)"
+	@if [ -n "$(MAX_JOBS)" ]; then \
+		echo "⚡ Using $(MAX_JOBS) parallel jobs for compilation"; \
+		export MAX_JOBS=$(MAX_JOBS); \
+	fi; \
+	$(uv) tool run --from 'python-dotenv[cli]' dotenv run $(uv) sync --frozen
 	@echo "🎉 Virtual environment setup complete!"
 
 environment: uv uvlock venv ## Create environment
@@ -77,7 +84,6 @@ environment: uv uvlock venv ## Create environment
 	@echo "💡 Quick start commands:"
 	@echo "   👉  To activate: source .venv/bin/activate"
 	@echo "✨ Happy coding with NanoGPT!"
-
 
 jupyter-kernel: venv ## Register environment as Jupyter kernel
 	@echo "📝 Registering Jupyter kernel..."
@@ -101,6 +107,11 @@ lint: ## Run linting with ruff
 
 check: format lint ## Run format + lint
 	@echo "✅ All checks passed!"
+
+
+test: ## Run all tests
+	@echo "🧪 Running tests..."
+	@cd tests && ./run_tests.sh
 
 
 kill-gpu: ## Kill all GPU processes
@@ -128,9 +139,8 @@ gpu-status: ## Show current GPU utilization and memory usage
 	@nvidia-smi
 
 # Sample Pretrain: make ddp-train NGPUS=2 MODE=pretraining CORE_EVALS=true DEPTH=12 TARGET_FLOPS=1e18
-# Sample Midtrain: make ddp-train NGPUS=2 MODE=mid-training CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
 # Sample SFT: make ddp-train NGPUS=2 MODE=sft CHATCORE_EVALS=true DEPTH=12 CHECKPOINT=/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/model_checkpoint_global37953_pretraining.pt
-ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|mid-training|all] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500] [NO_MUON=false]
+ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretraining|sft] [CHECKPOINT=/path/to/checkpoint.pt] [VAL_EVALS=true] [CORE_EVALS=true] [CHATCORE_EVALS=true] [DEPTH=12] [TARGET_FLOPS=1e18] [EVAL_INTERVAL=500]
 	@echo "🚀 Starting DDP training with torchrun..."
 	@mkdir -p logs
 	@NGPUS=$${NGPUS:-4}; \
@@ -139,14 +149,19 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	VAL_EVALS=$${VAL_EVALS:-true}; \
 	CORE_EVALS=$${CORE_EVALS:-false}; \
 	CHATCORE_EVALS=$${CHATCORE_EVALS:-false}; \
-	NO_MUON=$${NO_MUON:-false}; \
 	DEPTH=$${DEPTH:-}; \
 	ASPECT_RATIO=$${ASPECT_RATIO:-64}; \
 	HEAD_DIM=$${HEAD_DIM:-128}; \
 	TARGET_FLOPS=$${TARGET_FLOPS:-}; \
+	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-}; \
 	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
-	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
+	if [ -n "$$TARGET_FLOPS" ]; then \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_F$${TARGET_FLOPS}.log"; \
+	elif [ -n "$$PARAM_DATA_RATIO" ]; then \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_R$${PARAM_DATA_RATIO}.log"; \
+	else \
+		LOG_FILE="logs/scaling_laws_N$${DEPTH}_Rconfig.log"; \
+	fi; \
 	echo "📊 Using $$NGPUS GPUs for distributed training"; \
 	echo "🎯 Training mode: $$MODE"; \
 	echo "📝 Logging to: $$LOG_FILE"; \
@@ -169,19 +184,19 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 		echo "💬 ChatCore evaluations enabled"; \
 		CMD="$$CMD --run-chatcore-evals"; \
 	fi; \
-	if [ "$$NO_MUON" = "true" ]; then \
-		echo "🚫 Muon optimizer disabled (using AdamW-only)"; \
-		CMD="$$CMD --no-muon"; \
-	else \
-		echo "⚡ Muon optimizer enabled (hybrid AdamW+Muon)"; \
-	fi; \
+	echo "⚡ Muon optimizer enabled (hybrid AdamW+Muon)"; \
 	if [ -n "$$DEPTH" ]; then \
 		echo "📐 Using depth-based architecture: depth=$$DEPTH (aspect_ratio=$$ASPECT_RATIO, head_dim=$$HEAD_DIM)"; \
 		CMD="$$CMD --depth $$DEPTH --aspect-ratio $$ASPECT_RATIO --head-dim $$HEAD_DIM"; \
 	fi; \
 	if [ -n "$$TARGET_FLOPS" ]; then \
-		echo "🎯 Target FLOPs: $$TARGET_FLOPS"; \
+		echo "🎯 Training budget: Fixed FLOPs ($$TARGET_FLOPS)"; \
 		CMD="$$CMD --target-flops $$TARGET_FLOPS"; \
+	elif [ -n "$$PARAM_DATA_RATIO" ]; then \
+		echo "🎯 Training budget: Token:Param ratio ($$PARAM_DATA_RATIO:1)"; \
+		CMD="$$CMD --param-data-ratio $$PARAM_DATA_RATIO"; \
+	else \
+		echo "🎯 Training budget: Token:Param ratio (from config, default 20:1)"; \
 	fi; \
 	if [ -n "$$EVAL_INTERVAL" ]; then \
 		echo "⏱️  Eval interval: $$EVAL_INTERVAL steps"; \
@@ -191,25 +206,19 @@ ddp-train: ## Run DDP training. Usage: make ddp-train [NGPUS=2] [MODE=pretrainin
 	eval $$CMD 2>&1 | tee $$LOG_FILE
 
 
-run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep. Usage: make run-scaling-law [NO_MUON=true]
+run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLOP budget sweep. Usage: make run-scaling-law
 	@echo "🔬 Starting scaling law experiments (depth × FLOP budget sweep)..."
 	@echo "📊 Using adaptive eval_interval (~4 evals per run, scales with model size)"
-	@NO_MUON_ARG=""; \
-	if [ "$${NO_MUON}" = "true" ]; then \
-		NO_MUON_ARG="NO_MUON=true"; \
-		echo "🚫 Muon optimizer disabled for all runs"; \
-	else \
-		echo "⚡ Muon optimizer enabled for all runs"; \
-	fi; \
-	for FLOPS in 2e18; do \
+	@echo "⚡ Muon optimizer enabled for all runs"; \
+	for FLOPS in 1e18 2e18 3e18; do \
 		echo ""; \
 		echo "================================================================="; \
 		echo "💰 Compute budget: $$FLOPS FLOPs"; \
 		echo "================================================================="; \
-		for DEPTH in 8 9 10 11 12 13 14 15 16 17 18; do \
+		for DEPTH in 10 11 12 13 14 15 16 17 18; do \
 			echo ""; \
 			echo "  🧪 depth=$$DEPTH at $$FLOPS FLOPs"; \
-			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100 $$NO_MUON_ARG || exit 1; \
+			$(MAKE) ddp-train NGPUS=4 MODE=pretraining CORE_EVALS=true DEPTH=$$DEPTH TARGET_FLOPS=$$FLOPS EVAL_INTERVAL=100 || exit 1; \
 			echo "  🧹 Cleaning up GPUs..."; \
 			$(MAKE) kill-gpu; \
 			sleep 20; \
@@ -219,6 +228,45 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 		done; \
 	done
 	@echo "✅ All scaling law experiments complete!"
+
+run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-sweep [NGPUS=4] [PARAM_DATA_RATIO=10] [CORE_EVALS=true] [EVAL_INTERVAL=500]
+	@echo "🔬 Starting depth sweep experiments..."
+	@echo "📐 Training depths: 16" 
+	@NGPUS=$${NGPUS:-4}; \
+	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-10}; \
+	CORE_EVALS=$${CORE_EVALS:-true}; \
+	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
+	echo "📊 Configuration:"; \
+	echo "   GPUs: $$NGPUS"; \
+	echo "   Token:Param ratio: $$PARAM_DATA_RATIO:1"; \
+	echo "   CORE evaluations: $$CORE_EVALS"; \
+	if [ -n "$$EVAL_INTERVAL" ]; then \
+		echo "   Eval interval: $$EVAL_INTERVAL steps"; \
+	else \
+		echo "   Eval interval: adaptive (scales with model size)"; \
+	fi; \
+	echo "⚡ Muon optimizer enabled for all runs"; \
+	echo ""; \
+	for DEPTH in 16; do \
+		echo "  🧹 GPU cleanup..."; \
+		$(MAKE) kill-gpu; \
+		sleep 20; \
+		echo "================================================================="; \
+		echo "📐 Training depth=$$DEPTH"; \
+		echo "================================================================="; \
+		EXTRA_ARGS=""; \
+		if [ -n "$$EVAL_INTERVAL" ]; then \
+			EXTRA_ARGS="EVAL_INTERVAL=$$EVAL_INTERVAL"; \
+		fi; \
+		$(MAKE) ddp-train NGPUS=$$NGPUS MODE=pretraining CORE_EVALS=$$CORE_EVALS DEPTH=$$DEPTH PARAM_DATA_RATIO=$$PARAM_DATA_RATIO $$EXTRA_ARGS || exit 1; \
+		echo ""; \
+	echo "  🧹 Cleaning up GPUs..."; \
+	$(MAKE) kill-gpu; \
+	sleep 20; \
+	done
+	@echo ""
+	@echo "✅ All depth sweep experiments complete!"
+	@echo "📊 Trained models at depths: 8, 10, 12, 14, 16, 18, 20"
 
 chat-server: ## Start the chat web UI server on port 8003
 	@echo "🔍 Checking if port 8003 is in use..."

@@ -12,14 +12,11 @@ import time
 import torch
 
 import wandb
-# from dataloaders.open_webtext_dataloader import OpenWebtextDataloader
-from gpt_2.config import GPTConfig
-from gpt_2.gpt2_model import GPT
+from gpt_2.muon import get_muon_momentum, get_muon_weight_decay
 from gpt_2.sample_contexts import GENERAL_SAMPLE_CONTEXTS, SFT_SAMPLE_CONTEXTS
-from gpt_2.training_utilities import (setup_dataloaders, setup_logging,
-                                      setup_wandb)
-from gpt_2.utils import (calculate_num_iterations, get_lr, get_peak_flops,
-                         load_checkpoint, save_checkpoint)
+from gpt_2.training_utilities import (setup_dataloaders, setup_hyperparameters,
+                                      setup_logging, setup_model, setup_wandb)
+from gpt_2.utils import load_checkpoint, save_checkpoint
 
 
 class Trainer:
@@ -39,7 +36,6 @@ class Trainer:
         run_evals=False,
         run_core_evals=False,
         run_chatcore_evals=False,
-        mid_training=False,
         sft_training=False,
         checkpoint_path=None,
         checkpoint_dir=None,
@@ -48,9 +44,9 @@ class Trainer:
         aspect_ratio=None,
         head_dim=None,
         target_flops=None,
+        param_data_ratio=None,
         eval_interval=None,
         core_eval_interval=None,
-        use_muon=False,
     ):
         """
         Initialize trainer with model configuration, data loading, and training parameters.
@@ -65,46 +61,55 @@ class Trainer:
             run_evals: Whether to run evaluations
             run_core_evals: Whether to run CORE benchmark evaluations
             run_chatcore_evals: Whether to run ChatCORE generative evaluations (GSM8K, etc.) after training
-            mid_training: Whether to do mid-training (uses TaskMixture instead of pretraining data)
             sft_training: Whether to do SFT training (uses Multiplex dataloader with conversation data)
-            checkpoint_path: Path to checkpoint to load (for mid-training or resuming)
-            checkpoint_dir: Directory to save checkpoints (pretraining or midtraining specific)
+            checkpoint_path: Path to checkpoint to load (for SFT or resuming)
+            checkpoint_dir: Directory to save checkpoints (pretraining or SFT specific)
             token_bytes_path: Path to pre-computed token_bytes.pt for BPB calculation
             depth: Model depth (auto-calculates n_layer/n_embed/n_head from depth × aspect_ratio)
             aspect_ratio: Aspect ratio for depth mode (model_dim = depth × aspect_ratio, default from config)
             head_dim: Target head dimension for depth mode (default from config)
             target_flops: Target total FLOPs for training (overrides config.target_flops)
+            param_data_ratio: Token:Param ratio for training (overrides config.target_param_data_ratio)
         """
-        # Store basic config
+        # Store DDP (Distributed Data Parallel) configuration
+        # DDP allows training across multiple GPUs/nodes by splitting batches
         self.ddp = ddp
         self.ddp_rank = ddp_rank
         self.ddp_local_rank = ddp_local_rank
         self.ddp_world_size = ddp_world_size
         self.device = device
-        self.master_process = master_process
+        self.master_process = (
+            master_process  # Only master process does logging/checkpointing
+        )
+
+        # Store training mode flags
         self.run_evals = run_evals
         self.run_core_evals = run_core_evals
         self.run_chatcore_evals = run_chatcore_evals
-        self.mid_training = mid_training
         self.sft_training = sft_training
+
+        # Store checkpoint paths
         self.checkpoint_path = checkpoint_path
         self.checkpoint_dir = checkpoint_dir
         self.token_bytes_path = token_bytes_path
+
+        # Store model architecture overrides (for sweeps/experiments)
         self.depth_override = depth
         self.aspect_ratio_override = aspect_ratio
         self.head_dim_override = head_dim
-        self.use_muon = use_muon
         self.target_flops_override = target_flops
+        self.param_data_ratio_override = param_data_ratio
         self.eval_interval_override = eval_interval
         self.core_eval_interval_override = core_eval_interval
 
-        # Initialize start states
+        # Training state counters - will be set to nonzero if resuming from checkpoint
         self.start_step = 0
         self.start_epoch = 0
         self.start_global_step = 0
 
-        # Select 4 random sample contexts for generation evaluation
-        if self.sft_training or self.mid_training:
+        # Pick random sample contexts to evaluate model's generation quality during training
+        # This gives qualitative insight into what the model is learning beyond loss numbers
+        if self.sft_training:
             self.sample_contexts = random.sample(
                 SFT_SAMPLE_CONTEXTS, min(4, len(SFT_SAMPLE_CONTEXTS))
             )
@@ -113,273 +118,62 @@ class Trainer:
                 GENERAL_SAMPLE_CONTEXTS, min(4, len(GENERAL_SAMPLE_CONTEXTS))
             )
 
-        # Setup components
-        self.generation_log_file = setup_logging(self.master_process)
-        self._setup_model()
-        self._setup_hyperparameters()
-        self._setup_dataloaders_wrapper()
-        self._setup_optimizer_and_checkpoint()
-        self._setup_wandb_wrapper()
-        # self._setup_token_bytes()
-
-    def get_muon_momentum(self, step):
-        """
-        Muon momentum scheduler (nanochat-style).
-        Warms up from 0.85 to 0.95 over first 300 steps.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Momentum value for Muon optimizer
-        """
-        frac = min(step / 300, 1.0)
-        momentum = (1 - frac) * 0.85 + frac * 0.95
-        return momentum
-
-    def get_muon_weight_decay(self, step):
-        """
-        Muon weight decay scheduler (nanochat-style).
-        Linearly decays from initial value to 0 over the course of training.
-
-        Args:
-            step: Current training step
-
-        Returns:
-            float: Weight decay value for Muon optimizer
-        """
-        total_steps = self.max_steps * self.num_epochs
-        return self.weight_decay_scaled * (1 - step / total_steps)
-
-    def _setup_model(self):
-        """Initialize GPT model and wrap with DDP if needed."""
-        self.config = GPTConfig()
-
-        # Override architecture parameters using depth-based parameterization
-        if self.depth_override is not None:
-            if self.master_process:
-                print(f"🔢 Using depth-based architecture: depth={self.depth_override}")
-            self.config.depth = self.depth_override
-            if self.aspect_ratio_override is not None:
-                self.config.aspect_ratio = self.aspect_ratio_override
-            if self.head_dim_override is not None:
-                self.config.head_dim = self.head_dim_override
-            # __post_init__ will auto-calculate n_layer, n_embed, n_head
-            self.config.__post_init__()
-
-            # Auto-scale batch size based on model size to avoid OOM
-            # Small models can use larger batch sizes for faster training
-            # Large models need smaller batch sizes to fit in memory
-            # Reference: tuned on 2x H100 80GB
-            if self.depth_override <= 8:
-                auto_batch_size = 32  # ~100M params: high throughput
-            elif self.depth_override <= 10:
-                auto_batch_size = 32  # ~100M params: high throughput
-            elif self.depth_override <= 14:
-                auto_batch_size = 16  # ~150M-210M params: balanced
-            elif self.depth_override <= 18:
-                auto_batch_size = 8  # ~280M-360M params: conservative
-            elif self.depth_override <= 22:
-                auto_batch_size = 4  # ~560M-700M params: tight fit
-            else:
-                auto_batch_size = 2  # ~1B+ params: minimal batch
-
-            if self.master_process:
-                if auto_batch_size != self.config.batch_size:
-                    print(
-                        f"   Auto-scaling batch_size: {self.config.batch_size} → {auto_batch_size} (for depth={self.depth_override})"
-                    )
-                else:
-                    print(
-                        f"   Batch size: {auto_batch_size} (optimal for depth={self.depth_override})"
-                    )
-            self.config.batch_size = auto_batch_size
-        else:
-            # Use default config values
-            if self.master_process:
-                print(
-                    f"📝 Using default architecture: n_layer={self.config.n_layer}, n_embed={self.config.n_embed}"
-                )
-
-        # Override target_flops if provided
-        if self.target_flops_override is not None:
-            if self.master_process:
-                print(
-                    f"🎯 Overriding target_flops: {self.config.target_flops:.2e} → {self.target_flops_override:.2e}"
-                )
-            self.config.target_flops = self.target_flops_override
-
-        # Override eval_interval if provided
-        if self.eval_interval_override is not None:
-            if self.master_process:
-                print(
-                    f"⏱️  Overriding eval_interval: {self.config.eval_interval} → {self.eval_interval_override}"
-                )
-            self.config.eval_interval = self.eval_interval_override
-
-        # Create raw model and keep reference BEFORE any wrapping
-        # This reference will always point to the unwrapped model with updated weights
-        self.raw_model = GPT(self.config, master_process=self.master_process)
-        self.raw_model.to(self.device)
-
-        # Wrap with torch.compile for faster training
-        # Use dynamic=False because input shapes never change during training (nanochat-style)
-        # Requires PyTorch 2.9.0+ to avoid none_dealloc crash
-        self.model = torch.compile(self.raw_model, dynamic=False)
-        # self.model = self.raw_model
-
-        # Nanochat-style: NO DDP wrapper when using combined optimizer with Muon
-        # The DistMuonAdamW optimizer handles gradient synchronization internally
-        # This provides better overlap of communication with computation
-        #
-        # DDP wrapping is only used when NOT using Muon (AdamW-only mode)
-        if self.ddp and not self.use_muon:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model, device_ids=[self.ddp_local_rank]
-            )
-        elif self.ddp and self.use_muon:
-            if self.master_process:
-                print(
-                    "Using DistMuonAdamW optimizer - skipping DDP wrapper (nanochat-style)"
-                )
-
-        # Note: self.raw_model stays unchanged and shares parameters with self.model
-        # This allows clean checkpoint saving without unwrapping
-
-    def _setup_hyperparameters(self):
-        """Configure training hyperparameters based on training mode."""
-        self.num_epochs = self.config.num_epochs
-        # Note: self.run_evals_after will be set adaptively after we know max_steps
-
-        # Batch size and gradient accumulation
-        if self.sft_training:
-            # For SFT, we count examples (conversations) not tokens
-            # No gradient accumulation - process each batch immediately
-            self.grad_accumulation_steps = 1
-            self.total_batch_size = self.config.batch_size * self.ddp_world_size
-        else:
-            # For pretrain/midtrain, we count tokens
-            self.total_batch_size = self.config.total_batch_size
-            self.grad_accumulation_steps = self.total_batch_size // (
-                self.config.batch_size * self.config.block_size * self.ddp_world_size
-            )
-
-            assert (
-                self.total_batch_size
-                % (
-                    self.config.batch_size
-                    * self.config.block_size
-                    * self.ddp_world_size
-                )
-                == 0
-            ), "Total batch size must be divisible by batch_size * block_size * world_size"
-
-        if self.master_process:
-            print(f"Total batch size: {self.total_batch_size}")
-            print(f"Grad accumulation steps: {self.grad_accumulation_steps}")
-
-        # Learning rate scheduling parameters
-        self.max_learning_rate = self.config.max_learning_rate
-        self.min_learning_rate = self.max_learning_rate * self.config.min_lr_ratio
-
-        # Apply nanochat-style depth-aware LR scaling if using depth mode
-        # LR ∝ 1/√model_dim (tuned at model_dim=768, depth=12)
-        if self.config._depth_mode:
-            # Learning rate scaling: LR ∝ 1/√model_dim
-            # Reference: tuned at model_dim=768 (depth=12, aspect_ratio=64)
-            reference_dim = 768
-            lr_scale = (self.config.n_embed / reference_dim) ** -0.5
-            self.max_learning_rate *= lr_scale
-            self.min_learning_rate *= lr_scale
-
-            if self.master_process:
-                print(f"\n📐 DEPTH-AWARE SCALING (depth={self.config.depth})")
-                print(f"   n_layer: {self.config.n_layer}")
-                print(
-                    f"   n_embed: {self.config.n_embed} (base: {self.config._base_dim}, nudge: {self.config._nudge:+d})"
-                )
-                print(f"   n_head: {self.config.n_head}")
-                print(f"   head_dim: {self.config.n_embed // self.config.n_head}")
-                print(
-                    f"   LR scaling: {lr_scale:.6f} (∝ 1/√({self.config.n_embed}/{reference_dim}))"
-                )
-                print(
-                    f"   Max LR: {self.config.max_learning_rate:.2e} → {self.max_learning_rate:.2e}"
-                )
-
-        # Automatically calculate steps based on config settings for all phases
-        if self.master_process:
-            print("\n" + "=" * 80)
-            if self.sft_training:
-                print("📊 CALCULATING SFT TRAINING STEPS")
-            elif self.mid_training:
-                print("📊 CALCULATING MID-TRAINING STEPS")
-            else:
-                print("📊 CALCULATING PRETRAINING STEPS")
-            print("=" * 80)
-
-        num_iterations, flops_per_token, _ = calculate_num_iterations(
-            self.raw_model, self.config, self.master_process
+        # Setup model (includes architecture, wrapping with DDP if needed)
+        self.config, self.raw_model, self.model = setup_model(
+            depth_override=self.depth_override,
+            aspect_ratio_override=self.aspect_ratio_override,
+            head_dim_override=self.head_dim_override,
+            target_flops_override=self.target_flops_override,
+            param_data_ratio_override=self.param_data_ratio_override,
+            eval_interval_override=self.eval_interval_override,
+            device=self.device,
+            ddp=self.ddp,
+            master_process=self.master_process,
         )
-        self.max_steps = num_iterations
-        self.flops_per_token = flops_per_token
 
-        if self.master_process:
-            print("=" * 80 + "\n")
+        # Setup logging (need model first to get depth for filename)
+        self.generation_log_file = setup_logging(
+            self.master_process,
+            depth=self.config.depth if self.config._depth_mode else None,
+            sft_training=self.sft_training,
+        )
 
-        # Initialize peak FLOPs for MFU calculation
-        if self.device.startswith("cuda"):
-            device_name = torch.cuda.get_device_name(self.device)
-            self.peak_flops = get_peak_flops(device_name)
-            if self.master_process:
-                print(f"GPU: {device_name}")
-                print(f"Peak FLOPS (BF16): {self.peak_flops:.2e}\n")
-        else:
-            self.peak_flops = float("inf")  # MFU not meaningful for non-CUDA devices
+        # Calculate hyperparameters (batch size, learning rates, schedule, etc)
+        hyperparams = setup_hyperparameters(
+            config=self.config,
+            raw_model=self.raw_model,
+            sft_training=self.sft_training,
+            ddp_world_size=self.ddp_world_size,
+            device=self.device,
+            eval_interval_override=self.eval_interval_override,
+            core_eval_interval_override=self.core_eval_interval_override,
+            master_process=self.master_process,
+        )
 
-        # Set warmup steps based on training phase (calculated as % of max_steps)
-        if self.sft_training:
-            self.warmup_steps = int(self.max_steps * self.config.lr_warmup_ratio_sft)
-        elif self.mid_training:
-            self.warmup_steps = int(
-                self.max_steps * self.config.lr_warmup_ratio_midtrain
-            )
-        else:
-            self.warmup_steps = int(
-                self.max_steps * self.config.lr_warmup_ratio_pretrain
-            )
+        # Unpack hyperparameters into instance variables for easy access
+        self.num_epochs = hyperparams["num_epochs"]
+        self.grad_accumulation_steps = hyperparams["grad_accumulation_steps"]
+        self.total_batch_size = hyperparams["total_batch_size"]
+        self.max_steps = hyperparams["max_steps"]
+        self.flops_per_token = hyperparams["flops_per_token"]
+        self.peak_flops = hyperparams["peak_flops"]
+        self.run_evals_after = hyperparams["run_evals_after"]
+        self.run_core_evals_after = hyperparams["run_core_evals_after"]
 
-        # Set adaptive eval intervals based on total training steps
-        # Val loss: frequent (good learning curve), Core evals: sparse (expensive benchmarks)
-        total_steps = self.max_steps * self.num_epochs
+        # Setup remaining components (dataloaders, optimizer, wandb)
+        self._setup_dataloaders()
+        self._setup_optimizer_and_checkpoint()
+        self._setup_wandb()
 
-        # Validation loss interval (faster, more frequent)
-        if self.eval_interval_override is not None:
-            self.run_evals_after = self.eval_interval_override
-        else:
-            # Adaptive: target ~8-12 val loss measurements for smooth learning curve
-            adaptive_val_interval = max(100, total_steps // 10)  # min 100 steps
-            adaptive_val_interval = min(
-                adaptive_val_interval, 500
-            )  # max 500 steps (don't spam)
-            self.run_evals_after = adaptive_val_interval
+    def _setup_dataloaders(self):
+        """
+        Setup training and evaluation dataloaders.
 
-        # Core evaluation interval (slower, less frequent)
-        if self.core_eval_interval_override is not None:
-            self.run_core_evals_after = self.core_eval_interval_override
-        else:
-            # Adaptive: target ~3-5 core eval measurements (expensive, 80s each)
-            adaptive_core_interval = max(250, total_steps // 4)  # min 250 steps
-            adaptive_core_interval = min(
-                adaptive_core_interval, total_steps // 2
-            )  # at least 2 evals
-            self.run_core_evals_after = adaptive_core_interval
-
-    def _setup_dataloaders_wrapper(self):
-        """Wrapper to setup dataloaders using utility functions."""
+        Training dataloader yields infinite stream of batches (wraps around dataset).
+        Evaluation dataloaders are used periodically to estimate val loss and run benchmarks.
+        """
         results = setup_dataloaders(
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
             ddp_world_size=self.ddp_world_size,
             ddp_rank=self.ddp_rank,
@@ -390,29 +184,35 @@ class Trainer:
             raw_model=self.raw_model,
             device=self.device,
             ddp=self.ddp,
-            model=self.model,
-            eval_dataloader=None,  # Will be set by setup_dataloaders
             generation_log_file=self.generation_log_file,
             token_bytes_path=self.token_bytes_path,
         )
         (
             self.train_dataloader,
-            self.eval_dataloader,
             self.evaluator,
             self.core_evaluator,
             self.chatcore_evaluator,
         ) = results
 
     def _setup_optimizer_and_checkpoint(self):
-        """Initialize optimizer and load checkpoint if provided."""
-        # ===== Nanochat-style Batch Size Scaling (sqrt rule) =====
-        # Learning rates are tuned at reference batch size 2^19 (524288)
+        """
+        Initialize optimizer with scaled learning rates and weight decay.
+
+        Key design decisions:
+        1. Batch size scaling: Use sqrt rule (LR ∝ sqrt(batch_size)) because both AdamW and Muon
+           are approximately second-order optimizers that benefit from gentler scaling than linear.
+        2. Weight decay scaling: Deeper models need less regularization (WD ∝ 1/depth²) because
+           they have more capacity and the signal propagates through more layers.
+        3. Per-parameter-group learning rates: Different param types have different optimal LRs
+           (embeddings learn fast, output head learns slow, etc).
+        """
+        # Scale learning rates based on batch size (tuned at 2^19 = 524288 tokens)
+        # Why sqrt? Second-order optimizers accumulate curvature info, so larger batches
+        # give more accurate gradient estimates without needing proportionally higher LR
         batch_lr_scale = 1.0
         reference_batch_size = 2**19
         batch_ratio = self.total_batch_size / reference_batch_size
         if batch_ratio != 1.0:
-            # Muon: sqrt scaling (second-order-ish optimizer)
-            # AdamW: sqrt scaling is standard
             batch_lr_scale = batch_ratio**0.5
             if self.master_process:
                 print("\n📐 BATCH SIZE SCALING")
@@ -421,10 +221,10 @@ class Trainer:
                 )
                 print(f"   LR scale: {batch_lr_scale:.4f} (sqrt rule)")
 
-        # ===== Nanochat-style Weight Decay Scaling by Depth =====
-        # Weight decay is tuned at depth=12, scales as ∝ 1/depth²
+        # Scale weight decay by depth (tuned at depth=12)
+        # Deeper networks have implicit regularization from depth, so need less explicit L2
         weight_decay = self.config.weight_decay
-        if self.config._depth_mode and self.use_muon:
+        if self.config._depth_mode:
             reference_depth = 12
             wd_scale = (reference_depth / self.config.depth) ** 2
             weight_decay = self.config.weight_decay * wd_scale
@@ -439,18 +239,16 @@ class Trainer:
                     f"   Weight decay: {self.config.weight_decay:.6f} → {weight_decay:.6f}"
                 )
 
-        # ===== Apply Batch Size Scaling to Learning Rates =====
+        # Apply batch scaling to all parameter group learning rates
         embedding_lr = self.config.embedding_lr * batch_lr_scale
         unembedding_lr = self.config.unembedding_lr * batch_lr_scale
         matrix_lr = self.config.matrix_lr * batch_lr_scale
         scalar_lr = self.config.scalar_lr * batch_lr_scale
 
+        # Create optimizer(s) - may return single optimizer or list [AdamW, Muon]
         optimizer_result = self.raw_model.configure_optimizers(
-            learning_rate=self.max_learning_rate,
             weight_decay=weight_decay,
             device=self.device,
-            use_muon=self.use_muon,
-            muon_lr=self.config.muon_lr,
             ddp=self.ddp,
             master_process=self.master_process,
             embedding_lr=embedding_lr,
@@ -461,125 +259,103 @@ class Trainer:
             adam_beta2=self.config.adam_beta2,
         )
 
-        # Store scaled weight decay for scheduler
+        # Store scaled weight decay for dynamic scheduling during training
         self.weight_decay_scaled = weight_decay
 
-        # Handle both single optimizer and list of optimizers
-        if isinstance(optimizer_result, list):
-            self.optimizers = optimizer_result  # List of optimizers (AdamW + Muon)
-            self.optimizer = optimizer_result[0]  # Keep for backward compatibility
-        else:
-            self.optimizer = optimizer_result
-            self.optimizers = [optimizer_result]
+        # Normalize optimizer result to always be a list for consistent handling
+        self.optimizers = (
+            optimizer_result
+            if isinstance(optimizer_result, list)
+            else [optimizer_result]
+        )
+        self.optimizer = self.optimizers[0]  # Backward compatibility
 
+        # Load checkpoint if provided (three scenarios: resume pretrain, resume SFT, rollover pretrain→SFT)
         if self.checkpoint_path:
-            # Determine checkpoint source
-            is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
-            is_midtrain_ckpt = "midtrain_checkpoints" in self.checkpoint_path
-            is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
+            self._load_checkpoint_and_set_counters()
 
-            # Define training scenario flags
-            is_rollover_pretrain_to_midtrain = self.mid_training and is_pretrain_ckpt
-            is_rollover_midtrain_to_sft = self.sft_training and is_midtrain_ckpt
-            is_resume_pretrain = (
-                not self.mid_training and not self.sft_training and is_pretrain_ckpt
+    def _load_checkpoint_and_set_counters(self):
+        """
+        Load checkpoint and configure training state based on scenario.
+
+        Three checkpoint scenarios:
+        1. Resume pretraining: Load weights + optimizer + training counters
+        2. Resume SFT: Load weights + optimizer + training counters
+        3. Rollover pretrain→SFT: Load weights only, fresh optimizer, reset counters to 0
+           (This is transfer learning: pretrained weights, new task, new optimization trajectory)
+        """
+        # Detect checkpoint type from path (brittle but simple)
+        is_pretrain_ckpt = "pretrain_checkpoints" in self.checkpoint_path
+        is_sft_ckpt = "sft_checkpoints" in self.checkpoint_path
+
+        # Determine scenario
+        is_rollover = self.sft_training and is_pretrain_ckpt  # Transfer learning
+        is_resume_pretrain = not self.sft_training and is_pretrain_ckpt
+        is_resume_sft = self.sft_training and is_sft_ckpt
+
+        # Validate scenario is recognized
+        if not (is_rollover or is_resume_pretrain or is_resume_sft):
+            raise ValueError(
+                f"Unrecognized checkpoint scenario!\n"
+                f"  Checkpoint path: {self.checkpoint_path}\n"
+                f"  sft_training flag: {self.sft_training}\n"
+                f"Expected patterns:\n"
+                f"  - Rollover pretrain→SFT: sft_training=True + 'pretrain_checkpoints' in path\n"
+                f"  - Resume pretraining: sft_training=False + 'pretrain_checkpoints' in path\n"
+                f"  - Resume SFT: sft_training=True + 'sft_checkpoints' in path"
             )
-            is_resume_midtrain = self.mid_training and is_midtrain_ckpt
-            is_resume_sft = self.sft_training and is_sft_ckpt
 
-            # Load optimizer only when resuming (not when rolling over)
-            is_rollover = (
-                is_rollover_pretrain_to_midtrain or is_rollover_midtrain_to_sft
-            )
-            should_load_optimizer = not is_rollover
-            # Don't print resume info for rollover scenarios
-            should_print_resume_info = not is_rollover
+        # Load checkpoint (weights always, optimizer only when resuming)
+        checkpoint_result = load_checkpoint(
+            checkpoint_path=self.checkpoint_path,
+            model=self.raw_model,
+            device=self.device,
+            optimizer=(
+                self.optimizers if not is_rollover else None
+            ),  # Fresh optimizer for rollover
+            master_process=self.master_process,
+            print_resume_info=not is_rollover,  # Don't print for rollover (we print custom message)
+        )
 
-            checkpoint_result = load_checkpoint(
-                checkpoint_path=self.checkpoint_path,
-                model=self.raw_model,
-                device=self.device,
-                optimizer=self.optimizers if should_load_optimizer else None,
-                master_process=self.master_process,
-                print_resume_info=should_print_resume_info,
-            )
-            if checkpoint_result["config"]:
-                self.config = checkpoint_result["config"]
+        if checkpoint_result["config"]:
+            self.config = checkpoint_result["config"]
 
-            # Reset training counters only when rolling over
-            if is_rollover_pretrain_to_midtrain:
-                self.start_epoch = 0
-                self.start_step = 0
-                self.start_global_step = 0
-                if self.master_process:
-                    print(
-                        "🔄 Rollover: Pretraining → Mid-training "
-                        "(weights loaded, fresh optimizer, counters reset to 0)"
-                    )
-                    print("   Training will start from global_step: 0")
-                    print(f"{'='*80}\n")
-            elif is_rollover_midtrain_to_sft:
-                self.start_epoch = 0
-                self.start_step = 0
-                self.start_global_step = 0
-                if self.master_process:
-                    print(
-                        "🔄 Rollover: Mid-training → SFT "
-                        "(weights loaded, fresh optimizer, counters reset to 0)"
-                    )
-                    print("   Training will start from global_step: 0")
-                    print(f"{'='*80}\n")
-            # Keep checkpoint counters when resuming
-            elif is_resume_pretrain or is_resume_midtrain or is_resume_sft:
-                self.start_epoch = checkpoint_result["start_epoch"]
-                self.start_step = checkpoint_result["start_step"]
-                self.start_global_step = checkpoint_result["start_global_step"]
+        # Set training counters based on scenario
+        if is_rollover:
+            # Rollover: Start fresh (transfer learning to new task)
+            self.start_epoch = 0
+            self.start_step = 0
+            self.start_global_step = 0
+            if self.master_process:
+                print(
+                    "🔄 Rollover: Pretraining → SFT (weights loaded, fresh optimizer, counters reset)"
+                )
+                print("   Training will start from global_step: 0")
+                print(f"{'='*80}\n")
+        else:
+            # Resume: Continue from checkpoint counters
+            self.start_epoch = checkpoint_result["start_epoch"]
+            self.start_step = checkpoint_result["start_step"]
+            self.start_global_step = checkpoint_result["start_global_step"]
 
-                if self.master_process:
-                    if is_resume_pretrain:
-                        mode = "pretraining"
-                    elif is_resume_midtrain:
-                        mode = "mid-training"
-                    else:
-                        mode = "SFT"
-                    print(
-                        f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
-                        f"step {self.start_step}, global_step {self.start_global_step} "
-                        "(weights + optimizer loaded)"
-                    )
-            else:
-                # Abort if checkpoint scenario is not recognized
-                raise ValueError(
-                    f"Unrecognized checkpoint scenario!\n"
-                    f"  Checkpoint path: {self.checkpoint_path}\n"
-                    f"  mid_training flag: {self.mid_training}\n"
-                    f"  sft_training flag: {self.sft_training}\n"
-                    f"  is_pretrain_ckpt: {is_pretrain_ckpt}\n"
-                    f"  is_midtrain_ckpt: {is_midtrain_ckpt}\n"
-                    f"  is_sft_ckpt: {is_sft_ckpt}\n\n"
-                    f"Expected checkpoint path patterns:\n"
-                    f"  - For rollover pretrain→midtrain: mid_training=True + 'pretrain_checkpoints' in path\n"
-                    f"  - For rollover midtrain→sft: sft_training=True + 'midtrain_checkpoints' in path\n"
-                    f"  - For resume pretraining: mid_training=False + sft_training=False + 'pretrain_checkpoints' in path\n"
-                    f"  - For resume mid-training: mid_training=True + 'midtrain_checkpoints' in path\n"
-                    f"  - For resume SFT: sft_training=True + 'sft_checkpoints' in path"
+            if self.master_process:
+                mode = "pretraining" if is_resume_pretrain else "SFT"
+                print(
+                    f"🔄 Resuming {mode} from epoch {self.start_epoch}, "
+                    f"step {self.start_step}, global_step {self.start_global_step}"
                 )
 
-            # Handle epoch boundary for resumed checkpoints
-            if self.start_step >= self.max_steps:
-                self.start_step = 0
-                self.start_epoch += 1
+        # Handle epoch boundary (if checkpoint was saved at end of epoch)
+        if self.start_step >= self.max_steps:
+            self.start_step = 0
+            self.start_epoch += 1
 
-    def _setup_wandb_wrapper(self):
-        """Wrapper to setup wandb using utility function."""
+    def _setup_wandb(self):
+        """Initialize Weights & Biases logging for experiment tracking."""
         setup_wandb(
             master_process=self.master_process,
             sft_training=self.sft_training,
-            mid_training=self.mid_training,
             config=self.config,
-            max_learning_rate=self.max_learning_rate,
-            min_learning_rate=self.min_learning_rate,
-            warmup_steps=self.warmup_steps,
             max_steps=self.max_steps,
             num_epochs=self.num_epochs,
             run_evals=self.run_evals,
@@ -588,32 +364,25 @@ class Trainer:
             start_step=self.start_step,
             flops_per_token=self.flops_per_token,
             total_batch_size=self.total_batch_size,
-            use_muon=self.use_muon,
         )
-
-    def _setup_token_bytes(self):
-        """Load pre-computed token_bytes tensor for BPB calculation."""
-        if self.token_bytes_path is not None:
-            self._token_bytes = torch.load(self.token_bytes_path, weights_only=True).to(
-                self.device
-            )
-        else:
-            self._token_bytes = None
-            if self.master_process:
-                print(
-                    "⚠️  token_bytes_path not provided - train BPB will not be computed"
-                )
 
     def train(self):
         """
-        Main training loop that implements the full training procedure.
-        Includes gradient clipping, learning rate scheduling, and progress monitoring.
+        Main training loop implementing modern LLM training best practices.
+
+        Key components:
+        - Gradient accumulation: Simulate large batch sizes with limited memory
+        - Mixed precision (bfloat16): 2x speedup with minimal accuracy loss
+        - Gradient clipping: Prevent instability from outlier gradients
+        - LR scheduling: Warmup prevents early training instability, warmdown helps convergence
+        - Periodic evaluation: Track val loss and benchmark performance during training
         """
-        ## Start training ##
-        # Set precision for matrix multiplications (improves performance on modern GPUs)
+        training_start_time = time.time()
+
+        # Use TF32 for matmul on Ampere+ GPUs (free 8x speedup over FP32, bit-identical to FP32)
         torch.set_float32_matmul_precision("high")
 
-        # Calculate total steps once for the entire training run
+        # Total optimization steps = steps_per_epoch × num_epochs
         total_steps = self.max_steps * self.num_epochs
 
         if self.master_process:
@@ -624,10 +393,7 @@ class Trainer:
             tokens_params_ratio = total_tokens / num_params
 
             print("\n" + "=" * 80)
-            if self.mid_training:
-                print("🔄 STARTING MID-TRAINING")
-            else:
-                print("🚀 STARTING TRAINING")
+            print("🚀 STARTING TRAINING")
             print("=" * 80)
             if self.start_global_step > 0:
                 print(
@@ -678,163 +444,129 @@ class Trainer:
 
             print("=" * 80 + "\n")
 
-        # Main training loop over epochs
-        global_step = self.start_global_step  # Track global step across all epochs
+        # Main training loop - iterate over epochs and steps
+        global_step = (
+            self.start_global_step
+        )  # Continuous counter across all epochs (for LR schedule)
+
         for epoch in range(self.start_epoch, self.num_epochs):
-            # Process all batches in the current epoch
-            # Only use start_step for the first resumed epoch, then start from 0
+            # Resume from mid-epoch if checkpoint was saved there, else start at 0
             epoch_start_step = self.start_step if epoch == self.start_epoch else 0
 
-            # Unified training loop for all modes (pretrain/midtrain/sft)
             for step in range(epoch_start_step, self.max_steps):
-                start_time = time.time()  # Track step timing
-                # Zero gradients for all optimizers
+                start_time = time.time()
+
+                # Zero out gradients from previous step
                 for opt in self.optimizers:
                     opt.zero_grad()
-                loss_accumulator = torch.tensor(0.0, device=self.device)
-                # # BPB accumulators
-                # torch.tensor(0.0, dtype=torch.float32, device=self.device)
-                # torch.tensor(0, dtype=torch.int64, device=self.device)
 
-                # Track active tokens for SFT training (where targets >= 0)
+                loss_accumulator = torch.tensor(0.0, device=self.device)
                 num_active_tokens = torch.tensor(
                     0, dtype=torch.int64, device=self.device
                 )
 
+                # Gradient accumulation: simulate larger batch by accumulating grads over multiple micro-batches
+                # This lets us use batch_size=8M tokens even if GPU only fits 512K tokens at once
                 for micro_step in range(self.grad_accumulation_steps):
-                    # Get training batch and move to device
-                    x, y = self.train_dataloader.next_batch()
+                    # Fetch next batch (dataloader wraps around infinitely)
+                    x, y = next(self.train_dataloader)
                     x, y = x.to(self.device), y.to(self.device)
 
-                    # Forward pass: compute per-token loss
+                    # Forward pass in mixed precision (bfloat16 = 2x faster, ~same accuracy as fp32)
                     with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
                         logits, per_token_loss = self.model(x, y, loss_reduction="none")
 
-                    # Compute mean loss for backprop
+                    # Scale loss by accumulation steps so final gradient has correct magnitude
+                    # (We're averaging gradients across micro-batches, not summing them)
                     loss = per_token_loss.mean() / self.grad_accumulation_steps
                     loss_accumulator += loss
 
-                    # Count active tokens (for SFT: targets >= 0, for pretrain: all tokens)
+                    # Track how many tokens we're actually training on
+                    # (SFT masks out context with y=-100, pretrain uses all tokens)
                     if self.sft_training:
                         num_active_tokens += (y >= 0).sum()
 
-                    # Accumulate for BPB calculation
-                    # if self._token_bytes is not None:
-                    #     nats, bytes = accumulate_bpb(per_token_loss, y, self._token_bytes)
-                    #     total_nats += nats
-                    #     total_bytes += bytes
-
-                    # Control gradient synchronization for DDP
-                    # Note: When using DistMuonAdamW (ddp=True, use_muon=True), the model
-                    # is NOT wrapped with DDP, so we skip this. DistMuonAdamW handles
-                    # gradient synchronization internally during optimizer.step()
-                    if self.ddp and not self.use_muon:
-                        self.model.require_backward_grad_sync = (
-                            micro_step == self.grad_accumulation_steps - 1
-                        )
-                    # Backward pass: compute gradients
+                    # Backward pass: accumulate gradients (don't step optimizer yet)
                     loss.backward()
 
+                # Synchronize loss and token counts across GPUs (DDP)
                 if self.ddp:
+                    # Average loss across ranks (each rank computed loss on different data shard)
                     torch.distributed.all_reduce(
                         loss_accumulator, op=torch.distributed.ReduceOp.AVG
                     )
-                    # Sum active tokens across all ranks for SFT
+                    # Sum token counts (for throughput calculation)
                     if self.sft_training:
                         torch.distributed.all_reduce(
                             num_active_tokens, op=torch.distributed.ReduceOp.SUM
                         )
-                    # if self._token_bytes is not None:
-                    #     torch.distributed.all_reduce(
-                    #         total_nats, op=torch.distributed.ReduceOp.SUM
-                    #     )
-                    #     torch.distributed.all_reduce(
-                    #         total_bytes, op=torch.distributed.ReduceOp.SUM
-                    #     )
 
-                # Gradient clipping to prevent exploding gradients
-                # This stabilizes training by limiting gradient magnitude
+                # Clip gradients to prevent training instability from outliers
+                # Common in transformers due to attention mechanism and deep architecture
+                # Norm is useful for monitoring training health (sudden spikes = trouble)
                 norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.config.gradient_clip_norm
                 )
 
-                # Update learning rate based on global step (continuous across epochs)
-                if self.use_muon:
-                    # Nanochat-style: Use get_lr_multiplier to get a multiplier for all param groups
-                    from gpt_2.utils import get_lr_multiplier
+                # Calculate learning rate multiplier for current step
+                # Schedule: linear warmup → constant → cosine warmdown to final_lr_frac
+                # Warmup prevents early instability when weights are random
+                # Warmdown improves final convergence
+                from gpt_2.utils import get_lr_multiplier
 
-                    # Determine training phase
-                    if self.sft_training:
-                        training_phase = "sft"
-                    elif self.mid_training:
-                        training_phase = "midtrain"
-                    else:
-                        training_phase = "pretrain"
+                training_phase = "sft" if self.sft_training else "pretrain"
+                lrm = get_lr_multiplier(
+                    global_step=global_step,
+                    max_steps=self.max_steps,
+                    num_epochs=self.num_epochs,
+                    training_phase=training_phase,
+                    warmup_ratio=self.config.warmup_ratio,
+                    warmdown_ratio=self.config.warmdown_ratio,
+                    final_lr_frac=self.config.final_lr_frac,
+                )
 
-                    lrm = get_lr_multiplier(
-                        global_step=global_step,
-                        max_steps=self.max_steps,
-                        num_epochs=self.num_epochs,
-                        training_phase=training_phase,
-                        warmup_ratio=self.config.warmup_ratio,
-                        warmdown_ratio=self.config.warmdown_ratio,
-                        final_lr_frac=self.config.final_lr_frac,
-                    )
+                # Get dynamic Muon hyperparameters (momentum and weight decay change during training)
+                muon_momentum = get_muon_momentum(global_step)
+                muon_weight_decay = get_muon_weight_decay(
+                    global_step,
+                    self.max_steps,
+                    self.num_epochs,
+                    self.weight_decay_scaled,
+                )
 
-                    # Get Muon schedulers
-                    muon_momentum = self.get_muon_momentum(global_step)
-                    muon_weight_decay = self.get_muon_weight_decay(global_step)
+                # Update learning rates for all parameter groups
+                # Different param types have different base LRs (stored as initial_lr)
+                # All get multiplied by same schedule (lrm)
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group["lr"] = param_group["initial_lr"] * lrm
 
-                    # Update all optimizers with nanochat-style scheduling
-                    for opt in self.optimizers:
-                        for param_group in opt.param_groups:
-                            # Apply LR multiplier to initial_lr
-                            param_group["lr"] = param_group["initial_lr"] * lrm
+                        # Update Muon-specific hyperparameters (momentum, weight_decay)
+                        if param_group.get("kind") == "muon":
+                            param_group["momentum"] = muon_momentum
+                            param_group["weight_decay"] = muon_weight_decay
 
-                            # Update Muon-specific params
-                            if param_group.get("kind") == "muon":
-                                param_group["momentum"] = muon_momentum
-                                param_group["weight_decay"] = muon_weight_decay
+                lr = lrm  # Save for logging
 
-                    lr = lrm  # For logging
-                else:
-                    # Standard cosine schedule for AdamW-only
-                    lr = get_lr(
-                        global_step=global_step,
-                        warmup_steps=self.warmup_steps,
-                        max_steps=self.max_steps,
-                        num_epochs=self.num_epochs,
-                        max_learning_rate=self.max_learning_rate,
-                        min_learning_rate=self.min_learning_rate,
-                    )
-                    # Update LR for all optimizers
-                    for opt in self.optimizers:
-                        for param_group in opt.param_groups:
-                            # Scale LR based on initial_lr if available
-                            if "initial_lr" in param_group:
-                                param_group["lr"] = lr * (
-                                    param_group["initial_lr"] / self.max_learning_rate
-                                )
-                            else:
-                                param_group["lr"] = lr
-
-                # Apply gradients to update model parameters
+                # Take optimizer step (update model parameters using accumulated gradients)
                 for opt in self.optimizers:
                     opt.step()
 
-                # Synchronize CUDA operations for accurate timing
+                # Wait for GPU to finish (needed for accurate timing)
                 if self.device == "cuda":
                     torch.cuda.synchronize()
                 end_time = time.time()
 
-                # Calculate training throughput (tokens processed per second)
+                # Calculate throughput (tokens/second processed across all GPUs)
+                # This is a key metric for training efficiency
                 if self.sft_training:
-                    # For SFT: count only active tokens (where targets >= 0)
+                    # SFT: only count tokens we actually trained on (y >= 0)
+                    # Conversation data has context masked out, so counting all tokens would be misleading
                     tokens_per_second = num_active_tokens.item() / (
                         end_time - start_time
                     )
                 else:
-                    # For pretrain/midtrain: all tokens in batch are active
+                    # Pretraining: every token in batch is trained on
                     tokens_per_second = (
                         self.config.batch_size
                         * self.config.block_size
@@ -843,16 +575,21 @@ class Trainer:
                         / (end_time - start_time)
                     )
 
-                # Calculate FLOPs metrics
+                # Calculate FLOPs metrics (useful for comparing efficiency across setups)
                 flops_per_second = self.flops_per_token * tokens_per_second
                 flops_so_far = (
                     self.flops_per_token * self.total_batch_size * global_step
                 )
-                # MFU: Model FLOPs Utilization (% of theoretical peak performance)
+
+                # MFU = Model FLOPs Utilization (what % of GPU's theoretical peak are we using?)
+                # Good MFU is ~50-60% for transformers (attention is memory-bound, not compute-bound)
                 mfu = 100 * flops_per_second / (self.peak_flops * self.ddp_world_size)
 
-                # Periodically estimate loss on train/val sets for monitoring
-                val_loss = None  # Will be set if evals run
+                # Run validation loss evaluation periodically
+                # Val loss is the key metric - tells us if model is learning generalizable patterns
+                # If val loss decreases but train loss plateaus = underfitting (need bigger model or more data)
+                # If train loss decreases but val loss increases = overfitting (need regularization or less data)
+                val_loss = None
                 should_eval_val = (
                     global_step % self.run_evals_after == 0
                     or global_step == total_steps - 1
@@ -862,14 +599,27 @@ class Trainer:
                         step=step, global_step=global_step, total_flops=flops_so_far
                     )
 
-                    # self.evaluator.sample_from_model(
-                    #     num_sequences=self.config.generation_num_samples,
-                    #     max_length=1024,
-                    #     context=sample_context,
-                    #     step=step,
-                    # )
+                    # Sample text from model to qualitatively assess what it's learning
+                    # Loss numbers are useful but seeing actual generations gives intuition
+                    if self.config.enable_sampling and self.master_process:
+                        print(f"\n{'='*80}")
+                        print(f"📝 SAMPLING FROM MODEL (Step {global_step})")
+                        print(f"{'='*80}\n")
 
-                # Run CORE evaluations if enabled (separate interval from val loss)
+                        for i, context in enumerate(self.sample_contexts, 1):
+                            print(
+                                f"Context {i}/{len(self.sample_contexts)}: {context[:50]}..."
+                            )
+                            self.evaluator.sample_from_model(
+                                num_sequences=1,
+                                max_length=self.config.generation_max_length,
+                                context=context,
+                                step=step,
+                            )
+                        print(f"{'='*80}\n")
+
+                # Run CORE benchmark evaluations (separate interval, usually less frequent than val loss)
+                # These measure actual downstream task performance (not just perplexity)
                 should_eval_core = (
                     global_step % self.run_core_evals_after == 0
                     or global_step == total_steps - 1
@@ -879,17 +629,16 @@ class Trainer:
                         step=step, global_step=global_step
                     )
 
-                # Save checkpoint at intervals or at end of training (independent of evals)
-                if self.sft_training:
-                    checkpoint_interval = self.config.checkpoint_interval_sft
-                elif self.mid_training:
-                    checkpoint_interval = self.config.checkpoint_interval_midtrain
-                else:
-                    checkpoint_interval = self.config.checkpoint_interval_pretrain
-
+                # Save checkpoint periodically (for resuming training or rollover to SFT)
+                # Save raw_model not DDP-wrapped model (cleaner state_dict without module. prefix)
+                checkpoint_interval = (
+                    self.config.checkpoint_interval_sft
+                    if self.sft_training
+                    else self.config.checkpoint_interval_pretrain
+                )
                 save_checkpoint(
-                    model=self.raw_model,  # Pass unwrapped model for clean state_dict
-                    optimizer=self.optimizers,  # Pass all optimizers (AdamW + Muon if enabled)
+                    model=self.raw_model,
+                    optimizer=self.optimizers,
                     step=step,
                     epoch=epoch,
                     global_step=global_step,
@@ -900,28 +649,19 @@ class Trainer:
                     max_steps=self.max_steps,
                     num_epochs=self.num_epochs,
                     master_process=self.master_process,
-                    mid_training=self.mid_training,
                     sft_training=self.sft_training,
+                    depth=self.config.depth,
                 )
 
-                # Log metrics to wandb
+                # Log metrics to WandB (only master process logs to avoid duplicates)
                 if self.master_process:
                     train_loss = loss_accumulator.item()
-                    # # Compute train BPB
-                    # total_bytes_val = total_bytes.item()
-                    # if total_bytes_val > 0:
-                    #     train_bpb = total_nats.item() / (math.log(2) * total_bytes_val)
-                    # else:
-                    #     train_bpb = float("inf")
 
-                    # Build logging dict with base metrics
+                    # Build metrics dictionary for logging
                     log_dict = {
-                        # "epoch": epoch,
-                        # "epoch_step": step,
                         "step": global_step,
                         "train_loss": train_loss,
-                        # "train_bpb": train_bpb,
-                        "lr_multiplier": lr,  # LR schedule multiplier (for reference)
+                        "lr_multiplier": lr,
                         "tokens_per_second": tokens_per_second,
                         "time_taken": end_time - start_time,
                         "gradient_norm": norm,
@@ -930,63 +670,37 @@ class Trainer:
                         "mfu": mfu,
                     }
 
-                    # ===== Log Learning Rates =====
-                    # We use separate LRs for different parameter types (nanochat-style):
-                    # - Embeddings: Fast learning (default 0.3) - adapts token representations quickly
-                    # - Unembedding: Slow learning (default 0.004) - stable output distribution
-                    # - Matrices: Medium learning (default 0.02) - core transformer weights with Muon
-                    # - Scalars/Biases: Fast learning (default 0.5) - small params adjust quickly
+                    # Log per-parameter-group learning rates
+                    # We use different LRs for different parameter types because they learn at different rates:
+                    # - Embeddings (0.3): Fast learning - token representations need to adjust quickly
+                    # - Unembedding (0.004): Slow learning - output distribution should be stable
+                    # - Matrices (0.02): Medium learning - core transformer weights
+                    # - Scalars/Biases (0.5): Fast learning - few parameters, can move quickly
+                    opt = self.optimizers[0]
+                    adamw_groups = [
+                        g for g in opt.param_groups if g.get("kind") == "adamw"
+                    ]
+                    muon_groups = [
+                        g for g in opt.param_groups if g.get("kind") == "muon"
+                    ]
 
-                    if self.use_muon:
-                        # Combined optimizer (nanochat-style) or legacy dual optimizer
-                        opt = self.optimizers[0]
+                    if len(adamw_groups) >= 3:
+                        log_dict["lr/unembedding"] = adamw_groups[0]["lr"]
+                        log_dict["lr/embedding"] = adamw_groups[1]["lr"]
+                        log_dict["lr/scalar"] = adamw_groups[2]["lr"]
 
-                        # Iterate through param_groups to find specific types
-                        adamw_groups = [
-                            g for g in opt.param_groups if g.get("kind") == "adamw"
-                        ]
-                        muon_groups = [
-                            g for g in opt.param_groups if g.get("kind") == "muon"
-                        ]
-
-                        # Log AdamW learning rates (expect 3 groups: lm_head, embeddings, scalars)
-                        if len(adamw_groups) >= 3:
-                            log_dict["lr/unembedding"] = adamw_groups[0][
-                                "lr"
-                            ]  # lm_head
-                            log_dict["lr/embedding"] = adamw_groups[1][
-                                "lr"
-                            ]  # embeddings
-                            log_dict["lr/scalar"] = adamw_groups[2][
-                                "lr"
-                            ]  # scalars/biases
-
-                        # Log Muon learning rate and hyperparameters
-                        if len(muon_groups) > 0:
-                            log_dict["lr/matrix"] = muon_groups[0][
-                                "lr"
-                            ]  # All 2D transformer matrices
-
-                            # Log Muon-specific hyperparameters
-                            if "momentum" in muon_groups[0]:
-                                log_dict["muon/momentum"] = muon_groups[0]["momentum"]
-                            if "weight_decay" in muon_groups[0]:
-                                log_dict["muon/weight_decay"] = muon_groups[0][
-                                    "weight_decay"
-                                ]
-                    else:
-                        # For standard AdamW-only training (no Muon), just log main LR
-                        if (
-                            len(self.optimizers) > 0
-                            and len(self.optimizers[0].param_groups) > 0
-                        ):
-                            log_dict["lr/main"] = self.optimizers[0].param_groups[0][
-                                "lr"
+                    if len(muon_groups) > 0:
+                        log_dict["lr/matrix"] = muon_groups[0]["lr"]
+                        if "momentum" in muon_groups[0]:
+                            log_dict["muon/momentum"] = muon_groups[0]["momentum"]
+                        if "weight_decay" in muon_groups[0]:
+                            log_dict["muon/weight_decay"] = muon_groups[0][
+                                "weight_decay"
                             ]
 
                     wandb.log(log_dict)
 
-                    # Print comprehensive training statistics
+                    # Print training progress (helps with monitoring long runs)
                     progress = (global_step + 1) / total_steps * 100
                     print(
                         f"[Epoch {epoch+1}/{self.num_epochs}] [Step {step:>5}/{self.max_steps}] ({progress:>5.1f}%) | "
@@ -998,7 +712,6 @@ class Trainer:
                         f"Time: {end_time - start_time:.2f}s"
                     )
 
-                # Increment global step counter
                 global_step += 1
 
             # Run ChatCORE evaluation after each epoch
@@ -1024,11 +737,156 @@ class Trainer:
                         print(f"   {task_name}: {accuracy:.2%} ({correct}/{total})")
                     print("=" * 80 + "\n")
 
-        # Training complete
+        # ===== Training complete - cleanup and final reporting =====
+        training_end_time = time.time()
+        total_training_time = training_end_time - training_start_time
+
+        # Print and log dataloader packing stats (master only, aggregated across all ranks)
+        # High crop % is fine for pretraining (we see all tokens eventually)
+        # High crop % is concerning for SFT (we're wasting instruction-following examples)
+        if hasattr(self.train_dataloader, "get_stats"):
+            try:
+                # Get per-rank stats (already aggregated across dataloader workers)
+                stats = self.train_dataloader.get_stats()
+
+                # Aggregate stats across all GPU ranks using torch.distributed.all_reduce
+                if self.ddp:
+                    # Pack stats into tensor for all_reduce (SUM operation)
+                    # Order matters - must unpack in same order
+                    stats_tensor = torch.tensor(
+                        [
+                            stats["total_tokens"],
+                            stats["processed_tokens"],
+                            stats["cropped_tokens"],
+                            stats["dropped_tokens"],
+                            stats["dropped_files"],
+                            stats["buffer_overflows"],
+                            stats["corrupted_docs"],
+                            stats["empty_docs"],
+                        ],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+
+                    # Sum stats from all ranks
+                    torch.distributed.all_reduce(
+                        stats_tensor, op=torch.distributed.ReduceOp.SUM
+                    )
+
+                    # Unpack aggregated stats back to dict
+                    stats["total_tokens"] = stats_tensor[0].item()
+                    stats["processed_tokens"] = stats_tensor[1].item()
+                    stats["cropped_tokens"] = stats_tensor[2].item()
+                    stats["dropped_tokens"] = stats_tensor[3].item()
+                    stats["dropped_files"] = stats_tensor[4].item()
+                    stats["buffer_overflows"] = stats_tensor[5].item()
+                    stats["corrupted_docs"] = stats_tensor[6].item()
+                    stats["empty_docs"] = stats_tensor[7].item()
+
+                    # Recalculate percentages with global totals
+                    stats["cropped_tokens_pct"] = (
+                        100.0 * stats["cropped_tokens"] / max(1, stats["total_tokens"])
+                    )
+                    stats["dropped_tokens_pct"] = (
+                        100.0 * stats["dropped_tokens"] / max(1, stats["total_tokens"])
+                    )
+                    total_waste = stats["cropped_tokens"] + stats["dropped_tokens"]
+                    stats["total_waste_pct"] = (
+                        100.0 * total_waste / max(1, stats["total_tokens"])
+                    )
+
+                # Only master prints and logs (all ranks now have same stats after all_reduce)
+                if self.master_process:
+                    rank_label = (
+                        f"All {self.ddp_world_size} Ranks"
+                        if self.ddp
+                        else "Single Process"
+                    )
+                    print(f"\n{'='*80}")
+                    print(f"📦 DATALOADER PACKING STATS (Final - {rank_label})")
+                    print(f"{'='*80}")
+                    print(f"   Total tokens received: {stats['total_tokens']:,}")
+                    print(
+                        f"   Processed tokens (packed): {stats['processed_tokens']:,}"
+                    )
+                    print(
+                        f"   Cropped tokens: {stats['cropped_tokens']:,} ({stats['cropped_tokens_pct']:.2f}%)"
+                    )
+                    print(
+                        f"   Dropped tokens: {stats['dropped_tokens']:,} ({stats['dropped_tokens_pct']:.2f}%)"
+                    )
+                    print(f"   Total waste: {stats['total_waste_pct']:.2f}%")
+                    print(f"   Dropped files: {stats['dropped_files']:,}")
+                    print(f"   Buffer overflows: {stats['buffer_overflows']}")
+                    print(f"   Corrupted docs: {stats['corrupted_docs']:,}")
+                    print(f"   Empty docs: {stats['empty_docs']:,}")
+                    print(f"{'='*80}\n")
+
+                    # Log dataloader stats to wandb
+                    wandb.log(
+                        {
+                            "dataloader/total_tokens": stats["total_tokens"],
+                            "dataloader/processed_tokens": stats["processed_tokens"],
+                            "dataloader/cropped_tokens": stats["cropped_tokens"],
+                            "dataloader/cropped_tokens_pct": stats[
+                                "cropped_tokens_pct"
+                            ],
+                            "dataloader/dropped_tokens": stats["dropped_tokens"],
+                            "dataloader/dropped_tokens_pct": stats[
+                                "dropped_tokens_pct"
+                            ],
+                            "dataloader/total_waste_pct": stats["total_waste_pct"],
+                            "dataloader/dropped_files": stats["dropped_files"],
+                            "dataloader/buffer_overflows": stats["buffer_overflows"],
+                            "dataloader/corrupted_docs": stats["corrupted_docs"],
+                            "dataloader/empty_docs": stats["empty_docs"],
+                        }
+                    )
+            except Exception as e:
+                if self.master_process:
+                    print(f"⚠️  Could not retrieve dataloader stats: {e}")
+
         if self.master_process:
+            # Print final training summary
+            hours = int(total_training_time // 3600)
+            minutes = int((total_training_time % 3600) // 60)
+            seconds = int(total_training_time % 60)
+
+            if hours > 0:
+                time_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                time_str = f"{minutes}m {seconds}s"
+            else:
+                time_str = f"{seconds}s"
+
             print("\n" + "=" * 80)
             print("✅ TRAINING COMPLETE!")
+            print("=" * 80)
+            print(f"⏱️  Total training time: {time_str} ({total_training_time:.2f}s)")
+            print(f"📊 Total steps completed: {global_step:,}")
+            print(f"📊 Average time per step: {total_training_time/global_step:.2f}s")
             print("=" * 80 + "\n")
 
-        # Finish wandb run
-        wandb.finish()
+            # Close wandb (master only)
+            wandb.finish()
+
+        # Gracefully shutdown dataloaders (ALL processes must do this!)
+        # Each GPU rank has its own dataloader with worker processes that need cleanup
+        self._cleanup_dataloaders()
+
+    def _cleanup_dataloaders(self):
+        """Gracefully shutdown dataloader workers."""
+        # Stop train dataloader workers
+        if hasattr(self.train_dataloader, "cleanup"):
+            self.train_dataloader.cleanup()
+            time.sleep(0.5)  # Give workers time to shutdown
+
+        # Stop eval dataloader workers
+        if (
+            self.evaluator is not None
+            and hasattr(self.evaluator, "eval_dataloader")
+            and self.evaluator.eval_dataloader is not None
+            and hasattr(self.evaluator.eval_dataloader, "cleanup")
+        ):
+            self.evaluator.eval_dataloader.cleanup()
+            time.sleep(0.5)

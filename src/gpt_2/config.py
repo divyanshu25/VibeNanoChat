@@ -60,23 +60,15 @@ class GPTConfig:
     num_iterations: int = (
         -1
     )  # Explicit number of optimization steps (-1 = calculate from ratio/flops)
-    target_flops: float = 1e18  # Target total FLOPs (-1 = use param_data_ratio instead)
-    target_param_data_ratio: int = -1  # Data:param ratio (Chinchilla optimal = 20)
+    target_flops: float = -1  # Target total FLOPs (-1 = use param_data_ratio instead)
+    target_param_data_ratio: int = 10  # Data:param ratio (Chinchilla optimal = 20)
 
     # ========================================================================
     # Learning Rate Schedule (Nanochat-style)
     # ========================================================================
     # NOTE: Training steps are automatically calculated from target_param_data_ratio,
     # target_flops, or num_iterations (see "Training horizon" section above).
-    # The trainer computes steps dynamically for all phases (pretrain/midtrain/sft).
-
-    max_learning_rate: float = 6e-4  # Peak learning rate (for AdamW optimizer)
-    min_lr_ratio: float = 0.1  # Minimum LR as fraction of peak (0.1 = 10% of peak)
-
-    # Warmup steps for each training phase (as fraction of max_steps)
-    lr_warmup_ratio_pretrain: float = 0.1  # Warmup as fraction of total steps (10%)
-    lr_warmup_ratio_midtrain: float = 0.2  # Warmup as fraction of total steps (10%)
-    lr_warmup_ratio_sft: float = 0.4  # Warmup as fraction of total steps (10%)
+    # The trainer computes steps dynamically for all phases (pretrain/sft).
 
     # ========================================================================
     # Optimizer Configuration (Nanochat-style per-parameter-group LRs)
@@ -96,17 +88,28 @@ class GPTConfig:
     warmdown_ratio: float = 0.4  # Ratio of iterations for LR warmdown
     final_lr_frac: float = 0.0  # Final LR as fraction of initial LR
 
-    # Legacy parameter (for backward compatibility)
-    muon_lr: float = 0.02  # Learning rate for Muon optimizer (nanochat default: 0.02)
-
     # ========================================================================
     # Data Directories
     # ========================================================================
-    data_dir_pretrain: str = "/sensei-fs/users/divgoyal/fineweb_edu"
-    data_dir_midtrain: str = "/sensei-fs/users/divgoyal/nanochat_midtraining_data"
+    # Standard binary dataloaders (streaming, no BOS alignment):
+    # Parquet dataloader (BOS-aligned, nanochat-style) - now the only option
+    data_dir_pretrain_parquet: str = "/sensei-fs/users/divgoyal/fineweb_edu_parquet"
+
     sft_cache_dir: str = (
-        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # Cache dir for SFT datasets
+        "/sensei-fs/users/divgoyal/sft_cache"  # Cache dir for SFT datasets
     )
+
+    # ========================================================================
+    # Dataloader Configuration
+    # ========================================================================
+    bos_dataloader_buffer_size: int = (
+        4096  # Document buffer size for BOS-aligned packing (increased for 4 workers × 2 prefetch)
+    )
+    dataloader_num_workers: int = 4  # Number of DataLoader workers for parallel I/O
+    dataloader_prefetch_factor: int = (
+        4  # Batches to prefetch per worker (4 total with 2 workers)
+    )
+    dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
 
     # ========================================================================
     # Checkpointing
@@ -114,37 +117,47 @@ class GPTConfig:
     checkpoint_interval_pretrain: int = (
         5000  # Save checkpoint every N global steps (pretraining)
     )
-    checkpoint_interval_midtrain: int = (
-        400  # Save checkpoint every N global steps (mid-training)
-    )
     checkpoint_interval_sft: int = 100  # Save checkpoint every N global steps (SFT)
 
     # ========================================================================
     # Evaluation Schedule
     # ========================================================================
     eval_interval: int = (
-        500  # Run validation loss evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
+        2000  # Run validation loss evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
     )
     core_eval_interval: int = (
         2000  # Run CORE benchmark evaluations every N global steps (note: defaults to adaptive based on total_steps if not overridden)
     )
-    val_loss_eval_batches: int = (
-        76  # Number of batches for validation loss estimation (max safe value for 5M tokens with DDP)
+    val_loss_eval_tokens: int | None = (
+        10485760  # Number of tokens for validation loss estimation (None = use nanochat default: 20 * 524288 = ~10.5M tokens)
     )
 
     # ========================================================================
     # Generation Sampling (during evaluation)
     # ========================================================================
+    enable_sampling: bool = True  # Enable text generation sampling during training
     generation_num_samples: int = 4  # Number of sequences to generate per evaluation
     generation_max_length: int = 256  # Maximum tokens per generated sequence
     generation_seed: int = 42  # Random seed for reproducible generation
-    use_kv_cache: bool = True  # Enable KV caching for faster generation (3-10x speedup)
+    use_kv_cache: bool = (
+        False  # Enable KV caching for faster generation (3-10x speedup)
+    )
+    generation_verbose: bool = (
+        False  # Print verbose progress during generation (every 10 tokens)
+    )
+    generation_temperature: float = (
+        0.8  # Sampling temperature for generation (higher = more random)
+    )
+    generation_top_k: int = 50  # Top-k sampling parameter
+    generation_repetition_penalty: float = (
+        1.2  # Penalty for repeating tokens (>1.0 discourages repetition)
+    )
 
     # ========================================================================
     # CORE Benchmark Evaluation (multiple choice tasks)
     # ========================================================================
-    core_eval_max_examples: int = (
-        500  # Max examples per task (for faster evals during training)
+    core_eval_max_examples: int | None = (
+        500  # Max examples per task (None = all examples, int = limit for faster evals)
     )
 
     # ========================================================================
@@ -158,7 +171,7 @@ class GPTConfig:
     chat_core_temperature: float = 0.0  # Sampling temperature (0.0 = greedy decoding)
     chat_core_top_k: int = 50  # Top-k filtering for sampling
     chat_core_hf_cache_dir: str = (
-        "/sensei-fs/users/divgoyal/nanochat_midtraining_data"  # HuggingFace cache directory for datasets
+        "/sensei-fs/users/divgoyal/sft_cache"  # HuggingFace cache directory for datasets
     )
 
     def __post_init__(self):

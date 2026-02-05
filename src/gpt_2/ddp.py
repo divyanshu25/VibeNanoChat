@@ -9,9 +9,7 @@ for nanochat-style depth parameterization and hybrid AdamW+Muon optimization.
 Training Modes
 --------------
     - pretraining:  Train from scratch on general data (e.g., FineWeb-Edu)
-    - mid-training: Continue from checkpoint on specialized data (e.g., task mixtures)
     - sft:          Supervised fine-tuning with conversation data (multiplex dataloader)
-    - all:          Full pipeline (pretrain → mid-train → sft) automatically
 
 Architecture Parameterization
 -----------------------------
@@ -36,20 +34,16 @@ Usage Examples
     # Multi-GPU pretraining with 4 GPUs
     torchrun --nproc_per_node=4 ddp.py --mode pretraining --depth 12 --target-flops 1e18
 
-    # Mid-training from checkpoint with AdamW-only
-    torchrun --nproc_per_node=4 ddp.py --mode mid-training --checkpoint path/to/ckpt.pt --no-muon
-
-    # Full pipeline with CORE evaluations
-    torchrun --nproc_per_node=4 ddp.py --mode all --depth 12 --run-core-evals
+    # SFT from checkpoint with AdamW-only
+    torchrun --nproc_per_node=4 ddp.py --mode sft --checkpoint path/to/ckpt.pt --no-muon
 
 Module Structure
 ----------------
     1. setup_distributed()    - Initialize DDP environment
     2. run_pretraining()      - Execute pretraining phase
-    3. run_midtraining()      - Execute mid-training phase
-    4. run_sft()              - Execute SFT phase
-    5. run_trainer()          - Main orchestration function
-    6. Argument parser        - Command-line interface
+    3. run_sft()              - Execute SFT phase
+    4. run_trainer()          - Main orchestration function
+    5. Argument parser        - Command-line interface
 """
 
 import argparse
@@ -176,9 +170,9 @@ def run_pretraining(
     aspect_ratio=None,
     head_dim=None,
     target_flops=None,
+    param_data_ratio=None,
     eval_interval=None,
     core_eval_interval=None,
-    use_muon=True,
 ):
     """
     Execute the pretraining phase.
@@ -202,9 +196,9 @@ def run_pretraining(
         aspect_ratio (int, optional): Aspect ratio for depth mode
         head_dim (int, optional): Target head dimension
         target_flops (float, optional): Target total FLOPs for training
+        param_data_ratio (int, optional): Token:Param ratio (Chinchilla optimal = 20)
         eval_interval (int, optional): Steps between validation evaluations
         core_eval_interval (int, optional): Steps between CORE evaluations
-        use_muon (bool): Use hybrid AdamW+Muon optimizer (default: True)
 
     Returns:
         str: Path to the final checkpoint saved after pretraining
@@ -224,10 +218,6 @@ def run_pretraining(
     # -----------------------------------------------------------------------
     # Initialize Trainer for Pretraining
     # -----------------------------------------------------------------------
-    # mid_training=False tells the trainer to use:
-    #   - Pretraining data (FineWeb-Edu)
-    #   - Pretraining hyperparameters (LR schedule, warmup ratio, etc.)
-    #   - Pretraining checkpoint interval
     checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
     trainer = Trainer(
@@ -240,7 +230,6 @@ def run_pretraining(
         run_evals=run_evals,
         run_core_evals=run_core_evals,
         run_chatcore_evals=run_chatcore_evals,
-        mid_training=False,  # Use pretraining configuration
         checkpoint_path=checkpoint_path,  # Resume from checkpoint if provided
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
@@ -248,13 +237,13 @@ def run_pretraining(
         aspect_ratio=aspect_ratio,
         head_dim=head_dim,
         target_flops=target_flops,
+        param_data_ratio=param_data_ratio,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
-        use_muon=use_muon,
     )
     trainer.train()
 
-    # Construct path to the final checkpoint for potential mid-training continuation
+    # Construct path to the final checkpoint
     checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints"
     # The actual filename format: model_checkpoint_global{global_step}_pretraining.pt
     final_global_step = (trainer.max_steps * trainer.num_epochs) - 1
@@ -264,123 +253,6 @@ def run_pretraining(
 
     if master_process:
         print(f"\n✅ Pretraining complete! Final checkpoint: {final_checkpoint}\n")
-
-    return final_checkpoint
-
-
-def run_midtraining(
-    ddp,
-    ddp_rank,
-    ddp_local_rank,
-    ddp_world_size,
-    master_process,
-    device,
-    run_evals,
-    run_core_evals=False,
-    run_chatcore_evals=False,
-    checkpoint_path=None,
-    depth=None,
-    aspect_ratio=None,
-    head_dim=None,
-    eval_interval=None,
-    core_eval_interval=None,
-    use_muon=True,
-):
-    """
-    Execute the mid-training phase.
-
-    Mid-training continues from a pretrained checkpoint and trains on
-    specialized data (e.g., task mixtures, domain-specific data). This
-    adapts the model's capabilities for specific downstream tasks while
-    retaining general language understanding.
-
-    Args:
-        ddp (bool): Whether DDP is enabled
-        ddp_rank (int): Global process rank
-        ddp_local_rank (int): Local rank for GPU assignment
-        ddp_world_size (int): Total number of processes
-        master_process (bool): Whether this is the main process
-        device (str): Device to train on
-        run_evals (bool): Whether to run evaluations during training
-        run_core_evals (bool): Whether to run CORE benchmark evaluations
-        run_chatcore_evals (bool): Whether to run ChatCORE evaluations
-        checkpoint_path (str): Path to pretrained checkpoint to resume from
-        depth (int, optional): Model depth for nanochat-style architecture
-        aspect_ratio (int, optional): Aspect ratio for depth mode
-        head_dim (int, optional): Target head dimension
-        eval_interval (int, optional): Steps between validation evaluations
-        core_eval_interval (int, optional): Steps between CORE evaluations
-        use_muon (bool): Use hybrid AdamW+Muon optimizer (default: True)
-
-    Returns:
-        str: Path to the final checkpoint saved after mid-training
-
-    Raises:
-        ValueError: If checkpoint_path is not provided
-        FileNotFoundError: If the checkpoint file doesn't exist
-    """
-    # -----------------------------------------------------------------------
-    # Status Message (Master Process Only)
-    # -----------------------------------------------------------------------
-    if master_process:
-        print("\n" + "=" * 80)
-        print("🔄 STARTING MID-TRAINING PHASE")
-        print("=" * 80 + "\n")
-
-    # -----------------------------------------------------------------------
-    # Checkpoint Validation
-    # -----------------------------------------------------------------------
-    # Mid-training REQUIRES a pretrained checkpoint to continue from
-    if not checkpoint_path:
-        raise ValueError(
-            "Checkpoint path is required for mid-training. Use --checkpoint flag."
-        )
-
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    # -----------------------------------------------------------------------
-    # Initialize Trainer for Mid-Training
-    # -----------------------------------------------------------------------
-    # mid_training=True tells the trainer to use:
-    #   - Mid-training data (specialized task mixtures)
-    #   - Mid-training hyperparameters (LR schedule, warmup ratio, etc.)
-    #   - Mid-training checkpoint interval
-    #   - Loads model weights from the provided checkpoint
-    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    trainer = Trainer(
-        ddp=ddp,
-        ddp_rank=ddp_rank,
-        ddp_local_rank=ddp_local_rank,
-        ddp_world_size=ddp_world_size,
-        master_process=master_process,
-        device=device,
-        run_evals=run_evals,
-        run_core_evals=run_core_evals,
-        run_chatcore_evals=run_chatcore_evals,
-        mid_training=True,  # Use mid-training configuration
-        checkpoint_path=checkpoint_path,  # Resume from this checkpoint
-        checkpoint_dir=checkpoint_dir,
-        token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
-        depth=depth,
-        aspect_ratio=aspect_ratio,
-        head_dim=head_dim,
-        eval_interval=eval_interval,
-        core_eval_interval=core_eval_interval,
-        use_muon=use_muon,
-    )
-    trainer.train()
-
-    # Construct path to the final checkpoint
-    checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
-    final_global_step = (trainer.max_steps * trainer.num_epochs) - 1
-    final_checkpoint = os.path.join(
-        checkpoint_dir, f"model_checkpoint_global{final_global_step}_midtraining.pt"
-    )
-
-    if master_process:
-        print(f"\n✅ Mid-training complete! Final checkpoint: {final_checkpoint}\n")
 
     return final_checkpoint
 
@@ -401,12 +273,11 @@ def run_sft(
     head_dim=None,
     eval_interval=None,
     core_eval_interval=None,
-    use_muon=True,
 ):
     """
     Execute the SFT (Supervised Fine-Tuning) phase.
 
-    SFT continues from a mid-training checkpoint and trains on conversation data
+    SFT continues from a pretrained checkpoint and trains on conversation data
     using the multiplex dataloader. This adapts the model for chat and instruction
     following capabilities.
 
@@ -420,13 +291,12 @@ def run_sft(
         run_evals (bool): Whether to run evaluations during training
         run_core_evals (bool): Whether to run CORE benchmark evaluations
         run_chatcore_evals (bool): Whether to run ChatCORE evaluations (runs after each epoch if enabled)
-        checkpoint_path (str): Path to mid-training checkpoint to resume from
+        checkpoint_path (str): Path to pretrained checkpoint to resume from
         depth (int, optional): Model depth for nanochat-style architecture
         aspect_ratio (int, optional): Aspect ratio for depth mode
         head_dim (int, optional): Target head dimension
         eval_interval (int, optional): Steps between validation evaluations
         core_eval_interval (int, optional): Steps between CORE evaluations
-        use_muon (bool): Use hybrid AdamW+Muon optimizer (default: True)
 
     Returns:
         str: Path to the final checkpoint saved after SFT
@@ -446,7 +316,7 @@ def run_sft(
     # -----------------------------------------------------------------------
     # Checkpoint Validation
     # -----------------------------------------------------------------------
-    # SFT REQUIRES a mid-training checkpoint to continue from
+    # SFT REQUIRES a pretrained checkpoint to continue from
     if not checkpoint_path:
         raise ValueError("Checkpoint path is required for SFT. Use --checkpoint flag.")
 
@@ -460,7 +330,7 @@ def run_sft(
     #   - SFT data (conversation data via multiplex dataloader)
     #   - SFT hyperparameters (LR schedule, warmup ratio, etc.)
     #   - SFT checkpoint interval
-    #   - Loads model weights from the provided mid-training checkpoint
+    #   - Loads model weights from the provided pretrained checkpoint
     checkpoint_dir = "/sensei-fs/users/divgoyal/nanogpt/sft_checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
     trainer = Trainer(
@@ -474,7 +344,7 @@ def run_sft(
         run_core_evals=run_core_evals,
         run_chatcore_evals=run_chatcore_evals,
         sft_training=True,  # Use SFT configuration
-        checkpoint_path=checkpoint_path,  # Rollover from mid-training checkpoint
+        checkpoint_path=checkpoint_path,  # Load from pretrained checkpoint
         checkpoint_dir=checkpoint_dir,
         token_bytes_path="/mnt/localssd/VibeNanoChat/data/token_bytes.pt",
         depth=depth,
@@ -482,7 +352,6 @@ def run_sft(
         head_dim=head_dim,
         eval_interval=eval_interval,
         core_eval_interval=core_eval_interval,
-        use_muon=use_muon,
     )
     trainer.train()
 
@@ -514,20 +383,17 @@ def run_trainer(args):
 
     Training Modes:
         - pretraining:  Train from scratch (or resume) on general data
-        - mid-training: Continue from pretrained checkpoint on specialized data
-        - sft:          Supervised fine-tuning from mid-training checkpoint
-        - all:          Full pipeline (pretrain → mid-train → sft)
+        - sft:          Supervised fine-tuning from pretrained checkpoint
 
     Args:
         args: Parsed command-line arguments containing:
-            - mode: Training mode (pretraining/mid-training/sft/all)
-            - checkpoint: Path to checkpoint (for mid-training/sft/resume)
+            - mode: Training mode (pretraining/sft)
+            - checkpoint: Path to checkpoint (for sft/resume)
             - run_evals: Whether to run evaluations
             - run_core_evals: Whether to run CORE benchmark evaluations
             - run_chatcore_evals: Whether to run ChatCORE evaluations
             - depth, aspect_ratio, head_dim: Architecture parameters
             - target_flops: Target compute budget
-            - use_muon: Whether to use hybrid AdamW+Muon optimizer
     """
     # -----------------------------------------------------------------------
     # Initialize Distributed Environment
@@ -563,41 +429,16 @@ def run_trainer(args):
                 aspect_ratio=args.aspect_ratio,
                 head_dim=args.head_dim,
                 target_flops=args.target_flops,
+                param_data_ratio=args.param_data_ratio,
                 eval_interval=args.eval_interval,
                 core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
             )
 
         # -------------------------------------------------------------------
-        # Mode 2: Mid-Training Only
+        # Mode 2: SFT (Supervised Fine-Tuning)
         # -------------------------------------------------------------------
-        # Continue from pretrained checkpoint with specialized data
+        # Continue from pretrained checkpoint with conversation data
         # Requires: --checkpoint (path to pretrained model)
-        elif args.mode == "mid-training":
-            run_midtraining(
-                ddp,
-                ddp_rank,
-                ddp_local_rank,
-                ddp_world_size,
-                master_process,
-                device,
-                args.run_evals,
-                run_core_evals=args.run_core_evals,
-                run_chatcore_evals=args.run_chatcore_evals,
-                checkpoint_path=args.checkpoint,
-                depth=args.depth,
-                aspect_ratio=args.aspect_ratio,
-                head_dim=args.head_dim,
-                eval_interval=args.eval_interval,
-                core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
-            )
-
-        # -------------------------------------------------------------------
-        # Mode 3: SFT (Supervised Fine-Tuning) Only
-        # -------------------------------------------------------------------
-        # Continue from mid-training checkpoint with conversation data
-        # Requires: --checkpoint (path to mid-trained model)
         # Uses: Multiplex dataloader for conversation data
         elif args.mode == "sft":
             run_sft(
@@ -616,119 +457,11 @@ def run_trainer(args):
                 head_dim=args.head_dim,
                 eval_interval=args.eval_interval,
                 core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
             )
-
-        # -------------------------------------------------------------------
-        # Mode 4: Full Pipeline (Pretrain → Mid-train → SFT)
-        # -------------------------------------------------------------------
-        # Execute complete training pipeline from scratch to chat model
-        # Each phase outputs a checkpoint used by the next phase
-        # This is useful for end-to-end experiments
-        elif args.mode == "all":
-            if master_process:
-                print("\n" + "=" * 80)
-                print("🎯 RUNNING FULL PIPELINE: PRETRAINING → MID-TRAINING → SFT")
-                print("=" * 80 + "\n")
-
-            # ---------------------------------------------------------------
-            # Phase 1: Pretraining
-            # ---------------------------------------------------------------
-            # Train from scratch on general data (FineWeb-Edu)
-            # Returns checkpoint path for next phase
-            checkpoint_path = run_pretraining(
-                ddp,
-                ddp_rank,
-                ddp_local_rank,
-                ddp_world_size,
-                master_process,
-                device,
-                args.run_evals,
-                run_core_evals=args.run_core_evals,
-                run_chatcore_evals=False,  # Don't run chatcore in pretraining
-                depth=args.depth,
-                aspect_ratio=args.aspect_ratio,
-                head_dim=args.head_dim,
-                target_flops=args.target_flops,
-                eval_interval=args.eval_interval,
-                core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
-            )
-
-            # ---------------------------------------------------------------
-            # Transition: Pretrain → Mid-train
-            # ---------------------------------------------------------------
-            if master_process:
-                print("\n" + "=" * 80)
-                print("🔄 TRANSITIONING TO MID-TRAINING")
-                print(f"📂 Using checkpoint: {checkpoint_path}")
-                print("=" * 80 + "\n")
-
-            # ---------------------------------------------------------------
-            # Phase 2: Mid-Training
-            # ---------------------------------------------------------------
-            # Continue from pretrained checkpoint with specialized data
-            # Returns checkpoint path for SFT phase
-            checkpoint_path = run_midtraining(
-                ddp,
-                ddp_rank,
-                ddp_local_rank,
-                ddp_world_size,
-                master_process,
-                device,
-                args.run_evals,
-                run_core_evals=args.run_core_evals,
-                run_chatcore_evals=False,  # Don't run chatcore in midtraining for full pipeline
-                checkpoint_path=checkpoint_path,
-                depth=args.depth,
-                aspect_ratio=args.aspect_ratio,
-                head_dim=args.head_dim,
-                eval_interval=args.eval_interval,
-                core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
-            )
-
-            # ---------------------------------------------------------------
-            # Transition: Mid-train → SFT
-            # ---------------------------------------------------------------
-            if master_process:
-                print("\n" + "=" * 80)
-                print("🔄 TRANSITIONING TO SFT")
-                print(f"📂 Using checkpoint: {checkpoint_path}")
-                print("=" * 80 + "\n")
-
-            # ---------------------------------------------------------------
-            # Phase 3: SFT (Supervised Fine-Tuning)
-            # ---------------------------------------------------------------
-            # Continue from mid-trained checkpoint with conversation data
-            # Final phase produces chat-capable model
-            run_sft(
-                ddp,
-                ddp_rank,
-                ddp_local_rank,
-                ddp_world_size,
-                master_process,
-                device,
-                args.run_evals,
-                run_core_evals=args.run_core_evals,
-                run_chatcore_evals=args.run_chatcore_evals,
-                checkpoint_path=checkpoint_path,
-                depth=args.depth,
-                aspect_ratio=args.aspect_ratio,
-                head_dim=args.head_dim,
-                eval_interval=args.eval_interval,
-                core_eval_interval=args.core_eval_interval,
-                use_muon=args.use_muon,
-            )
-
-            if master_process:
-                print("\n" + "=" * 80)
-                print("🎉 FULL PIPELINE COMPLETE!")
-                print("=" * 80 + "\n")
 
         else:
             raise ValueError(
-                f"Invalid mode: {args.mode}. Choose from: pretraining, mid-training, sft, all"
+                f"Invalid mode: {args.mode}. Choose from: pretraining, sft"
             )
 
     finally:
@@ -748,18 +481,18 @@ if __name__ == "__main__":
     # Command-Line Argument Parser
     # ========================================================================
     parser = argparse.ArgumentParser(
-        description="GPT-2 Training with DDP - Supports pretraining, mid-training, SFT, or full pipeline",
+        description="GPT-2 Training with DDP - Supports pretraining and SFT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Pretraining with 2 GPUs (Muon enabled by default)
   torchrun --nproc_per_node=2 ddp.py --mode pretraining --depth 12
 
-  # Mid-training from checkpoint with AdamW-only
-  torchrun --nproc_per_node=2 ddp.py --mode mid-training --checkpoint path/to/ckpt.pt --no-muon
+  # SFT from checkpoint with AdamW-only
+  torchrun --nproc_per_node=2 ddp.py --mode sft --checkpoint path/to/ckpt.pt --no-muon
 
-  # Full pipeline with CORE evaluations
-  torchrun --nproc_per_node=2 ddp.py --mode all --depth 12 --run-core-evals
+  # Pretraining with CORE evaluations
+  torchrun --nproc_per_node=2 ddp.py --mode pretraining --depth 12 --run-core-evals
         """,
     )
 
@@ -770,16 +503,15 @@ Examples:
         "--mode",
         type=str,
         default="pretraining",
-        choices=["pretraining", "mid-training", "sft", "all"],
-        help="Training mode: 'pretraining' (train from scratch), 'mid-training' (specialized data), "
-        "'sft' (supervised fine-tuning), 'all' (full pipeline)",
+        choices=["pretraining", "sft"],
+        help="Training mode: 'pretraining' (train from scratch), 'sft' (supervised fine-tuning)",
     )
 
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
-        help="Path to checkpoint file (required for mid-training/SFT, optional for pretraining)",
+        help="Path to checkpoint file (required for SFT, optional for pretraining)",
     )
 
     # ========================================================================
@@ -816,6 +548,13 @@ Examples:
         type=float,
         default=None,
         help="Target total FLOPs for training (overrides config.target_flops); useful for scaling laws",
+    )
+
+    parser.add_argument(
+        "--param-data-ratio",
+        type=int,
+        default=None,
+        help="Token:Param ratio for training (overrides config.target_param_data_ratio); Chinchilla optimal = 20",
     )
 
     # ========================================================================
@@ -856,28 +595,14 @@ Examples:
     # ========================================================================
     # Optimizer Configuration
     # ========================================================================
-    # Muon optimizer is enabled by default (nanochat-style hybrid approach)
-    # Use --no-muon to disable and use AdamW-only optimization
-    # Note: Muon LR is configured in config.py (default: 0.02)
-    parser.add_argument(
-        "--no-muon",
-        dest="use_muon",
-        action="store_false",
-        default=True,
-        help="Disable Muon optimizer and use AdamW-only (default: Muon enabled)",
-    )
-
     # Parse and process arguments
     args = parser.parse_args()
     args.run_evals = not args.no_evals  # Convert --no-evals flag to positive boolean
 
     # -----------------------------------------------------------------------
     # Argument Validation
-    # Mid-training and SFT modes require a checkpoint
+    # SFT mode requires a checkpoint
     # -----------------------------------------------------------------------
-    if args.mode == "mid-training" and not args.checkpoint:
-        parser.error("--checkpoint is required when using --mode mid-training")
-
     if args.mode == "sft" and not args.checkpoint:
         parser.error("--checkpoint is required when using --mode sft")
 
