@@ -397,7 +397,6 @@ class FinewebEduParquetBOSDataloader:
         buffer_size: int = 1000,
         device: str = "cuda",
         num_workers: int = 4,
-        prefetch_factor: Optional[int] = 2,
         persistent_workers: bool = True,
         depth: Optional[int] = None,
     ):
@@ -413,9 +412,8 @@ class FinewebEduParquetBOSDataloader:
             split: 'train' (all but last file) or 'val' (last file only)
             buffer_size: Document buffer for best-fit (~1000 works well)
             num_workers: Parallel I/O workers (4 is good default)
-            prefetch_factor: Batches per worker to prefetch (2 hides latency)
             persistent_workers: Keep workers alive across epochs (saves startup)
-            depth: Model depth for auto-scaling dataloader_batch_size (None = use default scaling)
+            depth: Model depth for auto-scaling dataloader_batch_size and prefetch_factor (None = use defaults)
         """
         # input validation
         if not os.path.isdir(data_dir):
@@ -457,6 +455,35 @@ class FinewebEduParquetBOSDataloader:
         except Exception as e:
             raise ValueError(f"Failed to get BOS token from tokenizer: {e}")
 
+        # Determine prefetch_factor based on depth before printing
+        # Scale inversely with model depth (Heuristic)
+        # Deeper models → smaller batch → less data consumed → need fewer docs
+        if depth is not None:
+            # Inverse scaling with depth (matches model_setup.py batch_size scaling)
+            # Conservative multipliers for FineWeb-Edu (long docs)
+            # Format: max_depth: (multiplier, min_docs, prefetch_factor)
+            depth_scaling_config = {
+                8: (4, 256, 1),  # shallow models: high throughput, aggressive prefetch
+                10: (4, 256, 1),  #
+                14: (3, 128, 1),  # medium models: moderate doc buffer
+                18: (2, 128, 1),  # deeper models: reduced buffer, conservative prefetch
+                22: (2, 128, 1),  # deep models: minimal buffer
+                float("inf"): (2, 32, 1),  # very deep models: minimal buffer
+            }
+
+            # Find appropriate config for this depth
+            for max_depth, (multiplier, min_docs, pf) in depth_scaling_config.items():
+                if depth <= max_depth:
+                    dataloader_multiplier = multiplier
+                    min_docs_threshold = min_docs
+                    prefetch_factor = pf
+                    break
+        else:
+            # Defaults for when depth is not specified
+            dataloader_multiplier = 4
+            min_docs_threshold = 64
+            prefetch_factor = 2
+
         if master_process:
             print(f"\n{'='*80}")
             print(f"📚 BOS Dataloader ({split})")
@@ -465,9 +492,7 @@ class FinewebEduParquetBOSDataloader:
             print(
                 f"Batch: {batch_size} × {block_size}, Buffer: {buffer_size}, BOS: {bos_token_id}"
             )
-            print(
-                f"Workers: {num_workers}, Prefetch: {prefetch_factor}, Persistent: {persistent_workers}"
-            )
+            print(f"Workers: {num_workers}, Persistent: {persistent_workers}")
 
         # get parquet files and split: train=all but last, val=last only
         parquet_files = list_parquet_files(data_dir)
@@ -499,40 +524,15 @@ class FinewebEduParquetBOSDataloader:
 
         # DataLoader batch_size = documents per collate call (NOT model batch size!)
         # want enough docs for good best-fit, but not so many that buffer overflows
+        # Use the dataloader_multiplier and min_docs_threshold determined above
+        dataloader_batch_size = max(
+            int(batch_size * dataloader_multiplier), min_docs_threshold
+        )
 
-        # Scale inversely with model depth (Heuristic)
-        # Deeper models → smaller batch → less data consumed → need fewer docs
-        if depth is not None:
-            # Inverse scaling with depth (matches model_setup.py batch_size scaling)
-            # Conservative multipliers for FineWeb-Edu (long docs)
-            # Format: max_depth: (multiplier, min_docs)
-            depth_scaling_config = {
-                8: (4, 128),  # shallow models: high throughput needs more docs
-                10: (4, 96),  #
-                14: (3, 72),  # medium models: moderate doc buffer
-                18: (2, 48),  # deeper models: reduced doc buffer
-                22: (2, 32),  # deep models: conservative doc buffer
-                float("inf"): (2, 32),  # very deep models: minimal doc buffer
-            }
-
-            # Find appropriate config for this depth
-            for max_depth, (multiplier, min_docs) in depth_scaling_config.items():
-                if depth <= max_depth:
-                    dataloader_multiplier = multiplier
-                    min_docs_threshold = min_docs
-                    break
-
-            dataloader_batch_size = max(
-                int(batch_size * dataloader_multiplier), min_docs_threshold
+        if master_process and depth is not None:
+            print(
+                f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs_threshold})"
             )
-
-            if master_process:
-                print(
-                    f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs_threshold})"
-                )
-        else:
-            # Default: batch_size * 4 (was 10) - conservative default
-            dataloader_batch_size = max(batch_size * 4, 64)
 
         # pin_memory enables async CPU→GPU transfers (DMA), only works with workers>0
         use_pin_memory = device.startswith("cuda") and num_workers > 0

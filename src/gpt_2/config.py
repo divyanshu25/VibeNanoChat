@@ -103,12 +103,10 @@ class GPTConfig:
     # Dataloader Configuration
     # ========================================================================
     bos_dataloader_buffer_size: int = (
-        4096  # Document buffer size for BOS-aligned packing (increased for 4 workers × 2 prefetch)
+        4096  # Document buffer size for BOS-aligned packing
     )
     dataloader_num_workers: int = 2  # Number of DataLoader workers for parallel I/O
-    dataloader_prefetch_factor: int = (
-        4  # Batches to prefetch per worker (4 total with 2 workers)
-    )
+    # Note: prefetch_factor is now auto-determined based on model depth (see fineweb_edu_parquet_bos_dataloader.py)
     dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
 
     # ========================================================================
