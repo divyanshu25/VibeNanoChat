@@ -467,7 +467,7 @@ class FinewebEduParquetBOSDataloader:
                 10: (4, 256, 1),  #
                 14: (3, 128, 1),  # medium models: moderate doc buffer
                 18: (2, 128, 1),  # deeper models: reduced buffer, conservative prefetch
-                22: (2, 128, 1),  # deep models: minimal buffer
+                22: (2, 64, 1),  # deep models: minimal buffer
                 float("inf"): (2, 32, 1),  # very deep models: minimal buffer
             }
 
