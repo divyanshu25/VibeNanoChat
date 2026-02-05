@@ -39,6 +39,9 @@ def setup_pretraining_dataloaders(
         "num_workers": config.dataloader_num_workers,
         "prefetch_factor": config.dataloader_prefetch_factor,
         "persistent_workers": config.dataloader_persistent_workers,
+        "depth": (
+            config.depth if config._depth_mode else None
+        ),  # Pass depth for auto-scaling
     }
     if master_process:
         print("📚 PRETRAINING: Using PyTorch-native BOS-aligned dataloader")
@@ -293,6 +296,9 @@ def setup_dataloaders(
                 num_workers=config.dataloader_num_workers,
                 prefetch_factor=config.dataloader_prefetch_factor,
                 persistent_workers=config.dataloader_persistent_workers,
+                depth=(
+                    config.depth if config._depth_mode else None
+                ),  # Pass depth for auto-scaling
             )
 
             def eval_dataloader_builder():

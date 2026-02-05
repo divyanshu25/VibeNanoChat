@@ -391,6 +391,7 @@ class FinewebEduParquetBOSDataloader:
         num_workers: int = 4,
         prefetch_factor: Optional[int] = 2,
         persistent_workers: bool = True,
+        depth: Optional[int] = None,
     ):
         """
         Initialize BOS dataloader with best-fit packing.
@@ -406,6 +407,7 @@ class FinewebEduParquetBOSDataloader:
             num_workers: Parallel I/O workers (4 is good default)
             prefetch_factor: Batches per worker to prefetch (2 hides latency)
             persistent_workers: Keep workers alive across epochs (saves startup)
+            depth: Model depth for auto-scaling dataloader_batch_size (None = use default scaling)
         """
         # input validation
         if not os.path.isdir(data_dir):
@@ -485,8 +487,40 @@ class FinewebEduParquetBOSDataloader:
 
         # DataLoader batch_size = documents per collate call (NOT model batch size!)
         # want enough docs for good best-fit, but not so many that buffer overflows
-        # with 4 workers × 2 prefetch, this gives sufficient docs for packing
-        dataloader_batch_size = max(batch_size * 10, 160)
+        # Scale inversely with model depth (similar to batch_size scaling)
+        # Deeper models → smaller batch → less data consumed → need fewer docs
+        if depth is not None:
+            # Inverse scaling with depth (matches model_setup.py batch_size scaling)
+            if depth <= 8:
+                dataloader_multiplier = (
+                    10  # shallow models: high throughput needs more docs
+                )
+                min_docs = 160  # minimum for good packing
+            elif depth <= 10:
+                dataloader_multiplier = 10
+                min_docs = 160
+            elif depth <= 14:
+                dataloader_multiplier = 8  # medium models: moderate doc buffer
+                min_docs = 128
+            elif depth <= 18:
+                dataloader_multiplier = 6  # deeper models: reduced doc buffer
+                min_docs = 48
+            elif depth <= 22:
+                dataloader_multiplier = 4  # deep models: conservative doc buffer
+                min_docs = 16
+            else:
+                dataloader_multiplier = 3  # very deep models: minimal doc buffer
+                min_docs = 6
+
+            dataloader_batch_size = max(batch_size * dataloader_multiplier, min_docs)
+
+            if master_process:
+                print(
+                    f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs})"
+                )
+        else:
+            # Default: batch_size * 10 with minimum 160 docs
+            dataloader_batch_size = max(batch_size * 10, 160)
 
         # pin_memory enables async CPU→GPU transfers (DMA), only works with workers>0
         use_pin_memory = device.startswith("cuda") and num_workers > 0
