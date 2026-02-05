@@ -93,11 +93,11 @@ class TestFinewebEduParquetBOSDataloader:
             num_workers=0,  # Single process for testing
         )
 
-    def test_initialization(self, dataloader):
+    def test_initialization(self, dataloader, device):
         """Verify dataloader initializes correctly."""
         assert dataloader.batch_size == 4
         assert dataloader.block_size == 32
-        assert dataloader.device == "cpu"
+        assert dataloader.device == str(device)
         # Collator handles the document buffer now
         assert dataloader.collator is not None
         assert dataloader.collator.batch_size == 4
@@ -188,10 +188,12 @@ class TestFinewebEduParquetBOSDataloader:
         assert stats["buffer_size"] >= 0
 
     def test_device_placement(self, dataloader, device):
-        """Verify tensors are on correct device."""
+        """Verify tensors are returned on CPU (trainer moves them to target device)."""
         inputs, targets = next(dataloader)
-        assert str(inputs.device) == device
-        assert str(targets.device) == device
+        # Dataloader returns CPU tensors because workers can't access GPU
+        # Trainer code moves them to target device with: x, y = x.to(device), y.to(device)
+        assert str(inputs.device) == "cpu"
+        assert str(targets.device) == "cpu"
 
     def test_token_validity(self, dataloader):
         """Verify all tokens are valid (non-negative)."""

@@ -216,6 +216,11 @@ class BestFitCollator:
             raise ValueError(f"block_size must be positive, got {block_size}")
         if buffer_size <= 0:
             raise ValueError(f"buffer_size must be positive, got {buffer_size}")
+
+        # Convert torch.device to string if needed
+        if isinstance(device, torch.device):
+            device = str(device)
+
         if not (device == "cpu" or device.startswith("cuda")):
             raise ValueError(f"device must be 'cpu' or 'cuda[:N]', got {device}")
 
@@ -428,6 +433,10 @@ class FinewebEduParquetBOSDataloader:
             raise ValueError(f"buffer_size must be positive, got {buffer_size}")
         if num_workers < 0:
             raise ValueError(f"num_workers must be non-negative, got {num_workers}")
+
+        # Convert torch.device to string if needed
+        if isinstance(device, torch.device):
+            device = str(device)
 
         self.batch_size = batch_size
         self.block_size = block_size

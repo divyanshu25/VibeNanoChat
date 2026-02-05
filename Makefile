@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law chat-server
+.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law run-depth-sweep chat-server
 
 .DEFAULT_GOAL := help
 
@@ -228,6 +228,46 @@ run-scaling-law: ## Run scaling law experiment with nanochat-style depth and FLO
 		done; \
 	done
 	@echo "✅ All scaling law experiments complete!"
+
+run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-sweep [NGPUS=4] [PARAM_DATA_RATIO=10] [CORE_EVALS=true] [EVAL_INTERVAL=500]
+	@echo "🔬 Starting depth sweep experiments..."
+	@echo "📐 Training depths: 8, 10, 12, 14, 16, 18, 20"
+	@NGPUS=$${NGPUS:-4}; \
+	PARAM_DATA_RATIO=$${PARAM_DATA_RATIO:-10}; \
+	CORE_EVALS=$${CORE_EVALS:-true}; \
+	EVAL_INTERVAL=$${EVAL_INTERVAL:-}; \
+	echo "📊 Configuration:"; \
+	echo "   GPUs: $$NGPUS"; \
+	echo "   Token:Param ratio: $$PARAM_DATA_RATIO:1"; \
+	echo "   CORE evaluations: $$CORE_EVALS"; \
+	if [ -n "$$EVAL_INTERVAL" ]; then \
+		echo "   Eval interval: $$EVAL_INTERVAL steps"; \
+	else \
+		echo "   Eval interval: adaptive (scales with model size)"; \
+	fi; \
+	echo "⚡ Muon optimizer enabled for all runs"; \
+	echo ""; \
+	for DEPTH in 8 10 12 14 16 18 20; do \
+		echo ""; \
+		echo "================================================================="; \
+		echo "📐 Training depth=$$DEPTH"; \
+		echo "================================================================="; \
+		EXTRA_ARGS=""; \
+		if [ -n "$$EVAL_INTERVAL" ]; then \
+			EXTRA_ARGS="EVAL_INTERVAL=$$EVAL_INTERVAL"; \
+		fi; \
+		$(MAKE) ddp-train NGPUS=$$NGPUS MODE=pretraining CORE_EVALS=$$CORE_EVALS DEPTH=$$DEPTH PARAM_DATA_RATIO=$$PARAM_DATA_RATIO $$EXTRA_ARGS || exit 1; \
+		echo ""; \
+		echo "  🧹 Cleaning up GPUs..."; \
+		$(MAKE) kill-gpu; \
+		sleep 20; \
+		echo "  🧹 Double-checking GPU cleanup..."; \
+		$(MAKE) kill-gpu; \
+		sleep 20; \
+	done
+	@echo ""
+	@echo "✅ All depth sweep experiments complete!"
+	@echo "📊 Trained models at depths: 8, 10, 12, 14, 16, 18, 20"
 
 chat-server: ## Start the chat web UI server on port 8003
 	@echo "🔍 Checking if port 8003 is in use..."

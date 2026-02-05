@@ -58,12 +58,6 @@ def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
     Returns:
         Output tensor (B, n_head, T, head_dim)
     """
-    # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
-    B, n_head, T, head_dim = q.shape
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
-
     # Use FA3 only if available AND tensors are on CUDA (FA3 doesn't support CPU)
     # Use FA3 only if:
     # 1. FA3 is available
@@ -73,16 +67,49 @@ def attention_forward(q, k, v, is_causal=True, enable_gqa=False):
     use_fa3 = HAS_FA3 and q.is_cuda and q.dtype in supported_dtypes
 
     if use_fa3:
+        # Flash Attention 3 expects (B, T, n_head, head_dim)
+        # Transpose: (B, n_head, T, head_dim) → (B, T, n_head, head_dim)
+        B, n_head, T, head_dim = q.shape
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         # Use Flash Attention 3 pre-compiled kernels
         output = _fa3.flash_attn_func(q, k, v, causal=is_causal)
+        # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
+        output = output.transpose(1, 2)
     else:
-        # Fallback to PyTorch SDPA (works on CPU, CUDA, and all dtypes)
-        output = F.scaled_dot_product_attention(
-            q, k, v, is_causal=is_causal, enable_gqa=enable_gqa
-        )
+        # PyTorch SDPA expects (B, n_head, T, head_dim) - no transpose needed!
+        # Handle GQA: if k/v have fewer heads than q, repeat them
+        if enable_gqa and k.size(1) < q.size(1):
+            # Repeat each k/v head to match q heads
+            # E.g., if n_head=8 and n_kv_head=4, each kv head is used by 2 q heads
+            n_head = q.size(1)
+            n_kv_head = k.size(1)
+            assert (
+                n_head % n_kv_head == 0
+            ), f"n_head ({n_head}) must be divisible by n_kv_head ({n_kv_head})"
+            repeat_factor = n_head // n_kv_head
 
-    # Transpose back: (B, T, n_head, head_dim) → (B, n_head, T, head_dim)
-    return output.transpose(1, 2)
+            # Store original dimensions before modification
+            B, _, T, head_dim = k.shape
+
+            # Shape: (B, n_kv_head, T, head_dim) → (B, n_kv_head, 1, T, head_dim)
+            #     → (B, n_kv_head, repeat_factor, T, head_dim)
+            #     → (B, n_head, T, head_dim)
+            k = (
+                k.unsqueeze(2)
+                .repeat(1, 1, repeat_factor, 1, 1)
+                .view(B, n_head, T, head_dim)
+            )
+            v = (
+                v.unsqueeze(2)
+                .repeat(1, 1, repeat_factor, 1, 1)
+                .view(B, n_head, T, head_dim)
+            )
+
+        output = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+
+    return output
 
 
 class CausalSelfAttention(nn.Module):
@@ -239,9 +266,9 @@ class CausalSelfAttention(nn.Module):
                 torch.ones((Tq, Tq), dtype=torch.bool, device=q.device)
             )
 
-            y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, enable_gqa=(self.n_kv_head < self.n_head)
-            )
+            # Note: enable_gqa is not a valid parameter for F.scaled_dot_product_attention
+            # PyTorch SDPA handles GQA automatically when k/v have fewer heads than q
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
         # =====================================================================
         # STEP 4: Re-assemble heads and project output
@@ -249,10 +276,10 @@ class CausalSelfAttention(nn.Module):
         # Flash attention with native GQA support (PyTorch 2.5+)
         # enable_gqa=True lets PyTorch handle the head broadcasting internally
         # This is more memory efficient than manually repeating K/V heads
-        # Shape: (B, n_head, T, head_dim)
+        # Shape: (B, n_head, Tq, head_dim) - note: Tq might differ from T when using KV cache
 
         # Re-assemble all head outputs side by side
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, Tq, C)
 
         # Final output projection
         y = self.c_proj(y)
