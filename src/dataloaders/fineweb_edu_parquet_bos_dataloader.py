@@ -106,7 +106,6 @@ class PackedParquetDataset(IterableDataset):
         ddp_rank: int = 0,
         ddp_world_size: int = 1,
         split: str = "train",
-        seed: Optional[int] = None,
     ):
         super().__init__()
         self.parquet_paths = parquet_paths
@@ -117,9 +116,6 @@ class PackedParquetDataset(IterableDataset):
         self.ddp_rank = ddp_rank
         self.ddp_world_size = ddp_world_size
         self.split = split
-
-        # Seeded RNG for reproducible buffer overflow drops
-        self.rng = random.Random(seed) if seed is not None else random.Random()
 
     def _tokenize_document(self, text: str) -> Optional[List[int]]:
         """Tokenize a single document with BOS prefix and validation."""
@@ -227,16 +223,14 @@ class PackedParquetDataset(IterableDataset):
         batch_stats: dict,
     ):
         """Fill document buffer to target size, respecting max limit."""
-        # SMART BUFFER MANAGEMENT: only fill when needed, stop before overflow
-        # this avoids the wasteful pattern of: add docs → overflow → drop docs
-        # instead we proactively stop adding when we reach a comfortable level
+        # SMART BUFFER MANAGEMENT: only fill when needed, stop at max capacity
+        # buffer naturally shrinks through consumption during packing
 
         # don't fill if we're already above target (buffer has enough docs)
         if len(doc_buffer) >= target_docs:
             return
 
         # fill to target, but don't exceed max_buffer (leave some headroom)
-        # this prevents the overflow→drop cycle from ever happening in normal operation
         while len(doc_buffer) < target_docs:
             # safety check: stop if we're approaching max capacity
             # leave 10% headroom to avoid edge cases where we overshoot slightly
@@ -255,44 +249,6 @@ class PackedParquetDataset(IterableDataset):
                 # document stream is exhausted (shouldn't happen with infinite loop,
                 # but handle gracefully just in case)
                 break
-
-    def _handle_buffer_overflow(self, doc_buffer, max_buffer: int, batch_stats: dict):
-        """
-        Drop documents when buffer exceeds maximum size (SAFETY NET - should be rare).
-
-        With smart buffer management (_fill_buffer stops at 90% of max), this should
-        almost never trigger. If you see this warning frequently, increase buffer_size.
-        """
-        if len(doc_buffer) <= max_buffer:
-            return
-
-        # PATHOLOGICAL CASE: buffer somehow exceeded max despite proactive management
-        # this can happen if documents are extremely small (e.g., all <10 tokens)
-        # and we need millions of them to pack a single batch
-        # instead of crashing, we gracefully drop 25% of docs to stay under memory limits
-        num_to_drop = len(doc_buffer) // 4
-
-        # use random sampling (not FIFO/LIFO) to avoid biasing towards any doc length
-        # seeded RNG ensures deterministic drops (reproducible training runs)
-        dropped_indices = self.rng.sample(range(len(doc_buffer)), num_to_drop)
-
-        # track how many tokens we're discarding (for metrics/monitoring)
-        dropped_tokens = sum(doc_buffer[i].length for i in dropped_indices)
-        batch_stats["dropped_tokens"] += dropped_tokens
-        batch_stats["dropped_files"] += num_to_drop
-        batch_stats["buffer_overflows"] += 1
-
-        # remove docs in reverse order to avoid index shifting issues
-        # (if we removed idx=5 first, then idx=10 would shift to idx=9)
-        for idx in sorted(dropped_indices, reverse=True):
-            doc_buffer.pop(idx)
-
-        # this warning should be rare - if you see it often, increase buffer_size
-        warnings.warn(
-            f"Buffer overflow (rare): dropped {num_to_drop} docs ({dropped_tokens} tokens). "
-            f"Buffer: {len(doc_buffer)}/{max_buffer}. Consider increasing buffer_size.",
-            RuntimeWarning,
-        )
 
     def _pack_row(
         self,
@@ -398,9 +354,6 @@ class PackedParquetDataset(IterableDataset):
             "total_tokens": 0,  # all tokens we've read from parquet files
             "cropped_tokens": 0,  # tokens discarded due to packing (unavoidable waste)
             "processed_tokens": 0,  # tokens actually trained on (what we want to maximize)
-            "dropped_tokens": 0,  # tokens dropped due to buffer overflow (should be ~0)
-            "dropped_files": 0,  # number of docs dropped from overflow
-            "buffer_overflows": 0,  # how many times buffer exceeded max size
             "corrupted_docs": 0,  # docs with invalid tokens/encoding
             "empty_docs": 0,  # docs that tokenized to empty
         }
@@ -415,17 +368,15 @@ class PackedParquetDataset(IterableDataset):
         # SMART BUFFER SIZING STRATEGY:
         # - target_docs: optimal size for good packing efficiency (more choices for best-fit)
         # - max_buffer: hard safety limit to prevent OOM (100x buffer_size)
-        # - _fill_buffer stops at 90% of max_buffer, so overflow should never happen
+        # - _fill_buffer stops at 90% of max_buffer to stay under memory limits
+        # - buffer naturally shrinks through consumption, then refills when below target
         #
         # Example: if buffer_size=1000, target=max(32, batch_size), max=100,000
         #   → we fill to ~32 docs initially
         #   → as we pack, buffer drains (docs consumed)
         #   → when buffer < 32, we refill to 32 (but never exceed 90k docs)
-        #   → overflow check is now just a safety net (should rarely trigger)
         target_docs = max(self.batch_size, 32)  # at least 32 docs for good packing
-        max_buffer = (
-            self.buffer_size * 100
-        )  # 100x buffer_size as hard limit (safety net)
+        max_buffer = self.buffer_size * 100  # 100x buffer_size as hard limit
 
         while True:  # infinite batches for infinite training
             # reset stats for this batch (we report per-batch deltas)
@@ -433,16 +384,10 @@ class PackedParquetDataset(IterableDataset):
                 batch_stats[key] = 0
 
             # PROACTIVE BUFFER MANAGEMENT: fill to target, but stop at 90% of max
-            # this avoids the wasteful pattern: add docs → overflow → drop docs
-            # instead: only add when needed, stop before hitting the limit
+            # buffer naturally shrinks through consumption during packing, then we refill
             self._fill_buffer(
                 doc_buffer, doc_stream, target_docs, max_buffer, batch_stats
             )
-
-            # SAFETY NET: handle buffer overflow (should be extremely rare now)
-            # with smart filling above, this should only trigger in pathological cases
-            # (e.g., all documents are tiny and we need millions to pack one batch)
-            self._handle_buffer_overflow(doc_buffer, max_buffer, batch_stats)
 
             # pack B rows using best-fit algorithm
             # each row is filled to exactly (block_size + 1) tokens with no padding
@@ -532,7 +477,6 @@ class FinewebEduParquetBOSDataloader:
         buffer_size: int = 1000,
         device: str = "cuda",
         persistent_workers: bool = True,
-        collator_seed: Optional[int] = 42,
         num_workers: int = 4,
         prefetch_factor: int = 2,
     ):
@@ -548,7 +492,6 @@ class FinewebEduParquetBOSDataloader:
             split: 'train' (all but last file) or 'val' (last file only)
             buffer_size: Document buffer for best-fit packing (larger = better packing efficiency)
             persistent_workers: Keep workers alive across epochs (saves startup)
-            collator_seed: Seed for reproducible buffer overflow drops (default: 42)
             num_workers: Number of data loading workers (default: 4)
             prefetch_factor: Number of batches to prefetch per worker (default: 2)
         """
@@ -631,7 +574,6 @@ class FinewebEduParquetBOSDataloader:
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
             split=split,
-            seed=collator_seed,
         )
 
         # Create collator: simple pass-through that does autoregressive split
@@ -670,9 +612,6 @@ class FinewebEduParquetBOSDataloader:
             "total_tokens": 0,
             "cropped_tokens": 0,
             "processed_tokens": 0,
-            "dropped_tokens": 0,
-            "dropped_files": 0,
-            "buffer_overflows": 0,
             "corrupted_docs": 0,
             "empty_docs": 0,
         }
@@ -709,18 +648,6 @@ class FinewebEduParquetBOSDataloader:
             * self.aggregated_stats["cropped_tokens"]
             / max(1, self.aggregated_stats["total_tokens"])
         )
-        dropped_tokens_pct = (
-            100.0
-            * self.aggregated_stats["dropped_tokens"]
-            / max(1, self.aggregated_stats["total_tokens"])
-        )
-        total_waste = (
-            self.aggregated_stats["cropped_tokens"]
-            + self.aggregated_stats["dropped_tokens"]
-        )
-        total_waste_pct = (
-            100.0 * total_waste / max(1, self.aggregated_stats["total_tokens"])
-        )
 
         return {
             "total_tokens": self.aggregated_stats["total_tokens"],
@@ -728,11 +655,6 @@ class FinewebEduParquetBOSDataloader:
             "cropped_tokens": self.aggregated_stats["cropped_tokens"],
             "cropped_tokens_pct": cropped_tokens_pct,
             "crop_percentage": cropped_tokens_pct,  # backward compatibility alias
-            "dropped_tokens": self.aggregated_stats["dropped_tokens"],
-            "dropped_tokens_pct": dropped_tokens_pct,
-            "total_waste_pct": total_waste_pct,
-            "dropped_files": self.aggregated_stats["dropped_files"],
-            "buffer_overflows": self.aggregated_stats["buffer_overflows"],
             "corrupted_docs": self.aggregated_stats["corrupted_docs"],
             "empty_docs": self.aggregated_stats["empty_docs"],
             "buffer_size": 0,  # Not tracked in aggregated stats (worker-local state)

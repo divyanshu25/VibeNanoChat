@@ -191,17 +191,11 @@ class TestFinewebEduParquetBOSDataloader:
         assert "cropped_tokens" in stats
         assert "crop_percentage" in stats
         assert "buffer_size" in stats  # exists but always 0 (worker-local)
-        assert "dropped_tokens" in stats
-        assert "dropped_tokens_pct" in stats
-        assert "total_waste_pct" in stats
 
         assert stats["total_tokens"] > 0
         assert stats["cropped_tokens"] >= 0
         assert 0 <= stats["crop_percentage"] <= 100
         assert stats["buffer_size"] == 0  # not tracked in aggregated stats
-        assert stats["dropped_tokens"] >= 0
-        assert 0 <= stats["dropped_tokens_pct"] <= 100
-        assert 0 <= stats["total_waste_pct"] <= 100
 
     def test_device_placement(self, dataloader, device):
         """Verify tensors are returned on CPU (trainer moves them to target device)."""
@@ -326,9 +320,9 @@ class TestDDPSupport:
 class TestSmartBufferManagement:
     """Test smart buffer management to avoid overflow/drop cycles."""
 
-    def test_buffer_stops_before_overflow(self, mock_parquet_data, device):
-        """Verify buffer filling stops proactively at 90% of max capacity."""
-        # Use a small buffer to make overflow more likely if not managed smartly
+    def test_buffer_natural_shrinkage(self, mock_parquet_data, device):
+        """Verify buffer naturally shrinks through consumption and refills when needed."""
+        # Use a small buffer to test the natural shrinkage pattern
         loader = FinewebEduParquetBOSDataloader(
             data_dir=str(mock_parquet_data),
             batch_size=2,
@@ -346,28 +340,17 @@ class TestSmartBufferManagement:
 
         stats = loader.get_stats()
 
-        # With smart buffer management, overflows should be rare or non-existent
-        # The buffer should stop filling at 90% of max (900 docs in this case)
-        assert stats["buffer_overflows"] == 0, (
-            f"Buffer overflows detected: {stats['buffer_overflows']}. "
-            "Smart buffer management should prevent overflows by stopping at 90% capacity."
-        )
-        assert stats["dropped_tokens"] == 0, (
-            f"Tokens were dropped: {stats['dropped_tokens']}. "
-            "Smart buffer management should prevent token dropping."
-        )
-        assert stats["dropped_files"] == 0, (
-            f"Files were dropped: {stats['dropped_files']}. "
-            "Smart buffer management should prevent file dropping."
-        )
+        # Buffer naturally shrinks through consumption, no artificial dropping needed
+        # Just verify we successfully processed tokens
+        assert stats["processed_tokens"] > 0, "Should process tokens successfully"
+        assert stats["total_tokens"] > 0, "Should read tokens from files"
+
         loader.cleanup()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def test_buffer_efficiency_with_proactive_management(
-        self, mock_parquet_data, device
-    ):
-        """Verify proactive buffer management maintains good packing efficiency."""
+    def test_buffer_efficiency_with_natural_management(self, mock_parquet_data, device):
+        """Verify natural buffer shrinkage maintains good packing efficiency."""
         loader = FinewebEduParquetBOSDataloader(
             data_dir=str(mock_parquet_data),
             batch_size=4,
@@ -385,21 +368,13 @@ class TestSmartBufferManagement:
 
         stats = loader.get_stats()
 
-        # Verify no wasted work from overflow/drop cycles
-        assert stats["buffer_overflows"] == 0, "Should have zero overflows"
-        assert stats["dropped_tokens"] == 0, "Should have zero dropped tokens"
-
-        # Verify packing efficiency is still good
-        # (proactive management shouldn't hurt packing quality)
+        # Verify packing efficiency is good with natural buffer management
         assert stats["processed_tokens"] > 0, "Should process tokens successfully"
         assert stats["total_tokens"] > 0, "Should read tokens from files"
 
         # Cropped tokens are expected (unavoidable with packing)
-        # but dropped tokens should be zero with smart management
         assert stats["cropped_tokens_pct"] < 100, "Some tokens should be processed"
-        assert (
-            stats["dropped_tokens_pct"] == 0
-        ), "Zero dropped tokens with smart management"
+
         loader.cleanup()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -434,16 +409,7 @@ class TestStatsAggregation:
 
         # Verify percentage calculations
         assert 0 <= stats["cropped_tokens_pct"] <= 100
-        assert 0 <= stats["dropped_tokens_pct"] <= 100
-        assert 0 <= stats["total_waste_pct"] <= 100
 
-        # Total waste should be sum of cropped and dropped
-        expected_waste = (
-            (stats["cropped_tokens"] + stats["dropped_tokens"])
-            / max(1, stats["total_tokens"])
-            * 100
-        )
-        assert abs(stats["total_waste_pct"] - expected_waste) < 0.01
         loader.cleanup()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -479,28 +445,18 @@ class TestStatsAggregation:
         per_rank_stats = [loader.get_stats() for loader in loaders]
 
         # Simulate torch.distributed.all_reduce(SUM) behavior
-        # This is exactly what the trainer code does (lines 764-786)
+        # This is exactly what the trainer code does
         aggregated = {
             "total_tokens": sum(s["total_tokens"] for s in per_rank_stats),
             "processed_tokens": sum(s["processed_tokens"] for s in per_rank_stats),
             "cropped_tokens": sum(s["cropped_tokens"] for s in per_rank_stats),
-            "dropped_tokens": sum(s["dropped_tokens"] for s in per_rank_stats),
-            "dropped_files": sum(s["dropped_files"] for s in per_rank_stats),
-            "buffer_overflows": sum(s["buffer_overflows"] for s in per_rank_stats),
             "corrupted_docs": sum(s["corrupted_docs"] for s in per_rank_stats),
             "empty_docs": sum(s["empty_docs"] for s in per_rank_stats),
         }
 
-        # Recalculate percentages with aggregated totals (as trainer does on lines 788-792)
+        # Recalculate percentages with aggregated totals (as trainer does)
         aggregated["cropped_tokens_pct"] = (
             100.0 * aggregated["cropped_tokens"] / max(1, aggregated["total_tokens"])
-        )
-        aggregated["dropped_tokens_pct"] = (
-            100.0 * aggregated["dropped_tokens"] / max(1, aggregated["total_tokens"])
-        )
-        total_waste = aggregated["cropped_tokens"] + aggregated["dropped_tokens"]
-        aggregated["total_waste_pct"] = (
-            100.0 * total_waste / max(1, aggregated["total_tokens"])
         )
 
         # Verify aggregated stats are reasonable
@@ -518,20 +474,12 @@ class TestStatsAggregation:
 
         # Percentages should be in valid range
         assert 0 <= aggregated["cropped_tokens_pct"] <= 100
-        assert 0 <= aggregated["dropped_tokens_pct"] <= 100
-        assert 0 <= aggregated["total_waste_pct"] <= 100
 
         # Verify the aggregation math is correct
         expected_crop_pct = (
             100.0 * aggregated["cropped_tokens"] / aggregated["total_tokens"]
         )
-        expected_waste_pct = (
-            100.0
-            * (aggregated["cropped_tokens"] + aggregated["dropped_tokens"])
-            / aggregated["total_tokens"]
-        )
         assert abs(aggregated["cropped_tokens_pct"] - expected_crop_pct) < 0.01
-        assert abs(aggregated["total_waste_pct"] - expected_waste_pct) < 0.01
 
         # Verify stats are properly sharded (each rank sees different data)
         # In DDP, ranks process non-overlapping data shards

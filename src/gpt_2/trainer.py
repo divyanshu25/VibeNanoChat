@@ -758,9 +758,6 @@ class Trainer:
                             stats["total_tokens"],
                             stats["processed_tokens"],
                             stats["cropped_tokens"],
-                            stats["dropped_tokens"],
-                            stats["dropped_files"],
-                            stats["buffer_overflows"],
                             stats["corrupted_docs"],
                             stats["empty_docs"],
                         ],
@@ -777,22 +774,12 @@ class Trainer:
                     stats["total_tokens"] = stats_tensor[0].item()
                     stats["processed_tokens"] = stats_tensor[1].item()
                     stats["cropped_tokens"] = stats_tensor[2].item()
-                    stats["dropped_tokens"] = stats_tensor[3].item()
-                    stats["dropped_files"] = stats_tensor[4].item()
-                    stats["buffer_overflows"] = stats_tensor[5].item()
-                    stats["corrupted_docs"] = stats_tensor[6].item()
-                    stats["empty_docs"] = stats_tensor[7].item()
+                    stats["corrupted_docs"] = stats_tensor[3].item()
+                    stats["empty_docs"] = stats_tensor[4].item()
 
                     # Recalculate percentages with global totals
                     stats["cropped_tokens_pct"] = (
                         100.0 * stats["cropped_tokens"] / max(1, stats["total_tokens"])
-                    )
-                    stats["dropped_tokens_pct"] = (
-                        100.0 * stats["dropped_tokens"] / max(1, stats["total_tokens"])
-                    )
-                    total_waste = stats["cropped_tokens"] + stats["dropped_tokens"]
-                    stats["total_waste_pct"] = (
-                        100.0 * total_waste / max(1, stats["total_tokens"])
                     )
 
                 # Only master prints and logs (all ranks now have same stats after all_reduce)
@@ -812,12 +799,6 @@ class Trainer:
                     print(
                         f"   Cropped tokens: {stats['cropped_tokens']:,} ({stats['cropped_tokens_pct']:.2f}%)"
                     )
-                    print(
-                        f"   Dropped tokens: {stats['dropped_tokens']:,} ({stats['dropped_tokens_pct']:.2f}%)"
-                    )
-                    print(f"   Total waste: {stats['total_waste_pct']:.2f}%")
-                    print(f"   Dropped files: {stats['dropped_files']:,}")
-                    print(f"   Buffer overflows: {stats['buffer_overflows']}")
                     print(f"   Corrupted docs: {stats['corrupted_docs']:,}")
                     print(f"   Empty docs: {stats['empty_docs']:,}")
                     print(f"{'='*80}\n")
@@ -831,13 +812,6 @@ class Trainer:
                             "dataloader/cropped_tokens_pct": stats[
                                 "cropped_tokens_pct"
                             ],
-                            "dataloader/dropped_tokens": stats["dropped_tokens"],
-                            "dataloader/dropped_tokens_pct": stats[
-                                "dropped_tokens_pct"
-                            ],
-                            "dataloader/total_waste_pct": stats["total_waste_pct"],
-                            "dataloader/dropped_files": stats["dropped_files"],
-                            "dataloader/buffer_overflows": stats["buffer_overflows"],
                             "dataloader/corrupted_docs": stats["corrupted_docs"],
                             "dataloader/empty_docs": stats["empty_docs"],
                         }
