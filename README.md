@@ -47,27 +47,42 @@ That's it. You now have a language model trained from scratch.
 
 ```
 VibeNanoChat/
-├── model.py              # GPT-2 architecture (attention, MLP, layernorm)
-├── train.py              # Training loop with DDP
-├── config.py             # All hyperparameters
-├── distmuon.py           # Distributed optimizer (ZeRO-2 sharding)
+├── src/
+│   ├── gpt_2/                    # GPT-2 implementation
+│   │   ├── gpt2_model.py         # Main model architecture
+│   │   ├── trainer.py            # Training loop with DDP
+│   │   ├── config.py             # Model configuration
+│   │   ├── attention.py          # Multi-head attention + RoPE
+│   │   ├── mlp.py                # Feed-forward layers
+│   │   ├── muon.py               # Muon optimizer (Newton-Schulz)
+│   │   └── training_utilities/   # Setup helpers
+│   ├── dataloaders/              # Dataset loading
+│   │   └── fineweb_edu_parquet_bos_dataloader.py  # Main dataloader
+│   └── eval_tasks/               # Evaluation benchmarks
+│       ├── core/                 # Base model evals (MMLU, HellaSwag, etc.)
+│       └── training/             # Training-time evaluation
 ├── data/
-│   └── fineweb_edu/      # Dataset preparation scripts
+│   └── fineweb_edu/              # Dataset preparation scripts
 ├── scripts/
-│   ├── generate.py       # Text generation interface
-│   └── plot_isoflop_curve.py  # Scaling law visualization
-└── docs/                 # Deep dives on optimizers, scaling, etc.
+│   ├── chat.py                   # Interactive chat interface
+│   ├── plot_scaling_laws.py     # Scaling law visualization
+│   └── plot_isoflop_curve.py    # Isoflop curve plotting
+├── docs/                         # Deep technical documentation
+└── Makefile                      # Training commands
 ```
 
 **Core components:**
 
-- **GPT-2 architecture**: Standard transformer with causal attention, RoPE positional embeddings, pre-norm
-- **DistMuon optimizer**: Momentum-based optimizer with Newton-Schulz orthogonalization, ZeRO-2 style parameter sharding
-- **Depth parameterization**: Single `DEPTH` parameter controls both model width and depth, learning rate auto-scales
-- **Data loading**: Memory-mapped Parquet files for zero-copy I/O
-- **Evaluation**: 35+ benchmarks integrated into training loop
+- **GPT-2 architecture** (`src/gpt_2/`): Standard transformer with causal attention, RoPE positional embeddings, pre-norm LayerNorm
+- **Muon optimizer** (`src/gpt_2/muon.py`): Momentum-based optimizer with Newton-Schulz orthogonalization for adaptive learning
+- **Depth parameterization** (`src/gpt_2/config.py`): Single `DEPTH` parameter controls model width and depth, learning rate auto-scales
+- **Data loading** (`src/dataloaders/`): Memory-mapped Parquet files for zero-copy I/O, async prefetching
+- **Evaluation** (`src/eval_tasks/`): 35+ benchmarks integrated into training loop
 
-The code deliberately avoids abstractions. Everything is explicit and readable. If you want to understand how transformer training works end-to-end, read `train.py` (300 lines), `model.py` (200 lines), and `distmuon.py` (150 lines).
+The code is organized into modules but avoids deep abstractions. To understand transformer training end-to-end, read:
+1. `src/gpt_2/gpt2_model.py` - The architecture
+2. `src/gpt_2/trainer.py` - The training loop
+3. `src/gpt_2/muon.py` - The optimizer
 
 ## Depth Parameterization
 
@@ -88,11 +103,17 @@ make ddp-train DEPTH=20 TARGET_FLOPS=1e18
 
 The depth `N` determines:
 - Number of layers: `N`
-- Hidden dimension: `round(896 * 1.5^((N-6)/2))`
-- Learning rate: scales as `1/sqrt(depth * width)`
-- Weight decay: scales as `1/width`
+- Hidden dimension: `N × 64` (rounded up to multiple of head_dim)
+- Number of heads: `hidden_dim / 64`
+- Learning rate: scales with model size (different rates for embeddings, matrices, etc.)
+- Weight decay: scales with model size
 
 This means you can sweep model sizes without tuning learning rates. Change `DEPTH` and everything else adjusts automatically.
+
+**Example dimensions:**
+- `DEPTH=6`  → 6 layers, 384 dims, 6 heads (~30M params)
+- `DEPTH=12` → 12 layers, 768 dims, 12 heads (~154M params)
+- `DEPTH=20` → 20 layers, 1280 dims, 20 heads (~560M params)
 
 **Scaling law experiments:**
 
