@@ -83,7 +83,7 @@ class TestFinewebEduParquetBOSDataloader:
     @pytest.fixture
     def dataloader(self, mock_parquet_data, device):
         """Create a dataloader instance for testing."""
-        return FinewebEduParquetBOSDataloader(
+        loader = FinewebEduParquetBOSDataloader(
             data_dir=str(mock_parquet_data),
             batch_size=4,
             block_size=32,
@@ -93,6 +93,10 @@ class TestFinewebEduParquetBOSDataloader:
             device=device,
             num_workers=0,  # Use main process for testing to avoid hangs
         )
+        yield loader
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def test_initialization(self, dataloader, device):
         """Verify dataloader initializes correctly."""
@@ -232,6 +236,9 @@ class TestFinewebEduParquetBOSDataloader:
             inputs, targets = next(loader)
             assert inputs.shape == (batch_size, 16)
             assert targets.shape == (batch_size, 16)
+            loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def test_different_block_sizes(self, mock_parquet_data, device):
         """Verify dataloader works with different block sizes."""
@@ -250,6 +257,9 @@ class TestFinewebEduParquetBOSDataloader:
             inputs, targets = next(loader)
             assert inputs.shape == (2, block_size)
             assert targets.shape == (2, block_size)
+            loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class TestBestFitPacking:
@@ -280,6 +290,9 @@ class TestBestFitPacking:
             f"Crop percentage too high: {stats['crop_percentage']:.1f}%. "
             "Best-fit algorithm may not be working properly."
         )
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class TestDDPSupport:
@@ -305,6 +318,9 @@ class TestDDPSupport:
         inputs, targets = next(loader)
         assert inputs.shape == (2, 16)
         assert targets.shape == (2, 16)
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class TestSmartBufferManagement:
@@ -344,6 +360,9 @@ class TestSmartBufferManagement:
             f"Files were dropped: {stats['dropped_files']}. "
             "Smart buffer management should prevent file dropping."
         )
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def test_buffer_efficiency_with_proactive_management(
         self, mock_parquet_data, device
@@ -381,6 +400,9 @@ class TestSmartBufferManagement:
         assert (
             stats["dropped_tokens_pct"] == 0
         ), "Zero dropped tokens with smart management"
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class TestStatsAggregation:
@@ -422,6 +444,9 @@ class TestStatsAggregation:
             * 100
         )
         assert abs(stats["total_waste_pct"] - expected_waste) < 0.01
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def test_simulated_ddp_stats_aggregation(self, mock_parquet_data, device):
         """Verify DDP all-reduce aggregation with actual dataloaders (2 GPU ranks)."""
@@ -513,6 +538,11 @@ class TestStatsAggregation:
         assert rank0_total > 0, "Rank 0 should have processed tokens"
         assert rank1_total > 0, "Rank 1 should have processed tokens"
 
+        for loader in loaders:
+            loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def test_stats_reset_between_iterations(self, mock_parquet_data, device):
         """Verify stats accumulate correctly across multiple iteration cycles."""
         loader = FinewebEduParquetBOSDataloader(
@@ -548,6 +578,10 @@ class TestStatsAggregation:
         assert (
             second_total >= first_total * 1.3
         ), f"After 6 batches ({second_total}) should have significantly more tokens than after 3 ({first_total})"
+
+        loader.cleanup()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
