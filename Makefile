@@ -286,6 +286,6 @@ chat-server: ## Start the chat web UI server on port 8003
 	@$(uv) run gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
 
 interactive-gen: ## Run interactive text generation. Usage: make interactive-gen [CHECKPOINT=/path/to/checkpoint.pt]
-	@CHECKPOINT=$${CHECKPOINT:-/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/step9955_depth20_pretrain.pt}; \
+	@CHECKPOINT=$${CHECKPOINT:-/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/step3092_depth12_pretrain.pt}; \
 	$(uv) run python debug_tools/interactive_generate.py $$CHECKPOINT
 

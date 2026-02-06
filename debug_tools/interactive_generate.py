@@ -217,6 +217,11 @@ def interactive_loop(model, device):
 
             traceback.print_exc()
 
+            # Clean up any GPU memory from the failed generation
+            if device == "cuda":
+                torch.cuda.empty_cache()
+                print("🧹 Cleared GPU cache after error")
+
 
 def main():
     """
@@ -266,11 +271,32 @@ def main():
         traceback.print_exc()
         return 1
 
-    # Start interactive loop
+    # Start interactive loop with proper cleanup
     try:
         interactive_loop(model, device)
     except KeyboardInterrupt:
         print("\n\n👋 Interrupted by user. Goodbye!")
+    finally:
+        # ===== CRITICAL: Clean up GPU resources =====
+        # This ensures GPU memory is released when the script exits
+        # Without this, the model stays in GPU memory until Python process ends
+        print("\n🧹 Cleaning up GPU resources...")
+
+        # Delete model to free references
+        del model
+
+        # Force garbage collection to clean up Python objects
+        import gc
+
+        gc.collect()
+
+        # Clear CUDA cache (if using CUDA)
+        if device == "cuda":
+            torch.cuda.empty_cache()
+            # Synchronize to ensure all operations complete
+            torch.cuda.synchronize()
+
+        print("✅ GPU cleanup complete!")
 
     return 0
 
