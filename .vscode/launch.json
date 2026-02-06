@@ -1,0 +1,45 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: GPT2",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/gpt_2/gpt2_model.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: GPT2Dataloader",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/gpt_2/dataloader.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: GPT2Trainer",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/gpt_2/trainer.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: Demo KVCache Speedup",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/debug_tools/demo_kvcache_speedup.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        }
+        {
+            "name": "Python: Multiplex DataLoader",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/dataloaders/multiplex_dataloader.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

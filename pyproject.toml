@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages=["src", "src/gpt2"]
+
+[project]
+name = "vibenanochat"
+version = "0.1.0"
+description = "A PyTorch-based implementation of VibeNanoChat for training and inference."
+authors = [
+    { name = "Divyanshu Goyal", email = "divyanshu.g25@gmail.com" }
+]
+requires-python = ">=3.10"
+
+dependencies = [
+   "datasets>=3.2.0",
+   "kernels>=0.11.7",  # Flash Attention 3 pre-compiled kernels (for H100)
+   "ipykernel>=6.29.5",
+   "pyarrow>=18.1.0",
+   "sortedcontainers>=2.4.0",
+   "tiktoken>=0.9.0",
+   "torch>=2.9.0",
+   "triton>=3.0.0",
+   "setuptools>=70.0.0",
+   "tqdm>=4.66.0",
+   "transformers>=4.53.2",
+   "wandb>=0.21.0",
+   "fastapi>=0.104.0",
+   "uvicorn>=0.24.0",
+   "gunicorn>=21.0.0",
+   "matplotlib>=3.10.8",
+   "numpy>=2.2.6",
+   "scipy>=1.11.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",   # For linting and formatting
+    "pytest", # For running tests
+    "pytest-cov", # For test coverage
+    "wandb",  # For experiment tracking,
+    "black",
+    "types-torch",  # PyTorch type stubs
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# Target PyTorch with CUDA 12.8 (required for FA3 pre-compiled kernels)
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.ruff.lint]
+# Ignore E402 errors globally (module level import not at top)
+# These are intentional due to sys.path.append before imports
+ignore = ["E402"]

@@ -1,0 +1,583 @@
+"""
+Training Evaluator for validation loss computation and model sampling during training.
+
+This module provides:
+- TrainingEvaluator: Computes validation loss/BPB and samples from the model
+- generate(): Text generation function with KV caching support
+"""
+
+import math
+import time
+
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+
+import wandb
+from gpt_2.kv_cache import KVCache
+from gpt_2.utils import accumulate_bpb, get_custom_tokenizer
+
+
+def generate(
+    num_sequences,
+    max_length,
+    model,
+    context,
+    device,
+    random_number_generator,
+    use_kv_cache=True,
+    verbose=True,
+    temperature=0.8,
+    top_k=50,
+    repetition_penalty=1.2,
+):
+    """
+    Generate text sequences using the trained GPT model with optional KV caching.
+
+    This function performs autoregressive text generation using top-k sampling
+    to produce diverse and coherent text continuations.
+
+    KV Caching: When enabled (default), uses a two-phase approach:
+    1. PREFILL: Process all context tokens at once, cache their K/V
+    2. DECODE: Generate one token at a time, reusing cached K/V
+    This reduces computation from O(N²) to O(N), making generation 3-10x faster.
+
+    Args:
+        num_sequences (int): Number of sequences to generate
+        max_length (int): Maximum length of each generated sequence
+        model (GPT): The trained GPT model
+        context (str): Initial text context to start generation from
+        device (str): Device to run generation on ('cuda', 'mps', or 'cpu')
+        random_number_generator: PyTorch random generator for sampling
+        use_kv_cache (bool): Whether to use KV caching (default: True)
+        verbose (bool): Whether to print progress updates (default: True)
+        temperature (float): Sampling temperature (default: 0.8). Higher = more random
+        top_k (int): Top-k sampling parameter (default: 50)
+        repetition_penalty (float): Penalty for repeating tokens (default: 1.2).
+            Values > 1.0 discourage repetition. Higher values = stronger penalty.
+
+    Returns:
+        list: List of decoded text sequences
+    """
+    # Initialize the custom tokenizer with special tokens for chat format
+    enc, _ = get_custom_tokenizer()
+
+    # CRITICAL: Check tokenizer vocab size matches model
+    tokenizer_vocab_size = enc.max_token_value + 1
+    model_vocab_size = model.config.vocab_size
+    if tokenizer_vocab_size != model_vocab_size:
+        print("\n⚠️  WARNING: Vocab size mismatch!")
+        print(f"  - Tokenizer vocab: {tokenizer_vocab_size}")
+        print(f"  - Model vocab: {model_vocab_size}")
+        print("  - This will cause decoding failures!\n")
+
+    # Encode the context string to token indices (allow special tokens in context)
+    tokens = enc.encode(context, allowed_special="all")
+    tokens = torch.tensor(tokens, dtype=torch.long)
+
+    # Create multiple copies for batch generation
+    tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
+    x = tokens.to(device)
+
+    print(f"\n{'='*60}")
+    print("Starting generation:")
+    print(f"  - Number of sequences: {num_sequences}")
+    print(f"  - Context length: {x.size(1)} tokens")
+    print(f"  - Target max length: {max_length} tokens")
+    print(f"  - KV cache enabled: {use_kv_cache}")
+    print(f"  - Temperature: {temperature}")
+    print(f"  - Top-k: {top_k}")
+    print(f"  - Repetition penalty: {repetition_penalty}")
+    print(f"{'='*60}\n")
+
+    # Set random seed for reproducible generation
+    torch.manual_seed(42)
+    if device == "cuda":
+        torch.cuda.manual_seed(42)
+
+    # =========================================================================
+    # SETUP: Create KV cache if enabled
+    # =========================================================================
+    kv_cache = None
+    if use_kv_cache:
+        # Extract model dimensions for KV cache
+        config = model.config
+        num_heads = config.n_kv_head if hasattr(config, "n_kv_head") else config.n_head
+        head_dim = config.n_embed // config.n_head
+        num_layers = config.n_layer
+
+        # =====================================================================
+        # OPTIMIZATION: Use prefill pattern for batch generation
+        # =====================================================================
+        # For batch generation from the same prompt, we can:
+        # 1. Process prompt ONCE with batch_size=1 (efficient single forward pass)
+        # 2. Copy cached K/V to batch_size=num_sequences (cheap memory copy)
+        # 3. Generate multiple sequences in parallel
+        # This avoids recomputing the same prompt num_sequences times!
+
+        if num_sequences > 1:
+            # Step 1: Create single-batch cache and process prompt once
+            single_cache = KVCache(
+                batch_size=1,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+
+            # Process prompt once with batch_size=1
+            prompt_tensor = x[0:1, :]  # Take first sequence (they're all identical)
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits_single, _ = model(prompt_tensor, kv_cache=single_cache)
+
+            # Step 2: Create batch cache and prefill from single cache
+            kv_cache = KVCache(
+                batch_size=num_sequences,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+            kv_cache.prefill(single_cache)  # Copy cached K/V to all batch positions
+
+            # Replicate logits for all sequences
+            logits = logits_single.repeat(num_sequences, 1, 1)  # (B, T, vocab_size)
+            print(f"✓ Prefill complete: Processed {x.size(1)} context tokens")
+        else:
+            # Single sequence: no need for prefill optimization
+            kv_cache = KVCache(
+                batch_size=num_sequences,
+                num_heads=num_heads,
+                seq_len=max_length,
+                head_dim=head_dim,
+                num_layers=num_layers,
+            )
+
+            # Process prompt tokens
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, _ = model(x, kv_cache=kv_cache)  # Shape: (B, T, vocab_size)
+            print(f"✓ Prefill complete: Processed {x.size(1)} context tokens")
+    else:
+        # =====================================================================
+        # NO KV CACHE: Process entire sequence each time (O(N²))
+        # =====================================================================
+        with torch.no_grad():
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                logits, _ = model(x, kv_cache=None)  # Shape: (B, T, vocab_size)
+
+    # Only use the last token's predictions for next token
+    logits = logits[:, -1, :]  # Shape: (B, vocab_size)
+
+    # =========================================================================
+    # PHASE 2: DECODE - Generate tokens one at a time
+    # =========================================================================
+    # Generate tokens autoregressively until max_length is reached
+    print("Starting token generation (decode phase)...\n")
+    tokens_to_generate = max_length - x.size(1)
+    while x.size(1) < max_length:
+        # =====================================================================
+        # STEP 1: Apply repetition penalty to discourage repeating tokens
+        # =====================================================================
+        if repetition_penalty != 1.0:
+            # Penalize tokens that already appeared in the sequence
+            # This reduces the probability of tokens we've seen before
+            for i in range(x.size(0)):  # For each sequence in batch
+                # Get unique tokens that have appeared in this sequence
+                previous_tokens = set(x[i].tolist())
+
+                for previous_token in previous_tokens:
+                    # Apply penalty: divide logits by penalty value
+                    # If logit > 0: divide by penalty (reduce probability)
+                    # If logit < 0: multiply by penalty (reduce probability more)
+                    if logits[i, previous_token] > 0:
+                        logits[i, previous_token] /= repetition_penalty
+                    else:
+                        logits[i, previous_token] *= repetition_penalty
+
+        # =====================================================================
+        # STEP 2: Apply temperature scaling for diversity
+        # =====================================================================
+        # Temperature controls randomness:
+        # - temperature < 1.0: More focused (peaks become sharper)
+        # - temperature = 1.0: Unchanged
+        # - temperature > 1.0: More random (flatter distribution)
+        if temperature != 1.0:
+            logits = logits / temperature
+
+        # Convert logits to probabilities
+        probs = F.softmax(logits, dim=-1)  # Shape: (B, vocab_size)
+
+        # =====================================================================
+        # STEP 3: Apply top-k sampling for diverse generation
+        # =====================================================================
+        # This helps avoid repetitive text by sampling from top-k most likely tokens
+        topk_probs, topk_indices = torch.topk(
+            probs, top_k, dim=-1
+        )  # topk_probs: (B, top_k), topk_indices: (B, top_k)
+
+        # Sample from the top-k distribution
+        ix = torch.multinomial(
+            topk_probs, num_samples=1, generator=random_number_generator
+        )  # ix: (B, 1)
+
+        # Get the actual token indices from the top-k indices
+        xcol = torch.gather(topk_indices, -1, ix)  # Shape: (B, 1)
+
+        # Append the new token to the sequence
+        x = torch.cat((x, xcol), dim=1)
+
+        # Progress monitoring (only if verbose)
+        if verbose:
+            current_len = x.size(1)
+            tokens_generated = current_len - (max_length - tokens_to_generate)
+            if tokens_generated % 10 == 0 or current_len == max_length:
+                progress_pct = (tokens_generated / tokens_to_generate) * 100
+                print(
+                    f"  Progress: {tokens_generated}/{tokens_to_generate} tokens generated ({progress_pct:.1f}%)"
+                )
+
+        # Get next token's logits
+        with torch.no_grad():
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                if use_kv_cache:
+                    # WITH CACHE: Only pass the new token (O(1) per step)
+                    logits, _ = model(xcol, kv_cache=kv_cache)
+                else:
+                    # WITHOUT CACHE: Pass entire sequence (O(N) per step)
+                    logits, _ = model(x, kv_cache=None)
+
+        # Extract logits for next prediction
+        logits = logits[:, -1, :]  # Shape: (B, vocab_size)
+
+    # Decode and return all generated sequences
+    print(f"\n{'='*60}")
+    print("Generation complete!")
+    print(f"  - Generated {num_sequences} sequence(s)")
+    print(f"  - Final length: {x.size(1)} tokens")
+    print(f"{'='*60}\n")
+
+    print("Starting decoding...")
+    all_decoded = []
+
+    # Get vocab size from the encoder
+    vocab_size = enc.max_token_value + 1
+
+    for i in range(num_sequences):
+        print(f"  Decoding sequence {i+1}/{num_sequences}...")
+        tokens = x[i, :max_length].tolist()
+
+        # Validate tokens are in valid range
+        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
+        if invalid_tokens:
+            print(
+                f"  ⚠️  WARNING: Found {len(invalid_tokens)} invalid tokens (vocab_size={vocab_size})"
+            )
+            print(f"      Invalid token examples: {invalid_tokens[:5]}")
+            # Clip invalid tokens to valid range
+            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
+
+        # Decode (fail fast if there's an error)
+        try:
+            decoded = enc.decode(tokens)
+            all_decoded.append(decoded)
+            print(f"  ✓ Sequence {i+1} decoded ({len(decoded)} chars)")
+        except Exception as e:
+            print(f"\n  ✗ ERROR decoding sequence {i+1}:")
+            print(f"     Error type: {type(e).__name__}")
+            print(f"     Error message: {e}")
+            print(f"     Tokens length: {len(tokens)}")
+            print(f"     First 10 tokens: {tokens[:10]}")
+            print(f"     Last 10 tokens: {tokens[-10:]}")
+            raise  # Re-raise to fail the generation
+
+    print("All sequences decoded successfully!\n")
+    return all_decoded
+
+
+class TrainingEvaluator:
+    """
+    Evaluator for training-time validation and sampling.
+
+    This evaluator:
+    1. Computes validation loss and bits per byte (BPB) on validation data
+    2. Generates sample text during training for qualitative evaluation
+    3. Logs results to wandb
+    """
+
+    def __init__(
+        self,
+        model,
+        eval_dataloader_builder,
+        device,
+        master_process,
+        ddp,
+        batch_size,
+        block_size,
+        ddp_rank=0,
+        ddp_world_size=1,
+        generation_log_file=None,
+        token_bytes_path=None,
+        val_loss_tokens=None,
+        sample_seed=42,
+        use_kv_cache=True,
+        generation_verbose=False,
+        temperature=0.8,
+        top_k=50,
+        repetition_penalty=1.2,
+        eval_dataloader=None,
+    ):
+        """
+        Initialize training evaluator (nanochat-style).
+
+        Args:
+            model: The model to evaluate
+            eval_dataloader_builder: Callable that returns a fresh validation dataloader
+            device: Device to run evaluation on
+            master_process: Whether this is the master process
+            ddp: Whether using DDP
+            batch_size: Batch size (required - used to calculate validation steps from tokens)
+            block_size: Sequence length (required - used to calculate validation steps from tokens)
+            ddp_rank: DDP rank
+            ddp_world_size: DDP world size
+            generation_log_file: Path to save generation samples
+            token_bytes_path: Path to token_bytes.pt for BPB calculation
+            val_loss_tokens: Number of tokens to use for validation (nanochat default: 20 * 524288)
+            sample_seed: Random seed for sampling
+            use_kv_cache: Whether to use KV cache for generation
+            generation_verbose: Whether to print verbose progress during generation (default: False)
+            temperature: Sampling temperature for generation (default: 0.8)
+            top_k: Top-k sampling parameter (default: 50)
+            eval_dataloader: Optional eval dataloader instance for cleanup (default: None)
+        """
+        self.model = model
+        self.eval_dataloader_builder = eval_dataloader_builder
+        self.eval_dataloader = eval_dataloader
+        self.device = device
+        self.master_process = master_process
+        self.ddp = ddp
+        self.ddp_rank = ddp_rank
+        self.ddp_world_size = ddp_world_size
+        self.generation_log_file = generation_log_file
+        self.sample_seed = sample_seed
+        self.use_kv_cache = use_kv_cache
+        self.generation_verbose = generation_verbose
+        self.batch_size = batch_size
+        self.block_size = block_size
+        self.temperature = temperature
+        self.top_k = top_k
+        self.repetition_penalty = repetition_penalty
+
+        # Nanochat-style: Calculate validation steps from tokens (not row groups)
+        # Default: 20 * 524288 = 10,485,760 tokens
+        if val_loss_tokens is None:
+            val_loss_tokens = 20 * 524288  # nanochat default
+
+        # Calculate steps: eval_tokens / (batch_size * block_size * world_size)
+        tokens_per_batch = batch_size * block_size * ddp_world_size
+        self.val_loss_steps = val_loss_tokens // tokens_per_batch
+        self.val_loss_tokens = val_loss_tokens
+
+        if master_process:
+            print("✓ Validation config (nanochat-style):")
+            print(f"   Tokens per validation: {val_loss_tokens:,}")
+            print(f"   Tokens per batch: {tokens_per_batch:,}")
+            print(f"   Validation steps: {self.val_loss_steps}")
+
+        # Load pre-computed token_bytes tensor for BPB calculation
+        if token_bytes_path is not None:
+            self._token_bytes = torch.load(token_bytes_path, weights_only=True).to(
+                self.device
+            )
+        else:
+            raise ValueError("token_bytes_path is required for BPB calculation")
+
+    def estimate_validation_loss(self, step, global_step=None, total_flops=None):
+        """
+        Estimate average loss on validation set and compute bits per byte (BPB).
+        BPB is tokenization-independent: normalized by actual byte length of tokens.
+
+        Nanochat-style: Creates a fresh validation dataloader each time to ensure
+        consistent starting point for validation.
+
+        Args:
+            step: Current step within epoch
+            global_step: Global step across all epochs (for wandb logging)
+            total_flops: Total training FLOPs so far (for wandb logging)
+
+        Returns:
+            float: Validation loss
+        """
+        start_time = time.time()
+
+        self.model.eval()
+
+        # Nanochat-style: Create a fresh validation dataloader each time
+        # This ensures we always start from the beginning of validation set
+        eval_dataloader = self.eval_dataloader_builder()
+        val_loss_steps = self.val_loss_steps
+
+        token_bytes = self._token_bytes
+        # Accumulators for loss and BPB
+        # Track sum of losses and count of valid tokens (excluding special tokens)
+        total_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        total_valid_tokens = torch.tensor(0, dtype=torch.int64, device=self.device)
+        total_nats = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        total_bytes = torch.tensor(0, dtype=torch.int64, device=self.device)
+
+        with torch.no_grad():
+            for k in range(val_loss_steps):
+                X, Y = next(eval_dataloader)
+                X = X.to(self.device)
+                Y = Y.to(self.device)
+                with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
+                    _, per_token_loss = self.model(
+                        X, Y, loss_reduction="none"
+                    )  # (B*T,)
+
+                # BPB calculation (also used for consistent val_loss calculation)
+                # accumulate_bpb returns the valid_mask, which we reuse for val_loss
+                nats, bytes, valid_mask = accumulate_bpb(per_token_loss, Y, token_bytes)
+                total_nats += nats
+                total_bytes += bytes
+
+                # Use the same valid_mask for val_loss (excludes special tokens and ignored tokens)
+                total_loss_sum += (per_token_loss * valid_mask).sum()
+                total_valid_tokens += valid_mask.sum()
+
+        self.model.train()
+
+        # Reduce across ranks
+        if self.ddp_world_size > 1:
+            dist.all_reduce(total_loss_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_valid_tokens, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
+
+        elapsed_time = time.time() - start_time
+
+        # Calculate val_loss (average loss per valid token, excluding special tokens)
+        total_loss_sum_val = total_loss_sum.item()
+        total_valid_tokens_val = total_valid_tokens.item()
+        if total_valid_tokens_val == 0:
+            val_loss = float("inf")
+        else:
+            val_loss = total_loss_sum_val / total_valid_tokens_val
+
+        # Calculate BPB
+        total_nats_val = total_nats.item()
+        total_bytes_val = total_bytes.item()
+        if total_bytes_val == 0:
+            val_bpb = float("inf")
+        else:
+            val_bpb = total_nats_val / (math.log(2) * total_bytes_val)
+
+        if self.master_process:
+            print(f"\n{'='*80}")
+            print(
+                f"📊 VALIDATION | Step {step:>5} | Val Loss: {val_loss:.4f} | BPB: {val_bpb:.4f} | Time: {elapsed_time:.2f}s"
+            )
+            print(f"{'='*80}\n")
+
+            log_dict = {
+                "val_loss": val_loss,
+                "val_bpb": val_bpb,
+                "step": global_step if global_step is not None else step,
+            }
+
+            # Add FLOPs for validation BPB vs FLOPs plot
+            if total_flops is not None:
+                log_dict["total_training_flops_val"] = total_flops
+
+            wandb.log(log_dict)
+
+        return val_loss
+
+    def sample_from_model(
+        self,
+        num_sequences=4,
+        max_length=255,
+        context="Hello, I'm a language model,",
+        step=None,
+    ):
+        if not self.master_process:
+            return
+
+        start_time = time.time()
+
+        sample_rng = torch.Generator(device=self.device)
+        sample_rng.manual_seed(self.sample_seed + self.ddp_rank)
+
+        # Prepend BOS token to match training data format
+        # The model was trained with BOS-aligned sequences, so we should include it
+        if not context.startswith("<|bos|>"):
+            context_with_bos = "<|bos|>" + context
+        else:
+            context_with_bos = context
+
+        cache_status = "with KV cache" if self.use_kv_cache else "without KV cache"
+        print(
+            f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
+        )
+
+        # =====================================================================
+        # CRITICAL: Set model to eval mode for generation
+        # =====================================================================
+        # This disables dropout, switches batch norm to inference mode, etc.
+        # Without this, generation would have dropout randomly dropping activations!
+        self.model.eval()
+
+        # Note: self.model is already the raw unwrapped model (passed from trainer)
+        # No need to unwrap from DDP since nanochat-style doesn't use DDP wrapper
+        decoded = generate(
+            num_sequences=num_sequences,
+            max_length=max_length,
+            model=self.model,
+            context=context_with_bos,  # Use context with BOS prepended
+            device=self.device,
+            random_number_generator=sample_rng,
+            use_kv_cache=self.use_kv_cache,
+            verbose=self.generation_verbose,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            repetition_penalty=self.repetition_penalty,
+        )
+
+        # =====================================================================
+        # CRITICAL: Restore training mode after generation
+        # =====================================================================
+        # The model needs to be back in training mode for continued training
+        self.model.train()
+
+        elapsed_time = time.time() - start_time
+
+        # Print to console (truncated)
+        print(f"🎯 SAMPLE GENERATIONS (Time: {elapsed_time:.2f}s):")
+        for i, decoded_seq in enumerate(decoded, 1):
+            # Truncate if too long and add ellipsis
+            display_text = (
+                decoded_seq if len(decoded_seq) <= 200 else decoded_seq[:200] + "..."
+            )
+            print(f"  {i}. {display_text}")
+        print()
+
+        # Save full generations to log file
+        if self.generation_log_file:
+            from datetime import datetime
+
+            with open(self.generation_log_file, "a") as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                step_info = f"Step {step}" if step is not None else "Unknown Step"
+                f.write(f"\n{'='*80}\n")
+                f.write(f"[{timestamp}] {step_info}\n")
+                f.write(f"Context: {context}\n")
+                f.write(f"{'-'*80}\n")
+                for i, decoded_seq in enumerate(decoded, 1):
+                    f.write(f"\nGeneration {i}:\n")
+                    f.write(f"{decoded_seq}\n")
+                    if i < len(
+                        decoded
+                    ):  # Add separator between generations, but not after last one
+                        f.write(f"{'-'*80}\n")
+                f.write(f"{'='*80}\n")
