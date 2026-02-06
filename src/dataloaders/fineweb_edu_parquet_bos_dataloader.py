@@ -502,8 +502,8 @@ class SimpleCollator:
         #   inputs  = [[5, 10, 15, 20]]           (shape 1, 4)
         #   targets = [[10, 15, 20, 25]]          (shape 1, 4)
         #   model predicts: 5→10, 10→15, 15→20, 20→25
-        inputs = packed_batch[:, :-1].clone()  # (B, T): tokens [0, T-1]
-        targets = packed_batch[:, 1:].clone()  # (B, T): tokens [1, T]
+        inputs = packed_batch[:, :-1]  # (B, T): tokens [0, T-1]
+        targets = packed_batch[:, 1:]  # (B, T): tokens [1, T]
 
         return inputs, targets, stats
 
