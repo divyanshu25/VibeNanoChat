@@ -247,7 +247,7 @@ run-depth-sweep: ## Run training across multiple depths. Usage: make run-depth-s
 	fi; \
 	echo "⚡ Muon optimizer enabled for all runs"; \
 	echo ""; \
-	for DEPTH in 8 10 12 1416 18 20; do \
+	for DEPTH in 10 12 14 16 18 20; do \
 		echo "  🧹 GPU cleanup..."; \
 		$(MAKE) kill-gpu; \
 		sleep 20; \

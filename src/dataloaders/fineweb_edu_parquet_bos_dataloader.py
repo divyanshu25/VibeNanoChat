@@ -208,6 +208,7 @@ class BestFitCollator:
         block_size: int,
         buffer_size: int = 1000,
         device: str = "cuda",
+        seed: Optional[int] = None,
     ):
         # input validation
         if batch_size <= 0:
@@ -228,6 +229,9 @@ class BestFitCollator:
         self.block_size = block_size
         self.buffer_size = buffer_size
         self.device = device
+
+        # Seeded RNG for reproducible buffer overflow drops
+        self.rng = random.Random(seed) if seed is not None else random.Random()
 
         self.doc_buffer = SortedList()  # sorted by length for O(log n) best-fit search
 
@@ -274,7 +278,7 @@ class BestFitCollator:
         if len(self.doc_buffer) > max_buffer:
             # drop 25% of documents randomly to prevent unbounded growth
             num_to_drop = len(self.doc_buffer) // 4
-            dropped_indices = random.sample(range(len(self.doc_buffer)), num_to_drop)
+            dropped_indices = self.rng.sample(range(len(self.doc_buffer)), num_to_drop)
 
             # track dropped documents as wastage (sum their tokens)
             dropped_tokens = sum(self.doc_buffer[i].length for i in dropped_indices)
@@ -399,6 +403,7 @@ class FinewebEduParquetBOSDataloader:
         num_workers: int = 4,
         persistent_workers: bool = True,
         depth: Optional[int] = None,
+        collator_seed: Optional[int] = 42,
     ):
         """
         Initialize BOS dataloader with best-fit packing.
@@ -414,6 +419,7 @@ class FinewebEduParquetBOSDataloader:
             num_workers: Parallel I/O workers (4 is good default)
             persistent_workers: Keep workers alive across epochs (saves startup)
             depth: Model depth for auto-scaling dataloader_batch_size and prefetch_factor (None = use defaults)
+            collator_seed: Seed for reproducible buffer overflow drops (default: 42)
         """
         # input validation
         if not os.path.isdir(data_dir):
@@ -464,10 +470,11 @@ class FinewebEduParquetBOSDataloader:
             # Format: max_depth: (multiplier, min_docs, prefetch_factor)
             depth_scaling_config = {
                 8: (4, 256, 1),  # shallow models: high throughput, aggressive prefetch
-                10: (4, 256, 1),  #
-                14: (3, 128, 1),  # medium models: moderate doc buffer
-                18: (2, 128, 1),  # deeper models: reduced buffer, conservative prefetch
-                22: (2, 64, 1),  # deep models: minimal buffer
+                10: (4, 128, 1),  #
+                12: (4, 96, 1),  #
+                14: (3, 72, 1),  # medium models: moderate doc buffer
+                18: (2, 64, 1),  # deeper models: reduced buffer, conservative prefetch
+                22: (2, 32, 1),  # deep models: minimal buffer
                 float("inf"): (2, 32, 1),  # very deep models: minimal buffer
             }
 
@@ -515,7 +522,9 @@ class FinewebEduParquetBOSDataloader:
         )
 
         # create collator: packs variable-length docs → fixed (B, T) sequences
-        self.collator = BestFitCollator(batch_size, block_size, buffer_size, device)
+        self.collator = BestFitCollator(
+            batch_size, block_size, buffer_size, device, seed=collator_seed
+        )
 
         # PyTorch edge case: num_workers=0 requires prefetch_factor=None, persistent_workers=False
         if num_workers == 0:
