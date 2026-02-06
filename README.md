@@ -2,6 +2,15 @@
 
 The simplest, fastest way to train GPT-2 scale language models from scratch. This repo combines nanoGPT's clean implementation with nanochat's depth parameterization and scaling law tools into a single unified codebase.
 
+
+## Credits and References
+
+**Foundational work:**
+
+- **Andrej Karpathy**: [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat). This repo exists because of his work. The GPT-2 implementation, training loop, DistMuon optimizer, depth parameterization, and scaling law methodology all come from these repos.
+- **Vaswani et al.**: [Attention is All You Need](https://arxiv.org/abs/1706.03762) (2017) - Introduced the Transformer architecture
+- **Radford et al.**: [Language Models are Unsupervised Multitask Learners](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (2019) - The GPT-2 paper showing that large language models learn multiple tasks from pure next-token prediction
+
 **Core features:**
 
 - Train GPT-2 (124M parameters) from scratch
@@ -632,14 +641,6 @@ The codebase is designed to be hackable. The philosophy: explicit over clever, s
 - Type hints on public APIs, optional internally.
 
 **Pull requests welcome!** If you improve something or add a useful feature, submit a PR. Include before/after numbers if it's a performance change.
-
-## Credits and References
-
-**Foundational work:**
-
-- **Andrej Karpathy**: [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat). This repo exists because of his work. The GPT-2 implementation, training loop, DistMuon optimizer, depth parameterization, and scaling law methodology all come from these repos.
-- **Vaswani et al.**: [Attention is All You Need](https://arxiv.org/abs/1706.03762) (2017) - Introduced the Transformer architecture
-- **Radford et al.**: [Language Models are Unsupervised Multitask Learners](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (2019) - The GPT-2 paper showing that large language models learn multiple tasks from pure next-token prediction
 
 **Datasets:**
 
