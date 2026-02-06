@@ -1,6 +1,6 @@
 # VibeNanoChat
 
-The simplest, fastest way to train GPT-2 scale language models from scratch. This repo combines nanoGPT's clean implementation with nanochat's depth parameterization and scaling law tools into a single unified codebase.
+I built this to learn and implement nanoGPT and nanoChat from scratch—with AI as my coding buddy. Hence the name.
 
 
 ## Credits and References
