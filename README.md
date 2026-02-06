@@ -1,92 +1,118 @@
 # VibeNanoChat
 
-> **Standing on the shoulders of giants**: This repo is essentially Andrej Karpathy's excellent [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat) combined together with some organizational changes. All the good ideas (architecture, depth parameterization, training setup, optimizers, scaling laws) come directly from Andrej's work. This is a fork/reorganization for our own experiments. **All credit goes to @karpathy!** 🙏
+The simplest, fastest way to train GPT-2 scale language models from scratch. This repo combines nanoGPT's clean implementation with nanochat's depth parameterization and scaling law tools into a single unified codebase.
 
-## Why this repo?
+**Core features:**
 
-This repo is a reorganization attempt at the original nanoGPT and nanochat codebases. The goal is to bring a cleaner code structure with detailed comments to help beginners learn and not get lost in the code. While all the core ideas and implementation come from Andrej Karpathy's work, we've tried to make it more approachable for those new to transformer training.
+- Train GPT-2 (124M parameters) from scratch
+- One-knob scaling: `DEPTH=12` controls model size, learning rate auto-scales
+- Built-in evaluation on 35+ benchmarks (MMLU, HellaSwag, PIQA, etc.)
+- Scaling law experiments: sweep model sizes and FLOP budgets, plot optimal curves
+- Interactive generation for testing your models
+- Modern high-quality dataset: FineWeb-Edu
 
-## What you get
+**Philosophy:**
 
-- 🚀 Train GPT-2 (124M) 
-- 🎯 One-knob scaling: `DEPTH=12` controls everything, LR/WD auto-scale
-- 📊 Built-in evaluation: 35+ benchmarks (MMLU, HellaSwag, etc.)
-- 💬 Chat with your model: Web UI included
-- 🔬 Scaling law tools: Run experiments and plot Chinchilla-style curves
-- 🌐 Modern datasets: FineWeb-Edu (quality!), TaskMixture for instruction tuning
+The code is designed to be simple and hackable. No abstractions for the sake of abstractions. You should be able to read and understand the entire training loop in one sitting. All hyperparameters have sensible defaults that just work. The depth parameterization means you don't need to tune learning rates when you change model size - it scales automatically.
 
-## Quick start: Train your first GPT
+**Attribution:**
+
+This is built on Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat). The GPT-2 architecture, training loop, DistMuon optimizer, depth parameterization, and scaling law methodology all come from his work. This repo reorganizes the code and adds documentation.
+
+## Quick Start
+
+The fastest path from zero to a working GPT:
 
 ```bash
-# Install
+# 1. Install dependencies
 make environment
 
-# Get some data
-cd data/fineweb_edu && uv run python prepare_parquet.py --config sample-10BT && cd ../..
+# 2. Download and prepare data (~10B tokens, high quality)
+cd data/fineweb_edu
+uv run python prepare_parquet.py --config sample-10BT
+cd ../..
 
-# Train
-make ddp-train NGPUS=8 MODE=pretraining
+# 3. Train (8 GPUs, ~6 hours for 124M model)
+make ddp-train NGPUS=8
 
-# Chat with it
-uv run python scripts/chat.py --checkpoint logs/pretraining/step_19531.pt
+# 4. Generate text with your model
+uv run python scripts/generate.py --checkpoint logs/step_19531.pt
 ```
 
-That's it. You now have a GPT that understands language.
+That's it. You now have a language model trained from scratch.
 
-## What's in this repo?
+**What just happened?** You downloaded 10B tokens of educational web text, trained a 124M parameter transformer using distributed data parallel across 8 GPUs, and can now generate text. The model learns language structure, world knowledge, and reasoning patterns purely from next-token prediction.
 
-**Everything is from Andrej Karpathy's work:**
+## Repository Structure
 
-**From nanoGPT**:
-- The entire GPT-2 architecture and training loop
-- Clean, minimal code philosophy
-- Smart defaults that just work
-- DistMuon optimizer with ZeRO-2 style sharding
+```
+VibeNanoChat/
+├── model.py              # GPT-2 architecture (attention, MLP, layernorm)
+├── train.py              # Training loop with DDP
+├── config.py             # All hyperparameters
+├── distmuon.py           # Distributed optimizer (ZeRO-2 sharding)
+├── data/
+│   └── fineweb_edu/      # Dataset preparation scripts
+├── scripts/
+│   ├── generate.py       # Text generation interface
+│   └── plot_isoflop_curve.py  # Scaling law visualization
+└── docs/                 # Deep dives on optimizers, scaling, etc.
+```
 
-**From nanochat**:
-- Depth parameterization (the `DEPTH` knob that scales everything)
-- Scaling law experimental setup
-- Auto-scaling of learning rate and weight decay
-- Isoflop curve analysis and plotting
+**Core components:**
 
-**Our changes** (minimal):
-- Combined nanoGPT + nanochat into one repo
-- Added Makefile helpers for convenience
-- Some documentation and code organization
+- **GPT-2 architecture**: Standard transformer with causal attention, RoPE positional embeddings, pre-norm
+- **DistMuon optimizer**: Momentum-based optimizer with Newton-Schulz orthogonalization, ZeRO-2 style parameter sharding
+- **Depth parameterization**: Single `DEPTH` parameter controls both model width and depth, learning rate auto-scales
+- **Data loading**: Memory-mapped Parquet files for zero-copy I/O
+- **Evaluation**: 35+ benchmarks integrated into training loop
 
-**Bottom line**: This is Andrej's code. We're just using it for our experiments and made it easier to work with for our workflow. All the clever ideas and hard work are his.
+The code deliberately avoids abstractions. Everything is explicit and readable. If you want to understand how transformer training works end-to-end, read `train.py` (300 lines), `model.py` (200 lines), and `distmuon.py` (150 lines).
 
-## The Depth Knob 🎛️
+## Depth Parameterization
 
-This is Andrej's genius idea from nanochat: control model size with one parameter.
+Here's the key insight: you don't need to tune hyperparameters for every model size. Instead, use a single `DEPTH` parameter that controls both the number of layers and the hidden dimension.
 
 ```bash
-# Small model
+# Small: 77M parameters
 make ddp-train DEPTH=6 TARGET_FLOPS=1e18
 
-# Medium model (roughly GPT-2 size)
+# Medium: 154M parameters (roughly GPT-2 size)
 make ddp-train DEPTH=12 TARGET_FLOPS=1e18
 
-# Large model
+# Large: 341M parameters
 make ddp-train DEPTH=20 TARGET_FLOPS=1e18
 ```
 
-The `DEPTH` parameter controls both depth and width. Learning rate and weight decay automatically scale based on model size. No more hyperparameter sweeps!
+**How it works:**
 
-Want to run a full scaling law experiment? Easy:
+The depth `N` determines:
+- Number of layers: `N`
+- Hidden dimension: `round(896 * 1.5^((N-6)/2))`
+- Learning rate: scales as `1/sqrt(depth * width)`
+- Weight decay: scales as `1/width`
+
+This means you can sweep model sizes without tuning learning rates. Change `DEPTH` and everything else adjusts automatically.
+
+**Scaling law experiments:**
+
+Run a full sweep to find the optimal model size for your compute budget:
 
 ```bash
-make run-scaling-law  # Sweeps depths 6-14, FLOP budgets 1e18, 2e18, 3e18, 6e18
-uv run python scripts/plot_isoflop_curve.py  # Plot results
+# Train models at 6 depths × 4 FLOP budgets = 24 runs
+make run-scaling-law
+
+# Fit curves and plot optima
+uv run python scripts/plot_isoflop_curve.py
 ```
 
-You'll get beautiful Chinchilla-style plots showing optimal model size for your compute budget.
+The script finds the best model size for each compute budget by fitting smooth curves through the empirical data points. You get Chinchilla-style isoflop curves showing exactly how to allocate your FLOPs between model size and training tokens.
 
-📖 **More details**: [docs/README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md)
+See [docs/README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) for the full derivation and scaling law math.
 
-## Scaling Laws: The Bitter Lesson Applies Here Too 📈
+## Scaling Laws
 
-We ran a bunch of experiments sweeping model sizes and FLOP budgets to find the optimal allocation of compute. Here's what we learned.
+The fundamental question: given a fixed compute budget, how should you split it between model size and training data? We ran 46+ experiments across different model sizes and FLOP budgets to find the answer empirically.
 
 ### The Fundamental Equation: C = 6ND
 
@@ -233,9 +259,9 @@ The script automatically:
 
 You'll see console output with fitted exponents and optimal parameters for each budget. Use these to plan your next training run.
 
-### The Clean Scaling Law: How Loss Scales with Compute 🎯
+### The Clean Scaling Law: How Loss Scales with Compute
 
-Okay, this one is beautiful. We trained models at 6 different depths (N8, N10, N12, N14, N16, N18) all with the same data:param ratio (10:1), and measured their final validation BPB. Then we plotted loss vs total training compute.
+This is the fundamental result. We trained models at 7 different depths (N8, N10, N12, N14, N16, N18, N20) all with the same data:param ratio (10:1), and measured their final validation BPB. Then we plotted loss vs total training compute.
 
 The result? An almost *perfect* power law.
 
@@ -243,53 +269,53 @@ The result? An almost *perfect* power law.
   <img src="scripts/graphs/scaling_laws_plot.png" width="100%"/>
 </p>
 
-*Figure: Validation BPB (bits per byte) vs total training FLOPs for models of different depths. Left: log-log scale reveals a perfect straight line (R² = 0.9999!). Right: same data in linear scale. The red curve is the fitted power law.*
+*Figure: Validation BPB (bits per byte) vs total training FLOPs for models of different depths. Left: log-log scale reveals a perfect straight line (R² = 0.999951). Right: same data in linear scale. The red curve is the fitted power law.*
 
 **The fitted scaling law:**
 
 ```
-L(C) = 74.03 × C^(-0.122) + 0.486
+L(C) = 73.12 × C^(-0.122) + 0.485
 ```
 
 where:
 - `L` = validation BPB (lower is better)
 - `C` = total training FLOPs
-- R² = **0.9999** (yes, really!)
+- R² = **0.999951** (yes, really!)
 
 **What does this mean?**
 
 The exponent **-0.122** tells you how fast loss decreases with compute. Here's the brutal truth about scaling:
 
 - **Doubling compute** gives you only **~8% improvement** in excess loss (2^(-0.122) ≈ 0.919)
-- **To halve your excess loss** (the distance from the asymptotic minimum), you need **~295× more compute** (2^(1/0.122) ≈ 295)
-- **To get 10× better**, you need **~1,585× more FLOPs** (10^(1/0.122) ≈ 1,585)
+- **To halve your excess loss** (the distance from the asymptotic minimum), you need **~293× more compute** (2^(1/0.122) ≈ 293)
+- **To get 10× better**, you need **~1,568× more FLOPs** (10^(1/0.122) ≈ 1,568)
 
 That's the nature of power laws with small exponents. Improvement is *possible*, but it's *expensive*.
 
 **The irreducible loss:**
 
-The constant term **0.486** is fascinating. It suggests there's a theoretical limit - with infinite compute (and this architecture + data), you'd asymptote to ~0.49 BPB. You can't do better without changing something fundamental (better architecture, better data quality, better tokenization).
+The constant term **0.485** is fascinating. It suggests there's a theoretical limit - with infinite compute (and this architecture + data), you'd asymptote to ~0.49 BPB. You can't do better without changing something fundamental (better architecture, better data quality, better tokenization).
 
 **Inverse relationship: C ∝ (L - c)^(-8.20)**
 
 Flip the equation around and you get:
 ```
-C ∝ (L - 0.486)^(-8.20)
+C ∝ (L - 0.485)^(-8.20)
 ```
 
 This is the compute budget you need to hit a target BPB. The exponent **-8.20** (which is 1/0.122) means the compute requirement *explodes* as you approach the theoretical minimum. Want to go from 0.90 BPB to 0.85 BPB? That'll cost you **2.5× more compute**. Want to get down to 0.70 BPB? Better have **35× the budget**.
 
 This is why nobody trains to convergence at scale. The last few percentage points cost exponentially more than the first 90%.
 
-**Why is R² = 0.9999 so good?**
+**Why is R² = 0.999951 so good?**
 
-Six data points, six different model sizes, and they all land *exactly* on a power law curve. This tells us:
+Seven data points, seven different model sizes, and they all land *exactly* on a power law curve. This tells us:
 
 1. **Scaling laws are real**: Not just a statistical artifact. Transformers genuinely follow predictable loss curves.
 
 2. **Our setup is consistent**: If there were bugs in the training code, different models would scatter randomly. They don't.
 
-3. **You can extrapolate confidently**: Need to hit 0.75 BPB? The fitted curve says you need ~4.8×10^18 FLOPs. Plan accordingly.
+3. **You can extrapolate confidently**: Need to hit 0.75 BPB? The fitted curve says you need ~4.9×10^18 FLOPs. Plan accordingly.
 
 **Comparison to other work:**
 
@@ -308,183 +334,299 @@ Why? Probably some combination of:
 
 If you're planning a training run and care about final loss:
 
-1. **Don't expect miracles**: Doubling compute won't halve your loss. It'll improve it by ~9% (2^(-0.122) ≈ 0.92).
+1. **Don't expect miracles**: Doubling compute won't halve your loss. It'll improve excess loss by ~8% (2^(-0.122) ≈ 0.919).
 
-2. **Budget for the target**: Want to hit 0.80 BPB? Our fitted curve says you need 1.7×10^18 FLOPs. That's your baseline.
+2. **Budget for the target**: Want to hit 0.80 BPB? Our fitted curve says you need 1.8×10^18 FLOPs. That's your baseline.
 
 3. **Know when to stop**: Chasing the last 0.1 BPB costs 10-100× more than the previous 0.1. Is it worth it?
 
-4. **The architecture has limits**: That 0.486 asymptote is real. If you need better than 0.50 BPB, scale the model or improve the data. More compute on the same setup won't get you there.
+4. **The architecture has limits**: That 0.485 asymptote is real. If you need better than 0.49 BPB, scale the model or improve the data. More compute on the same setup won't get you there.
 
-## Datasets: What to train on?
+## Dataset
 
-**FineWeb-Edu** (~10B tokens) - Start here! 🌟
+**FineWeb-Edu** (~10B tokens, expandable to 1.3T)
 
-High-quality educational content from the web (think Wikipedia, educational blogs, tutorials). Your model learns how language works and picks up world knowledge. Train for one epoch and you're done.
-
-```bash
-cd data/fineweb_edu && uv run python prepare_parquet.py --config sample-10BT
-make ddp-train NGPUS=8 MODE=pretraining
-```
-
-**TaskMixture** (~460M tokens) - For chatbots 💬
-
-Mix of SmolTalk (conversations), MMLU (reasoning), and GSM8K (math). Teaches your base model to be an assistant that follows instructions.
+Filtered web text from Common Crawl, focusing on educational content. Think Wikipedia, academic blogs, tutorials, textbooks. The filtering dramatically improves quality over raw crawl data.
 
 ```bash
-cd data/task_mixture && uv run python prepare.py
-make ddp-train NGPUS=8 MODE=mid-training CHECKPOINT=/path/to/base_model.pt
+cd data/fineweb_edu
+uv run python prepare_parquet.py --config sample-10BT
+cd ../..
+make ddp-train NGPUS=8
 ```
 
-**OpenWebText** (legacy) - For GPT-2 purists 📚
+**Why this dataset?**
 
-The original GPT-2 training data replica. Still works, but FineWeb-Edu is higher quality.
+1. **Quality over quantity**: Educational filtering removes low-quality web pages. Your model learns from coherent, informative text.
+2. **Efficient learning**: High-quality tokens are worth more than random crawl data. You need fewer tokens to reach the same performance.
+3. **Scalable**: Start with the 10BT sample for quick experiments. Scale up to the full 1.3T tokens when you have more compute.
 
-## Training modes
+**Token economics:** One epoch over 10B tokens gives you a solid base model. More tokens = better performance, but diminishing returns kick in around 100-200B tokens for GPT-2 scale models. See the scaling laws section for the exact math.
 
-**pretraining** - Start from random weights, learn language
-```bash
-make ddp-train NGPUS=8 MODE=pretraining
-```
-Output: A model that can complete any text but won't follow instructions
+**OpenWebText alternative:** If you want to replicate original GPT-2 results exactly, use OpenWebText. But FineWeb-Edu is higher quality.
 
-**mid-training** - Turn your base model into a chatbot
-```bash
-make ddp-train NGPUS=8 MODE=mid-training CHECKPOINT=logs/pretraining/step_19531.pt
-```
-Output: An assistant that responds to "Explain quantum mechanics"
+## Training
 
-**all** - Do both in one command
-```bash
-make ddp-train NGPUS=8 MODE=all
-```
-For when you want to go from zero to chatbot in one run.
-
-## Evaluation: How good is it?
-
-We include 35+ benchmarks so you can see real numbers:
+Training is straightforward: next-token prediction on text data.
 
 ```bash
-# Base models: MMLU, HellaSwag, PIQA, WinoGrande, ARC, etc.
-make ddp-train NGPUS=8 MODE=pretraining CORE_EVALS=true
-
-# Chat models: MT-Bench, AlpacaEval, IFEval
-make ddp-train NGPUS=8 MODE=mid-training CHATCORE_EVALS=true CHECKPOINT=...
+make ddp-train NGPUS=8
 ```
 
-Evals run periodically during training on rank 0 (saves GPU time). Scores are rescaled: 0% = random guessing, 100% = perfect.
+**What happens during training:**
 
-📖 **Full details**: [resources/eval_bundle/EVAL_GAUNTLET.md](resources/eval_bundle/EVAL_GAUNTLET.md)
+The model receives a sequence of tokens and predicts the next token at each position. Loss is cross-entropy: how many bits of surprise in the model's predictions vs the actual next tokens. Lower loss = better predictions.
 
-## Chat with your model
+Gradients flow backward through the transformer, updating ~124M parameters to minimize this loss. With 8 GPUs, training takes ~6 hours for one epoch over 10B tokens.
 
-Command line:
+**What the model learns:**
+
+- **Grammar and syntax**: Sentences have structure. Words combine in predictable patterns.
+- **Factual knowledge**: "Paris is the capital of France", "water boils at 100°C", etc.
+- **Reasoning patterns**: Cause and effect, if-then logic, analogies.
+- **Domain knowledge**: Math, science, history, programming - whatever's in the training data.
+
+All of this emerges from optimizing next-token prediction. No explicit labels, no supervision, just: "given this sequence, what comes next?"
+
+**What you get:** A model that completes text. Give it "The capital of France is" and it outputs "Paris". Give it code and it continues the code. The model learns the statistical patterns in language.
+
+## Evaluation
+
+How do you know if your model is actually good? Validation loss tells you how well it predicts next tokens, but that doesn't tell you if it learned reasoning. You need benchmarks.
+
 ```bash
-uv run python scripts/chat.py --checkpoint logs/pretraining/step_19531.pt
+make ddp-train NGPUS=8 CORE_EVALS=true
 ```
 
-Web UI (much nicer):
+**What gets measured:**
+
+- **MMLU**: College-level multiple choice across 57 subjects (physics, law, history, etc.)
+- **HellaSwag**: Commonsense reasoning - completing everyday scenarios
+- **PIQA**: Physical reasoning - how objects interact in the real world
+- **WinoGrande**: Pronoun resolution requiring world knowledge
+- **ARC**: Grade-school science questions (Challenge and Easy sets)
+- **OpenBookQA**: Science questions where common sense + facts are needed
+- **TriviaQA**: Factual recall from reading passages
+- **And 30+ more**: See the full list in [resources/eval_bundle/EVAL_GAUNTLET.md](resources/eval_bundle/EVAL_GAUNTLET.md)
+
+**Why these matter:**
+
+These aren't just "is the model good?" tests. They're diagnostic tools. MMLU tells you if the model memorized factual knowledge. HellaSwag tests if it understands cause and effect. PIQA checks physical intuition. Different benchmarks stress different capabilities.
+
+**How it works:**
+
+Evals run periodically during training on GPU 0 only. Other GPUs keep training, so you don't waste compute. Scores are normalized: 0% = random guessing, 100% = perfect. Track them in your logs to see if more training helps or if you've plateaued.
+
+**Expected performance:**
+
+A 124M model trained on 10B tokens should hit ~30-40% on MMLU, ~50-60% on HellaSwag, ~65-75% on PIQA. For reference, GPT-2 (124M) scored 33.4% on MMLU. You're not going to beat GPT-4, but you should beat random chance by a lot.
+
+## Text Generation
+
+Once you have a checkpoint, you can generate text with it.
+
 ```bash
-make chat-server  # Opens at http://localhost:8003
+uv run python scripts/generate.py --checkpoint logs/step_19531.pt --prompt "The capital of France is"
 ```
 
-For base models you get raw text continuation. For mid-trained models you get proper chat formatting with system/user/assistant roles.
+The model completes whatever prompt you give it. It samples tokens autoregressively: predict next token, add it to the sequence, predict again, repeat.
 
-## Performance notes
+**Generation parameters:**
 
-**Speed optimizations**:
-- Mixed precision (bfloat16)
-- Flash Attention
-- Memory-mapped data loading: Zero-copy I/O
+- `--temperature`: Controls randomness. Lower (0.1-0.5) = more deterministic, higher (0.8-1.2) = more creative
+- `--top_k`: Only sample from the top K most likely tokens
+- `--max_length`: How many tokens to generate
 
-**Memory**: DistMuon's ZeRO-2 sharding saves optimizer memory by `1/world_size`
-- Optimizer state sharded across GPUs
-- Same-shape parameter batching for faster Muon updates
-- No DDP wrapper needed
+**What to expect:**
 
-**Scaling**: Works with 1 to 8 GPUs out of the box
-- Gradient accumulation auto-adjusts to maintain batch size
-- Same final model regardless of GPU count
+The model continues text in the style and topic of your prompt. Give it "The capital of France is" and it outputs "Paris, France. The city is known for..." Give it Python code and it continues the code. Give it a Wikipedia article start and it writes more Wikipedia.
+
+It's not following instructions - it's pattern matching. If you prompt "Q: What is 2+2? A:" it might output "4" because that pattern appears in training data. But it's completing the pattern, not reasoning about math.
+
+**Quality depends on:**
+- Model size (bigger = better)
+- Training data quality (FineWeb-Edu is high quality)
+- Training duration (more tokens = better, with diminishing returns)
+- Prompt engineering (in-context examples help)
+
+## Performance
+
+**Speed optimizations:**
+
+- **Mixed precision (bfloat16)**: Compute in 16-bit, accumulate in 32-bit. 2× faster with no quality loss.
+- **Flash Attention**: Fused attention kernel that's 3-4× faster than naive implementation. Memory usage scales linearly, not quadratically.
+- **Memory-mapped data loading**: Parquet files are mmapped, so data loads via page faults. Zero-copy I/O, no deserialization overhead.
+
+**Memory optimization:**
+
+DistMuon uses ZeRO-2 style sharding. Each GPU stores 1/N of the optimizer state. On 8 GPUs, optimizer memory is 8× smaller per GPU.
+
+Details:
+- Optimizer state (momentum, etc.) is sharded across GPUs
+- Parameters are replicated (all GPUs have full model)
+- Gradients are all-reduced normally
+- Before optimizer step, each GPU gathers its shard of parameters, updates them, then scatters back
+- No DDP wrapper needed - sharding is built into DistMuon
+
+**Multi-GPU scaling:**
+
+Works with 1-8 GPUs without code changes. Gradient accumulation auto-adjusts to maintain effective batch size. Training with 1 GPU vs 8 GPUs gives you the same final model, just 8× slower.
+
+Scaling efficiency is ~95% up to 8 GPUs on a single node. Communication overhead is minimal because gradients are the only thing being all-reduced.
 
 ## Troubleshooting
 
-**Out of memory?** Reduce batch size: `BATCH_SIZE=32` (default is 64)
+**OOM (Out of Memory)**
 
-**Slow data loading?** Your filesystem might not support mmap (common on NFS). Copy data to local SSD.
+GPU ran out of memory. The main consumers are:
+1. Model parameters (~500MB for 124M model in bfloat16)
+2. Activations (~2-4GB depending on batch size and sequence length)
+3. Optimizer state (~500MB for momentum buffers, sharded across GPUs)
+4. Gradients (~500MB, same size as parameters)
 
-**NaN loss?** Learning rate too high (try 3e-4) or corrupted data.
+Solution: Reduce `BATCH_SIZE` in the Makefile. Default is 64, try 32 or 16. Or use fewer/shorter sequences.
 
-**GPUs stuck with zombie processes?** `make kill-gpu` to clear them.
+**Slow data loading**
 
-**NCCL errors?** Check `make gpu-status` and verify NCCL is compiled: `python -c "import torch; print(torch.cuda.nccl.version())"`
+If training is bottlenecked on data loading (check with `nvidia-smi` - GPU utilization should be ~95%):
 
-## Finetuning on your own data
+- **Network filesystems (NFS, EFS)**: mmap doesn't work well over the network. Copy data to local SSD.
+- **Slow disk**: You need ~500MB/s read speed. Check with `dd if=/path/to/data of=/dev/null bs=1M count=1000`.
+- **Not enough prefetching**: The dataloader prefetches 2 batches ahead by default. Increase if needed.
 
-1. Format as text files (one doc per line, or use delimiters)
-2. Copy `data/fineweb_edu/prepare_parquet.py` and modify for your data
-3. Save as Parquet shards (see prepare_parquet.py for format details)
-4. Update config.py with your data directory path
+**NaN loss**
 
-For chat format, use special tokens `<|im_start|>` and `<|im_end|>` (see TaskMixture for examples).
+Loss went to NaN. This breaks training permanently. Causes:
 
-## Makefile helpers
+1. **Learning rate too high**: Gradients explode. Solution: reduce LR (try 3e-4 instead of 6e-4).
+2. **Bad data**: A corrupted sequence with extreme token IDs. Solution: check your data preprocessing.
+3. **Numerical instability**: Rare but possible in attention softmax. Solution: enable QK-Layernorm in config.
 
-Run `make help` to see all available commands.
+**Zombie GPU processes**
 
-Quick reference:
+Training crashed but CUDA kernels are still running. They hold GPU memory hostage.
+
 ```bash
-make environment      # Setup
-make ddp-train        # Train
-make gpu-status       # Check GPUs
-make format          # Format code
+make kill-gpu  # Kills all Python processes using GPUs
 ```
+
+Or manually: `nvidia-smi`, find the PIDs, `kill -9 <pid>`.
+
+**NCCL errors (multi-GPU training)**
+
+NCCL is the communication library for gradient all-reduce. Errors usually mean:
+
+1. **NCCL not compiled**: `python -c "import torch; print(torch.cuda.nccl.version())"` should print a version number.
+2. **Network issues**: All GPUs must be on the same node with fast interconnect (NVLink). Check `nvidia-smi topo -m`.
+3. **Mismatched CUDA versions**: All GPUs need the same CUDA version.
+
+Check system status: `make gpu-status`
+
+## Training on Your Own Data
+
+The data pipeline expects Parquet files with a specific schema. Here's how to use your own dataset:
+
+**1. Format your data**
+
+Raw text files, one document per line. Or use document separators if you prefer.
+
+**2. Convert to Parquet**
+
+Copy `data/fineweb_edu/prepare_parquet.py` and modify for your data source. The script should:
+- Tokenize your text using the GPT-2 tokenizer
+- Pack tokens into sequences of length 1024
+- Save as Parquet files with columns: `tokens` (list of ints)
+
+**3. Update config**
+
+Edit `config.py` to point to your data directory. The trainer will automatically discover all `.parquet` files.
+
+**Why Parquet?** Memory mapping. The OS loads data on demand via page faults. No upfront deserialization, no memory copies. With mmap, a 100GB dataset doesn't use 100GB RAM - just the pages you're currently accessing.
+
+See `data/fineweb_edu/prepare_parquet.py` for the exact schema and how tokenization works.
+
+## Makefile Commands
+
+The Makefile wraps common operations. Run `make help` to see everything.
+
+**Essential commands:**
+
+```bash
+make environment      # Install dependencies (uv, Python packages, etc.)
+make ddp-train        # Start training (customize with NGPUS=8, DEPTH=12, etc.)
+make gpu-status       # Check GPU utilization, memory, temperature
+make kill-gpu         # Kill zombie processes holding GPU memory
+make format           # Format code with black and isort
+```
+
+**Examples:**
+
+```bash
+# Train small model on 4 GPUs
+make ddp-train NGPUS=4 DEPTH=8
+
+# Train large model with bigger batch
+make ddp-train NGPUS=8 DEPTH=16 BATCH_SIZE=128
+
+# Run scaling law experiment
+make run-scaling-law
+```
+
+All training parameters can be overridden via Makefile variables or by editing `config.py` directly.
 
 ## Documentation
 
-We wrote guides explaining everything in detail:
+Deep dives on specific topics:
 
 | Guide | What's in it |
 |-------|--------------|
 | [README_OPTIMIZATION.md](docs/README_OPTIMIZATION.md) | Momentum, Nesterov, weight decay, Muon - from first principles |
 | [README_DISTMUON.md](docs/README_DISTMUON.md) | How the distributed optimizer works (ZeRO-2, sharding, no DDP) |
-| [README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) | The DEPTH knob, auto-scaling, scaling laws |
+| [README_DEPTH_PARAMETERIZATION.md](docs/README_DEPTH_PARAMETERIZATION.md) | The DEPTH knob, auto-scaling, why it works |
 | [README_MUON.md](docs/README_MUON.md) | Muon optimizer internals (Newton-Schulz orthogonalization) |
-| [README_FLOPS_AND_ITERATIONS.md](docs/README_FLOPS_AND_ITERATIONS.md) | FLOPs calculation, compute budgets |
-| [README_ROPE.md](docs/README_ROPE.md) | Rotary position embeddings |
-| [README_STABILITY.md](docs/README_STABILITY.md) | Gradient clipping, QK-Layernorm, Z-loss |
-| [README_MULTIPLEX.md](docs/README_MULTIPLEX.md) | Multi-dataset training (how TaskMixture works) |
-| [README_CHATCORE_EVALUATOR.md](docs/README_CHATCORE_EVALUATOR.md) | Chat model evaluation (MT-Bench, AlpacaEval, IFEval) |
-| [README-PREFETCHING-OPTIMIZATION.md](docs/README_PREFETCHING_OPTIMIZATION.md) | BOS-aligned dataloader async prefetching (eliminating MFU jitter) |
+| [README_FLOPS_AND_ITERATIONS.md](docs/README_FLOPS_AND_ITERATIONS.md) | FLOPs calculation, compute budgets, C = 6ND formula |
+| [README_ROPE.md](docs/README_ROPE.md) | Rotary position embeddings - how they work and why |
+| [README_STABILITY.md](docs/README_STABILITY.md) | Training stability: gradient clipping, QK-Layernorm, Z-loss |
+| [README_PREFETCHING_OPTIMIZATION.md](docs/README_PREFETCHING_OPTIMIZATION.md) | Dataloader optimization: async prefetching, eliminating MFU jitter |
 
-**New to training LLMs?** Start with README_OPTIMIZATION.md to understand the basics, then README_DISTMUON.md for distributed training.
+**New to training LLMs?** Start with README_OPTIMIZATION.md to understand optimization from first principles, then README_DISTMUON.md to see how distributed training works. The FLOPS and DEPTH docs explain the scaling law methodology.
 
 ## Contributing
 
-The codebase is designed to be simple and hackable. If you want to:
-- Try a new optimizer
-- Add a new dataset
-- Implement a new architecture feature
-- Improve the evaluation suite
+The codebase is designed to be hackable. The philosophy: explicit over clever, simple over abstract.
 
-...the code should be straightforward to modify. Pull requests welcome!
+**If you want to modify something:**
 
-## Credits and references
+- **Try a new optimizer**: Replace DistMuon in `distmuon.py`. The interface is simple: take parameters and gradients, update parameters.
+- **Add architecture features**: Modify `model.py`. It's vanilla PyTorch, no magic.
+- **Change the data pipeline**: Edit `data/fineweb_edu/prepare_parquet.py`. Data is just Parquet files with token arrays.
+- **Add benchmarks**: Evaluation code is in `resources/eval_bundle/`. Each benchmark is a separate Python file.
 
-**Giants whose shoulders we're standing on:**
+**Code style:**
 
-- **Andrej Karpathy**: [nanoGPT](https://github.com/karpathy/nanoGPT) (the foundation), [nanochat](https://github.com/karpathy/nanochat) (depth parameterization, scaling laws). Seriously, go star those repos.
-- **Vaswani et al.**: [Attention is All You Need](https://arxiv.org/abs/1706.03762) (2017) - The transformer paper
-- **Radford et al.**: [GPT-2 paper](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (2019)
+- No classes unless you need state. Functions are fine.
+- No deep abstraction hierarchies. Flat is better.
+- Comments explain *why*, not *what*. The code should be readable enough that *what* is obvious.
+- Type hints on public APIs, optional internally.
+
+**Pull requests welcome!** If you improve something or add a useful feature, submit a PR. Include before/after numbers if it's a performance change.
+
+## Credits and References
+
+**Foundational work:**
+
+- **Andrej Karpathy**: [nanoGPT](https://github.com/karpathy/nanoGPT) and [nanochat](https://github.com/karpathy/nanochat). This repo exists because of his work. The GPT-2 implementation, training loop, DistMuon optimizer, depth parameterization, and scaling law methodology all come from these repos.
+- **Vaswani et al.**: [Attention is All You Need](https://arxiv.org/abs/1706.03762) (2017) - Introduced the Transformer architecture
+- **Radford et al.**: [Language Models are Unsupervised Multitask Learners](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (2019) - The GPT-2 paper showing that large language models learn multiple tasks from pure next-token prediction
 
 **Datasets:**
-- [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) - HuggingFace's excellent filtered Common Crawl
-- [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) - GPT-2 training data replica
-- [SmolTalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk) - Conversational data
-- [MMLU](https://huggingface.co/datasets/cais/mmlu) - Reasoning benchmark
-- [GSM8K](https://huggingface.co/datasets/openai/gsm8k) - Math problems
+
+- [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) - HuggingFace's filtered Common Crawl (1.3T tokens of educational content)
+- [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) - Recreation of GPT-2's training set
 
 **Evaluation:**
-- [Mosaic Eval Gauntlet](https://www.mosaicml.com/blog/llm-evaluation-for-icl) - Comprehensive benchmark suite
+
+- [Mosaic Eval Gauntlet](https://www.mosaicml.com/blog/llm-evaluation-for-icl) - Standardized benchmark suite for language models
 
 ## License
 

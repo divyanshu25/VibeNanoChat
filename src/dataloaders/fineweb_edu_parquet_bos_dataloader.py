@@ -534,6 +534,7 @@ class FinewebEduParquetBOSDataloader:
         persistent_workers: bool = True,
         collator_seed: Optional[int] = 42,
         num_workers: int = 4,
+        prefetch_factor: int = 2,
     ):
         """
         Initialize BOS dataloader with best-fit packing.
@@ -549,6 +550,7 @@ class FinewebEduParquetBOSDataloader:
             persistent_workers: Keep workers alive across epochs (saves startup)
             collator_seed: Seed for reproducible buffer overflow drops (default: 42)
             num_workers: Number of data loading workers (default: 4)
+            prefetch_factor: Number of batches to prefetch per worker (default: 2)
         """
         # input validation
         if not os.path.isdir(data_dir):
@@ -576,6 +578,7 @@ class FinewebEduParquetBOSDataloader:
         self.block_size = block_size
         self.device = device
         self.split = split
+        self.prefetch_factor = prefetch_factor
 
         tokenizer, _ = get_custom_tokenizer()
 
@@ -590,8 +593,7 @@ class FinewebEduParquetBOSDataloader:
 
         # Use fixed sensible defaults - packing now happens in dataset
         # which gives us better control over buffer management
-        # num_workers is now an argument (default 4)
-        prefetch_factor = 2  # Standard PyTorch default
+        # num_workers and prefetch_factor are now arguments
 
         if master_process:
             print(f"\n{'='*80}")
@@ -639,6 +641,8 @@ class FinewebEduParquetBOSDataloader:
         if num_workers == 0:
             prefetch_factor = None
             persistent_workers = False
+        else:
+            prefetch_factor = self.prefetch_factor
 
         # pin_memory enables async CPU→GPU transfers (DMA), only works with workers>0
         use_pin_memory = device.startswith("cuda") and num_workers > 0
