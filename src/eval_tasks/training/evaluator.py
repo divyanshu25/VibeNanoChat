@@ -509,6 +509,13 @@ class TrainingEvaluator:
         sample_rng = torch.Generator(device=self.device)
         sample_rng.manual_seed(self.sample_seed + self.ddp_rank)
 
+        # Prepend BOS token to match training data format
+        # The model was trained with BOS-aligned sequences, so we should include it
+        if not context.startswith("<|bos|>"):
+            context_with_bos = "<|bos|>" + context
+        else:
+            context_with_bos = context
+
         cache_status = "with KV cache" if self.use_kv_cache else "without KV cache"
         print(
             f"Generating {num_sequences} sequences of length {max_length} {cache_status} | Context: {context}"
@@ -527,7 +534,7 @@ class TrainingEvaluator:
             num_sequences=num_sequences,
             max_length=max_length,
             model=self.model,
-            context=context,
+            context=context_with_bos,  # Use context with BOS prepended
             device=self.device,
             random_number_generator=sample_rng,
             use_kv_cache=self.use_kv_cache,

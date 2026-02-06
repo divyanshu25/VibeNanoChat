@@ -22,7 +22,7 @@ ifneq ($(shell which uv),)
 endif
 
 
-.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law run-depth-sweep chat-server
+.PHONY: help uv uvlock venv dotenv environment flash-attn jupyter-kernel format lint check test kill-gpu gpu-hot gpu-status ddp-train run-scaling-law run-depth-sweep chat-server interactive-gen
 
 .DEFAULT_GOAL := help
 
@@ -284,4 +284,8 @@ chat-server: ## Start the chat web UI server on port 8003
 	@echo "📁 Checkpoint directory: /sensei-fs/users/divgoyal/nanogpt/midtrain_checkpoints"
 	@echo "👷 Workers: $${WORKERS:-1} (set WORKERS env var to change)"
 	@$(uv) run gunicorn --config chat_ui/gunicorn_config.py chat_ui.asgi:application
+
+interactive-gen: ## Run interactive text generation. Usage: make interactive-gen [CHECKPOINT=/path/to/checkpoint.pt]
+	@CHECKPOINT=$${CHECKPOINT:-/sensei-fs/users/divgoyal/nanogpt/pretrain_checkpoints/step9955_depth20_pretrain.pt}; \
+	$(uv) run python debug_tools/interactive_generate.py $$CHECKPOINT
 
