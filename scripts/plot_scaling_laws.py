@@ -335,14 +335,28 @@ def main():
         print(f"📊 Parsing: {log_file.name}")
         data = parse_log_file(log_file)
 
-        if data["steps"].size > 0:
-            data_list.append(data)
-            print(f"   ✓ Depth {data['depth']}: {len(data['steps'])} validation points")
-            print(f"   ✓ FLOPs/token: {data['flops_per_token']:.3e}")
-            print(f"   ✓ Batch size: {data['batch_size']:,}")
-            print(f"   ✓ Final val BPB: {data['val_bpb'][-1]:.4f}")
-        else:
+        # Check if we have all required data
+        if data["steps"].size == 0:
             print("   ✗ No validation data found")
+            print()
+            continue
+
+        if data["batch_size"] is None:
+            print("   ✗ Missing batch size in log file")
+            print()
+            continue
+
+        if data["flops_per_token"] is None:
+            print("   ✗ Missing FLOPs/token in log file")
+            print()
+            continue
+
+        # All required data is present
+        data_list.append(data)
+        print(f"   ✓ Depth {data['depth']}: {len(data['steps'])} validation points")
+        print(f"   ✓ FLOPs/token: {data['flops_per_token']:.3e}")
+        print(f"   ✓ Batch size: {data['batch_size']:,}")
+        print(f"   ✓ Final val BPB: {data['val_bpb'][-1]:.4f}")
         print()
 
     if not data_list:
