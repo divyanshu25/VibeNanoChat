@@ -29,7 +29,7 @@ import glob
 import os
 import random
 import warnings
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pyarrow.parquet as pq
 import torch
@@ -41,340 +41,471 @@ from gpt_2.utils import get_custom_tokenizer
 
 @functools.total_ordering  # auto-generates <=, >, >= from __eq__ and __lt__
 class SortedDocument:
-    """Document wrapper for length-based sorting in O(log n) binary search."""
+    """
+    Document wrapper for length-based sorting in O(log n) binary search.
 
-    __slots__ = ("tokens", "length")  # memory optimization: no __dict__
+    This is the key to efficient best-fit packing. By wrapping documents in this class,
+    we can maintain a sorted buffer (via SortedList) and use binary search to find
+    the largest document that fits in remaining space - O(log n) instead of O(n).
+    """
+
+    __slots__ = (
+        "tokens",
+        "length",
+    )  # memory optimization: prevents __dict__ allocation
+    # saves ~56 bytes per doc (important with 1000s in buffer)
 
     def __init__(self, tokens: List[int]):
         self.tokens = tokens
-        self.length = len(tokens)  # cache length for O(1) comparisons
+        self.length = len(
+            tokens
+        )  # cache length for O(1) comparisons (called frequently)
 
     def __lt__(self, other):
-        # supports both SortedDocument and int comparisons for bisect_right(int)
+        # comparison operator for sorting by length
+        # supports both SortedDocument and int comparisons, which lets us do:
+        # buffer.bisect_right(150)  <- find where a doc of length 150 would go
         other_len = other.length if isinstance(other, SortedDocument) else other
         return self.length < other_len
 
     def __eq__(self, other):
+        # equality by length (not content) since we only care about packing efficiency
         other_len = other.length if isinstance(other, SortedDocument) else other
         return self.length == other_len
 
     def __len__(self):
+        # allows len(doc) to work, which is more pythonic than doc.length
         return self.length
 
 
 def list_parquet_files(data_dir: str) -> List[str]:
     """List all .parquet files, sorted by name (excludes .tmp files)."""
     pattern = os.path.join(data_dir, "*.parquet")
+    # exclude .tmp files which might be in-progress writes from data preprocessing
+    # sorted order ensures deterministic file iteration across runs
     return sorted(f for f in glob.glob(pattern) if not f.endswith(".tmp"))
 
 
-class ParquetDocumentDataset(IterableDataset):
+class PackedParquetDataset(IterableDataset):
     """
-    Distributed document streaming with perfect sharding (nanochat-style).
+    Parquet dataset with integrated best-fit packing.
 
-    All workers read all files, but use strided row group indexing (no data duplication).
-    Each document is prepended with BOS token during tokenization.
+    Yields packed batches directly instead of individual documents, giving better
+    control over buffer management and consumption rate.
 
-    Sharding: Worker i reads row groups [i, i+stride, i+2*stride, ...]
-    Ensures load balancing (no file is too small/large for one worker).
+    Each yielded batch is (B, T+1) ready for autoregressive split.
     """
 
     def __init__(
         self,
         parquet_paths: List[str],
         tokenizer,
+        batch_size: int,
+        block_size: int,
+        buffer_size: int,
         ddp_rank: int = 0,
         ddp_world_size: int = 1,
         split: str = "train",
+        seed: Optional[int] = None,
     ):
         super().__init__()
         self.parquet_paths = parquet_paths
         self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        self.block_size = block_size
+        self.buffer_size = buffer_size
         self.ddp_rank = ddp_rank
         self.ddp_world_size = ddp_world_size
         self.split = split
 
-    def __iter__(self) -> Iterator[List[int]]:
-        """Yield tokenized documents with BOS prepended: [<|bos|>, tok1, tok2, ...]"""
+        # Seeded RNG for reproducible buffer overflow drops
+        self.rng = random.Random(seed) if seed is not None else random.Random()
 
-        # get worker info from PyTorch (None if num_workers=0)
+    def _tokenize_document(self, text: str) -> Optional[List[int]]:
+        """Tokenize a single document with BOS prefix and validation."""
+        # skip empty or malformed text early - saves tokenization cost
+        if not text or not isinstance(text, str):
+            return None
+
+        try:
+            # prepend BOS token to every document - this is critical for the model to learn
+            # document boundaries. without this, the model can't distinguish between
+            # "end of doc A" and "start of doc B" when they're packed together
+            tokens = self.tokenizer.encode(f"<|bos|>{text}", allowed_special="all")
+
+            # empty tokenization can happen with special chars or whitespace-only docs
+            if len(tokens) == 0:
+                return None
+
+            # sanity check: skip pathologically long documents (> 1M tokens ~= 750k words)
+            # these are usually data errors (concatenated docs, corrupt parquet, etc)
+            # and would dominate the buffer, causing poor packing efficiency
+            if len(tokens) > 1000000:
+                warnings.warn(
+                    f"Skipping document with {len(tokens)} tokens (> 1M)",
+                    RuntimeWarning,
+                )
+                return None
+
+            return tokens
+        except Exception as e:
+            # tokenization can fail on malformed unicode, null bytes, etc
+            # just skip these docs and continue - data robustness over strictness
+            warnings.warn(f"Tokenization error: {e}", RuntimeWarning)
+            return None
+
+    def _read_row_group_texts(
+        self, parquet_file, row_group_idx: int, filepath: str
+    ) -> List[str]:
+        """Read texts from a single row group with error handling."""
+        try:
+            # parquet files are organized into row groups (~1000-10000 rows each)
+            # this allows parallel reading across workers without loading entire file
+            row_group = parquet_file.read_row_group(row_group_idx)
+            # extract just the "text" column and convert to python list
+            # much faster than iterating rows, since parquet is columnar
+            return row_group.column("text").to_pylist()
+        except Exception as e:
+            # corrupted row groups can happen from incomplete writes, disk errors, etc
+            # skip the bad row group and continue - we have billions of docs anyway
+            warnings.warn(
+                f"Skipping corrupted row group {row_group_idx} in {filepath}: {e}",
+                RuntimeWarning,
+            )
+            return []
+
+    def _document_stream(
+        self, shard_id: int, global_num_workers: int, rng: random.Random
+    ):
+        """Stream tokenized documents from parquet files with worker-based sharding."""
+        # infinite epoch loop - we never run out of data, just cycle through files forever
+        # this is the standard approach for large-scale pretraining (GPT-3 did this too)
+        while True:
+            # shuffle file order each epoch - prevents overfitting to file ordering
+            # each worker uses its own seeded RNG (via shard_id), so shuffles are
+            # deterministic but different across workers (good for diversity)
+            shuffled_paths = self.parquet_paths.copy()
+            rng.shuffle(shuffled_paths)
+
+            for filepath in shuffled_paths:
+                try:
+                    # use context manager to ensure file is closed even if we break/continue
+                    # parquet files keep OS file handles open, so this prevents fd leaks
+                    with pq.ParquetFile(filepath) as parquet_file:
+                        # SHARDING STRATEGY: strided access across row groups
+                        # if we have 8 workers and 100 row groups, worker 0 reads 0,8,16,...
+                        # worker 1 reads 1,9,17,... etc. This ensures:
+                        # 1) no data duplication (each row group read by exactly one worker)
+                        # 2) perfect load balancing (row groups evenly distributed)
+                        # 3) no coordination needed between workers (stateless sharding)
+                        for row_group_idx in range(
+                            shard_id, parquet_file.num_row_groups, global_num_workers
+                        ):
+                            texts = self._read_row_group_texts(
+                                parquet_file, row_group_idx, filepath
+                            )
+
+                            # tokenize each text document and yield valid tokens
+                            # this is a generator, so tokenization happens lazily on-demand
+                            # (only tokenize when buffer needs more docs)
+                            for text in texts:
+                                tokens = self._tokenize_document(text)
+                                if tokens is not None:
+                                    yield tokens
+                except Exception as e:
+                    # file-level errors (permission denied, file deleted, etc)
+                    # just skip the whole file and move on - robustness over strictness
+                    warnings.warn(f"Error reading {filepath}: {e}", RuntimeWarning)
+                    continue
+
+    def _fill_buffer(
+        self,
+        doc_buffer,
+        doc_stream,
+        target_docs: int,
+        max_buffer: int,
+        batch_stats: dict,
+    ):
+        """Fill document buffer to target size, respecting max limit."""
+        # SMART BUFFER MANAGEMENT: only fill when needed, stop before overflow
+        # this avoids the wasteful pattern of: add docs → overflow → drop docs
+        # instead we proactively stop adding when we reach a comfortable level
+
+        # don't fill if we're already above target (buffer has enough docs)
+        if len(doc_buffer) >= target_docs:
+            return
+
+        # fill to target, but don't exceed max_buffer (leave some headroom)
+        # this prevents the overflow→drop cycle from ever happening in normal operation
+        while len(doc_buffer) < target_docs:
+            # safety check: stop if we're approaching max capacity
+            # leave 10% headroom to avoid edge cases where we overshoot slightly
+            if len(doc_buffer) >= max_buffer * 0.9:
+                break
+
+            try:
+                # pull next tokenized document from stream (lazy, on-demand)
+                tokens = next(doc_stream)
+                # wrap in SortedDocument for O(log n) length-based lookups
+                # add() maintains sorted order via binary search insertion
+                doc_buffer.add(SortedDocument(tokens))
+                # track total tokens we've seen (for computing crop percentage later)
+                batch_stats["total_tokens"] += len(tokens)
+            except StopIteration:
+                # document stream is exhausted (shouldn't happen with infinite loop,
+                # but handle gracefully just in case)
+                break
+
+    def _handle_buffer_overflow(self, doc_buffer, max_buffer: int, batch_stats: dict):
+        """
+        Drop documents when buffer exceeds maximum size (SAFETY NET - should be rare).
+
+        With smart buffer management (_fill_buffer stops at 90% of max), this should
+        almost never trigger. If you see this warning frequently, increase buffer_size.
+        """
+        if len(doc_buffer) <= max_buffer:
+            return
+
+        # PATHOLOGICAL CASE: buffer somehow exceeded max despite proactive management
+        # this can happen if documents are extremely small (e.g., all <10 tokens)
+        # and we need millions of them to pack a single batch
+        # instead of crashing, we gracefully drop 25% of docs to stay under memory limits
+        num_to_drop = len(doc_buffer) // 4
+
+        # use random sampling (not FIFO/LIFO) to avoid biasing towards any doc length
+        # seeded RNG ensures deterministic drops (reproducible training runs)
+        dropped_indices = self.rng.sample(range(len(doc_buffer)), num_to_drop)
+
+        # track how many tokens we're discarding (for metrics/monitoring)
+        dropped_tokens = sum(doc_buffer[i].length for i in dropped_indices)
+        batch_stats["dropped_tokens"] += dropped_tokens
+        batch_stats["dropped_files"] += num_to_drop
+        batch_stats["buffer_overflows"] += 1
+
+        # remove docs in reverse order to avoid index shifting issues
+        # (if we removed idx=5 first, then idx=10 would shift to idx=9)
+        for idx in sorted(dropped_indices, reverse=True):
+            doc_buffer.pop(idx)
+
+        # this warning should be rare - if you see it often, increase buffer_size
+        warnings.warn(
+            f"Buffer overflow (rare): dropped {num_to_drop} docs ({dropped_tokens} tokens). "
+            f"Buffer: {len(doc_buffer)}/{max_buffer}. Consider increasing buffer_size.",
+            RuntimeWarning,
+        )
+
+    def _pack_row(
+        self,
+        doc_buffer,
+        row_buffer,
+        row_idx: int,
+        doc_stream,
+        min_docs_for_batch: int,
+        max_buffer: int,
+        batch_stats: dict,
+    ):
+        """Pack a single row using best-fit algorithm."""
+        pos = 0  # current write position in the row
+        target_length = (
+            self.block_size + 1
+        )  # +1 because we need input[:-1] and target[1:]
+
+        # CORE PACKING ALGORITHM: fill each row to exactly target_length with no padding
+        # this gives 100% token utilization (every token is trained on)
+        while pos < target_length:
+            space = target_length - pos  # how many tokens we still need
+
+            # BEST-FIT SEARCH: find the largest document that fits in remaining space
+            # bisect_right(space) finds insertion point for a doc of length 'space'
+            # subtracting 1 gives us the largest doc with length <= space
+            # this is O(log n) binary search on the sorted buffer (very fast!)
+            # example: space=100, buffer has docs of length [5, 20, 50, 80, 150, 200]
+            #          bisect_right(100) = 4, so best_idx = 3, doc_length = 80 (perfect!)
+            best_idx = doc_buffer.bisect_right(space) - 1
+
+            if 0 <= best_idx < len(doc_buffer):
+                # CASE 1: found a document that fits entirely
+                # pack it without cropping (preserves full document context)
+                doc = doc_buffer.pop(best_idx)
+                row_buffer[row_idx, pos : pos + doc.length] = torch.tensor(
+                    doc.tokens, dtype=torch.long
+                )
+                pos += doc.length
+                batch_stats["processed_tokens"] += doc.length
+            else:
+                # CASE 2: no document fits (all docs are longer than remaining space)
+                # we must crop a document to fill the row exactly (100% utilization)
+                if len(doc_buffer) == 0:
+                    # buffer is empty - need to refill before we can crop
+                    self._fill_buffer(
+                        doc_buffer,
+                        doc_stream,
+                        min_docs_for_batch,
+                        max_buffer,
+                        batch_stats,
+                    )
+                    if len(doc_buffer) == 0:
+                        raise RuntimeError("Buffer exhausted. Increase buffer_size.")
+                    continue  # try packing again now that buffer is refilled
+
+                # crop the SHORTEST document (minimize waste from cropping)
+                # shortest doc is at index 0 since buffer is sorted by length
+                doc = doc_buffer.pop(0)
+                row_buffer[row_idx, pos : pos + space] = torch.tensor(
+                    doc.tokens[:space], dtype=torch.long
+                )
+                batch_stats["processed_tokens"] += space  # tokens we actually use
+                batch_stats["cropped_tokens"] += doc.length - space  # tokens we discard
+                pos += space  # row is now full (pos == target_length)
+
+    def __iter__(self):
+        """Yield packed batches of shape (B, T+1)"""
+
+        # ========== SETUP DISTRIBUTED SHARDING ==========
+        # PyTorch DataLoader provides worker info for multi-process data loading
+        # each worker reads a disjoint subset of data (no duplication)
         worker_info = torch.utils.data.get_worker_info()
         worker_id = 0 if worker_info is None else worker_info.id
         num_workers = 1 if worker_info is None else worker_info.num_workers
 
-        # compute global shard ID: combines DDP rank and DataLoader worker ID
-        # Example: 4 GPUs × 4 workers = 16 shards, GPU 2 worker 3 → shard_id = 2*4+3 = 11
+        # combine DDP sharding (across GPUs) with DataLoader sharding (across workers)
+        # if we have 4 GPUs with 2 workers each, that's 8 total workers
+        # each worker gets a unique shard_id in [0, 7]
         global_num_workers = self.ddp_world_size * num_workers
         shard_id = self.ddp_rank * num_workers + worker_id
 
-        if self.ddp_rank == 0 and worker_id == 0:  # print once to avoid spam
+        # log sharding setup once (only from the master worker to avoid spam)
+        if self.ddp_rank == 0 and worker_id == 0:
             print(
                 f"Sharding files across: {global_num_workers} total workers "
                 f"({self.ddp_world_size} GPUs × {num_workers} workers/GPU)"
             )
 
-        # shuffle file order per worker to reduce I/O contention on shared filesystems
-        # each worker gets a different file order (reduces simultaneous reads of same file)
-        # use shard_id as seed for deterministic but worker-specific shuffling
-        rng = random.Random(shard_id)
+        # ========== INITIALIZE PACKING STATE ==========
+        # doc_buffer: sorted collection of documents for O(log n) best-fit search
+        # we maintain docs sorted by length so bisect_right(space) finds best fit fast
+        doc_buffer = SortedList()
 
-        # infinite loop for multi-epoch training (training loop controls stopping)
-        while True:
-            # shuffle files each epoch using worker-specific order
-            shuffled_paths = self.parquet_paths.copy()
-            rng.shuffle(shuffled_paths)
+        # row_buffer: pre-allocate a (B, T+1) tensor that we'll reuse each batch
+        # shape is T+1 because autoregressive training needs input[:-1] and target[1:]
+        row_buffer = torch.empty(
+            (self.batch_size, self.block_size + 1), dtype=torch.long
+        )
 
-            for filepath in shuffled_paths:
-                # open parquet file with proper resource management
-                parquet_file = None
-                try:
-                    parquet_file = pq.ParquetFile(filepath)
-
-                    # strided indexing: shard_id, shard_id + stride, shard_id + 2*stride, ...
-                    # ensures each row group is read by exactly one worker (no duplication)
-                    for row_group_idx in range(
-                        shard_id, parquet_file.num_row_groups, global_num_workers
-                    ):
-                        try:
-                            row_group = parquet_file.read_row_group(row_group_idx)
-                            texts = row_group.column("text").to_pylist()
-                        except Exception as e:
-                            # handle corrupted row groups gracefully - skip and continue
-                            warnings.warn(
-                                f"Skipping corrupted row group {row_group_idx} in {filepath}: {e}",
-                                RuntimeWarning,
-                            )
-                            continue
-
-                        # tokenize with BOS prepended (critical for document boundary awareness)
-                        for text in texts:
-                            # skip None, empty, or non-string values
-                            if not text or not isinstance(text, str):
-                                continue
-
-                            try:
-                                tokens = self.tokenizer.encode(
-                                    f"<|bos|>{text}", allowed_special="all"
-                                )
-
-                                # validate tokenized output
-                                if len(tokens) == 0:  # skip empty docs
-                                    continue
-                                if (
-                                    len(tokens) > 1000000
-                                ):  # sanity check: skip extremely long docs (likely corrupted)
-                                    warnings.warn(
-                                        f"Skipping document with {len(tokens)} tokens (> 1M, likely corrupted)",
-                                        RuntimeWarning,
-                                    )
-                                    continue
-
-                                yield tokens
-                            except Exception as e:
-                                # handle tokenization errors gracefully
-                                warnings.warn(
-                                    f"Tokenization error, skipping document: {e}",
-                                    RuntimeWarning,
-                                )
-                                continue
-                finally:
-                    # ensure parquet file is properly closed (release file handles)
-                    if parquet_file is not None:
-                        try:
-                            parquet_file.close()
-                        except Exception:
-                            pass  # silently ignore close errors
-
-
-class BestFitCollator:
-    """
-    BOS-aligned best-fit packing (nanochat-style).
-
-    Algorithm per row:
-      1. Pick LARGEST doc that fits (best-fit)
-      2. Repeat until no doc fits
-      3. Crop shortest doc to fill gap (optimization: minimizes waste vs nanochat's arbitrary crop)
-
-    Properties:
-      - Every row starts with BOS token
-      - 100% utilization (no padding)
-      - ~35% token waste from cropping (inherent to BOS-aligned packing)
-      - O(log n) binary search via SortedList (vs O(n) linear scan)
-    """
-
-    def __init__(
-        self,
-        batch_size: int,
-        block_size: int,
-        buffer_size: int = 1000,
-        device: str = "cuda",
-        seed: Optional[int] = None,
-    ):
-        # input validation
-        if batch_size <= 0:
-            raise ValueError(f"batch_size must be positive, got {batch_size}")
-        if block_size <= 0:
-            raise ValueError(f"block_size must be positive, got {block_size}")
-        if buffer_size <= 0:
-            raise ValueError(f"buffer_size must be positive, got {buffer_size}")
-
-        # Convert torch.device to string if needed
-        if isinstance(device, torch.device):
-            device = str(device)
-
-        if not (device == "cpu" or device.startswith("cuda")):
-            raise ValueError(f"device must be 'cpu' or 'cuda[:N]', got {device}")
-
-        self.batch_size = batch_size
-        self.block_size = block_size
-        self.buffer_size = buffer_size
-        self.device = device
-
-        # Seeded RNG for reproducible buffer overflow drops
-        self.rng = random.Random(seed) if seed is not None else random.Random()
-
-        self.doc_buffer = SortedList()  # sorted by length for O(log n) best-fit search
-
-        # pre-allocate once (nanochat-style): row_capacity = T + 1 for autoregressive split
-        self.row_buffer = torch.empty((batch_size, block_size + 1), dtype=torch.long)
-
-    def __call__(
-        self, batch_of_documents: List[List[int]]
-    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-        """
-        BOS-aligned best-fit packing (nanochat algorithm).
-
-        Returns: (inputs, targets, stats) where inputs[:, t] predicts targets[:, t]
-                 and stats contains per-batch metrics (deltas, not cumulative)
-        """
-        # Per-batch counters (track deltas only, not cumulative)
-        batch_total_tokens = 0
-        batch_cropped_tokens = 0
-        batch_processed_tokens = 0
-        batch_dropped_tokens = 0
-        batch_dropped_files = 0
-        batch_buffer_overflows = 0
-        batch_corrupted_docs = 0
-        batch_empty_docs = 0
-
-        # Filter out empty or invalid documents and track stats
-        valid_documents = []
-        for doc in batch_of_documents:
-            if not doc or len(doc) <= 1:  # empty or only BOS token
-                batch_empty_docs += 1
-            else:
-                valid_documents.append(doc)
-
-        # refill buffer with valid documents (O(log n) insert per doc)
-        self.doc_buffer.update(SortedDocument(doc) for doc in valid_documents)
-
-        # Track total tokens in THIS batch only
-        batch_total_tokens = sum(len(doc) for doc in valid_documents)
-
-        # graceful degradation: if buffer grows too large, randomly drop 25% of documents
-        # this prevents OOM while signaling misconfiguration via stats
-        # allow large headroom (100x) since startup can cause temporary spikes
-        max_buffer = self.buffer_size * 100
-        if len(self.doc_buffer) > max_buffer:
-            # drop 25% of documents randomly to prevent unbounded growth
-            num_to_drop = len(self.doc_buffer) // 4
-            dropped_indices = self.rng.sample(range(len(self.doc_buffer)), num_to_drop)
-
-            # track dropped documents as wastage (sum their tokens)
-            dropped_tokens = sum(self.doc_buffer[i].length for i in dropped_indices)
-            batch_dropped_tokens += dropped_tokens
-            batch_dropped_files += num_to_drop
-            batch_buffer_overflows += 1
-
-            # remove documents in reverse order to maintain indices
-            for idx in sorted(dropped_indices, reverse=True):
-                self.doc_buffer.pop(idx)
-
-            # warn every time overflow happens (helps with debugging)
-            warnings.warn(
-                f"Buffer overflow: dropped {num_to_drop} documents ({dropped_tokens} tokens). "
-                f"Buffer: {len(self.doc_buffer)}/{max_buffer}. "
-                f"Consider reducing num_workers or increasing buffer_size. "
-                f"Training continues with graceful degradation.",
-                RuntimeWarning,
-            )
-
-        # pack B sequences of length T+1 (nanochat row_capacity)
-        for row_idx in range(self.batch_size):
-            pos = 0  # current position in this row
-
-            # Algorithm: pick largest doc that fits, repeat until no doc fits, then crop
-            while pos < self.block_size + 1:
-                space = self.block_size + 1 - pos
-
-                # STEP 1: Best-fit search - find LARGEST doc that fits (nanochat algorithm)
-                # O(log n) binary search: bisect_right(space) - 1 gives largest doc <= space
-                best_idx = self.doc_buffer.bisect_right(space) - 1
-
-                if 0 <= best_idx < len(self.doc_buffer):
-                    # CASE 1: Found a doc that fits - pack it entirely (nanochat step 1-2)
-                    doc = self.doc_buffer.pop(best_idx)
-                    # efficient: direct copy from list to tensor using slice assignment
-                    try:
-                        self.row_buffer[row_idx, pos : pos + doc.length] = torch.tensor(
-                            doc.tokens, dtype=torch.long
-                        )
-                        pos += doc.length
-                        batch_processed_tokens += doc.length
-                    except Exception as e:
-                        # handle corrupted token IDs gracefully
-                        warnings.warn(
-                            f"Invalid tokens in document (len={doc.length}): {e}",
-                            RuntimeWarning,
-                        )
-                        batch_corrupted_docs += 1
-                        continue  # skip this doc and try next
-                else:
-                    # CASE 2: No doc fits - crop one to fill gap exactly (nanochat step 3)
-                    # Optimization: crop shortest doc (minimizes waste vs nanochat's arbitrary crop)
-                    if len(self.doc_buffer) == 0:
-                        raise RuntimeError(
-                            f"Buffer exhausted while packing batch {row_idx+1}/{self.batch_size}. "
-                            f"Increase buffer_size (current: {self.buffer_size}) or prefetch_factor."
-                        )
-
-                    doc = self.doc_buffer.pop(
-                        0
-                    )  # shortest doc (optimization: min waste)
-                    cropped = doc.tokens[:space]
-                    try:
-                        self.row_buffer[row_idx, pos : pos + space] = torch.tensor(
-                            cropped, dtype=torch.long
-                        )
-                        batch_processed_tokens += space
-                        batch_cropped_tokens += doc.length - space
-                        pos += space
-                    except Exception as e:
-                        # handle corrupted token IDs gracefully
-                        warnings.warn(
-                            f"Invalid tokens while cropping document: {e}",
-                            RuntimeWarning,
-                        )
-                        batch_corrupted_docs += 1
-                        continue  # skip and try next doc
-
-        # autoregressive split (nanochat-style): input[t] → target[t]
-        inputs = self.row_buffer[:, :-1].clone()  # (B, T): tokens [0, T-1]
-        targets = self.row_buffer[:, 1:].clone()  # (B, T): tokens [1, T]
-
-        # Return per-batch stats (deltas only, not cumulative)
+        # batch_stats: track packing efficiency and data quality per batch
+        # these accumulate in the main dataloader class for end-of-training reporting
         batch_stats = {
-            "total_tokens": batch_total_tokens,
-            "cropped_tokens": batch_cropped_tokens,
-            "processed_tokens": batch_processed_tokens,
-            "dropped_tokens": batch_dropped_tokens,
-            "dropped_files": batch_dropped_files,
-            "buffer_overflows": batch_buffer_overflows,
-            "corrupted_docs": batch_corrupted_docs,
-            "empty_docs": batch_empty_docs,
+            "total_tokens": 0,  # all tokens we've read from parquet files
+            "cropped_tokens": 0,  # tokens discarded due to packing (unavoidable waste)
+            "processed_tokens": 0,  # tokens actually trained on (what we want to maximize)
+            "dropped_tokens": 0,  # tokens dropped due to buffer overflow (should be ~0)
+            "dropped_files": 0,  # number of docs dropped from overflow
+            "buffer_overflows": 0,  # how many times buffer exceeded max size
+            "corrupted_docs": 0,  # docs with invalid tokens/encoding
+            "empty_docs": 0,  # docs that tokenized to empty
         }
 
-        return inputs, targets, batch_stats  # CPU tensors (workers can't access GPU)
+        # ========== CREATE INFINITE DOCUMENT STREAM ==========
+        # each worker uses a seeded RNG (based on shard_id) for deterministic shuffling
+        # this ensures reproducible training runs while maintaining per-worker diversity
+        rng = random.Random(shard_id)
+        doc_stream = self._document_stream(shard_id, global_num_workers, rng)
+
+        # ========== MAIN PACKING LOOP ==========
+        # SMART BUFFER SIZING STRATEGY:
+        # - target_docs: optimal size for good packing efficiency (more choices for best-fit)
+        # - max_buffer: hard safety limit to prevent OOM (100x buffer_size)
+        # - _fill_buffer stops at 90% of max_buffer, so overflow should never happen
+        #
+        # Example: if buffer_size=1000, target=max(32, batch_size), max=100,000
+        #   → we fill to ~32 docs initially
+        #   → as we pack, buffer drains (docs consumed)
+        #   → when buffer < 32, we refill to 32 (but never exceed 90k docs)
+        #   → overflow check is now just a safety net (should rarely trigger)
+        target_docs = max(self.batch_size, 32)  # at least 32 docs for good packing
+        max_buffer = (
+            self.buffer_size * 100
+        )  # 100x buffer_size as hard limit (safety net)
+
+        while True:  # infinite batches for infinite training
+            # reset stats for this batch (we report per-batch deltas)
+            for key in batch_stats:
+                batch_stats[key] = 0
+
+            # PROACTIVE BUFFER MANAGEMENT: fill to target, but stop at 90% of max
+            # this avoids the wasteful pattern: add docs → overflow → drop docs
+            # instead: only add when needed, stop before hitting the limit
+            self._fill_buffer(
+                doc_buffer, doc_stream, target_docs, max_buffer, batch_stats
+            )
+
+            # SAFETY NET: handle buffer overflow (should be extremely rare now)
+            # with smart filling above, this should only trigger in pathological cases
+            # (e.g., all documents are tiny and we need millions to pack one batch)
+            self._handle_buffer_overflow(doc_buffer, max_buffer, batch_stats)
+
+            # pack B rows using best-fit algorithm
+            # each row is filled to exactly (block_size + 1) tokens with no padding
+            # documents are packed greedily: largest-fit-first, then crop when nothing fits
+            for row_idx in range(self.batch_size):
+                self._pack_row(
+                    doc_buffer,
+                    row_buffer,
+                    row_idx,
+                    doc_stream,
+                    target_docs,
+                    max_buffer,
+                    batch_stats,
+                )
+
+            # yield (B, T+1) batch and stats
+            # clone() is necessary because row_buffer is reused across batches
+            # without clone(), all batches would share the same underlying memory
+            yield row_buffer.clone(), batch_stats.copy()
+
+
+class SimpleCollator:
+    """
+    Simple collator for pre-packed batches.
+
+    Just performs the autoregressive split and passes through stats.
+    Packing is now handled in the dataset itself, so this is very lightweight.
+    """
+
+    def __call__(
+        self, batch: List[Tuple[torch.Tensor, dict]]
+    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+        """
+        Perform autoregressive split on pre-packed batch.
+
+        This is the standard language modeling setup: predict next token given previous tokens.
+        We receive a batch of shape (B, T+1) and split it into inputs and targets.
+
+        Args:
+            batch: List of (packed_batch, stats) tuples (typically length 1)
+
+        Returns:
+            (inputs, targets, stats) where inputs[:, t] predicts targets[:, t]
+        """
+        # unpack - should be single item since dataset yields complete batches
+        # (DataLoader batch_size=1 in this design, real batching happens in dataset)
+        packed_batch, stats = batch[0]
+
+        # AUTOREGRESSIVE SPLIT: create (input, target) pairs for next-token prediction
+        # packed_batch is shape (B, T+1), we split it into:
+        #   inputs:  tokens [0, 1, 2, ..., T-1]  <- what the model sees
+        #   targets: tokens [1, 2, 3, ..., T]    <- what the model should predict
+        # so inputs[:, t] is used to predict targets[:, t]
+        #
+        # example with T=4:
+        #   packed_batch = [[5, 10, 15, 20, 25]]  (shape 1, 5)
+        #   inputs  = [[5, 10, 15, 20]]           (shape 1, 4)
+        #   targets = [[10, 15, 20, 25]]          (shape 1, 4)
+        #   model predicts: 5→10, 10→15, 15→20, 20→25
+        inputs = packed_batch[:, :-1].clone()  # (B, T): tokens [0, T-1]
+        targets = packed_batch[:, 1:].clone()  # (B, T): tokens [1, T]
+
+        return inputs, targets, stats
 
 
 class FinewebEduParquetBOSDataloader:
@@ -400,10 +531,9 @@ class FinewebEduParquetBOSDataloader:
         master_process: bool = True,
         buffer_size: int = 1000,
         device: str = "cuda",
-        num_workers: int = 4,
         persistent_workers: bool = True,
-        depth: Optional[int] = None,
         collator_seed: Optional[int] = 42,
+        num_workers: int = 4,
     ):
         """
         Initialize BOS dataloader with best-fit packing.
@@ -415,11 +545,10 @@ class FinewebEduParquetBOSDataloader:
             ddp_world_size: Number of GPUs
             ddp_rank: Current GPU rank
             split: 'train' (all but last file) or 'val' (last file only)
-            buffer_size: Document buffer for best-fit (~1000 works well)
-            num_workers: Parallel I/O workers (4 is good default)
+            buffer_size: Document buffer for best-fit packing (larger = better packing efficiency)
             persistent_workers: Keep workers alive across epochs (saves startup)
-            depth: Model depth for auto-scaling dataloader_batch_size and prefetch_factor (None = use defaults)
             collator_seed: Seed for reproducible buffer overflow drops (default: 42)
+            num_workers: Number of data loading workers (default: 4)
         """
         # input validation
         if not os.path.isdir(data_dir):
@@ -438,8 +567,6 @@ class FinewebEduParquetBOSDataloader:
             raise ValueError(f"split must be 'train' or 'val', got {split}")
         if buffer_size <= 0:
             raise ValueError(f"buffer_size must be positive, got {buffer_size}")
-        if num_workers < 0:
-            raise ValueError(f"num_workers must be non-negative, got {num_workers}")
 
         # Convert torch.device to string if needed
         if isinstance(device, torch.device):
@@ -461,35 +588,10 @@ class FinewebEduParquetBOSDataloader:
         except Exception as e:
             raise ValueError(f"Failed to get BOS token from tokenizer: {e}")
 
-        # Determine prefetch_factor based on depth before printing
-        # Scale inversely with model depth (Heuristic)
-        # Deeper models → smaller batch → less data consumed → need fewer docs
-        if depth is not None:
-            # Inverse scaling with depth (matches model_setup.py batch_size scaling)
-            # Conservative multipliers for FineWeb-Edu (long docs)
-            # Format: max_depth: (multiplier, min_docs, prefetch_factor)
-            depth_scaling_config = {
-                8: (4, 256, 1),  # shallow models: high throughput, aggressive prefetch
-                10: (4, 128, 1),  #
-                12: (4, 96, 1),  #
-                14: (3, 72, 1),  # medium models: moderate doc buffer
-                18: (2, 64, 1),  # deeper models: reduced buffer, conservative prefetch
-                22: (2, 32, 1),  # deep models: minimal buffer
-                float("inf"): (2, 32, 1),  # very deep models: minimal buffer
-            }
-
-            # Find appropriate config for this depth
-            for max_depth, (multiplier, min_docs, pf) in depth_scaling_config.items():
-                if depth <= max_depth:
-                    dataloader_multiplier = multiplier
-                    min_docs_threshold = min_docs
-                    prefetch_factor = pf
-                    break
-        else:
-            # Defaults for when depth is not specified
-            dataloader_multiplier = 4
-            min_docs_threshold = 64
-            prefetch_factor = 2
+        # Use fixed sensible defaults - packing now happens in dataset
+        # which gives us better control over buffer management
+        # num_workers is now an argument (default 4)
+        prefetch_factor = 2  # Standard PyTorch default
 
         if master_process:
             print(f"\n{'='*80}")
@@ -516,41 +618,36 @@ class FinewebEduParquetBOSDataloader:
             )
             print(f"{'='*80}\n")
 
-        # create dataset: handles streaming, tokenization, and sharding
-        dataset = ParquetDocumentDataset(
-            split_files, tokenizer, ddp_rank, ddp_world_size, split
+        # Create dataset: handles streaming, tokenization, packing, and sharding
+        # Packing is now integrated into the dataset for better control
+        dataset = PackedParquetDataset(
+            parquet_paths=split_files,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            block_size=block_size,
+            buffer_size=buffer_size,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+            split=split,
+            seed=collator_seed,
         )
 
-        # create collator: packs variable-length docs → fixed (B, T) sequences
-        self.collator = BestFitCollator(
-            batch_size, block_size, buffer_size, device, seed=collator_seed
-        )
+        # Create collator: simple pass-through that does autoregressive split
+        self.collator = SimpleCollator()
 
         # PyTorch edge case: num_workers=0 requires prefetch_factor=None, persistent_workers=False
         if num_workers == 0:
             prefetch_factor = None
             persistent_workers = False
 
-        # DataLoader batch_size = documents per collate call (NOT model batch size!)
-        # want enough docs for good best-fit, but not so many that buffer overflows
-        # Use the dataloader_multiplier and min_docs_threshold determined above
-        dataloader_batch_size = max(
-            int(batch_size * dataloader_multiplier), min_docs_threshold
-        )
-
-        if master_process and depth is not None:
-            print(
-                f"   DataLoader batch size: {dataloader_batch_size} (depth={depth}, multiplier={dataloader_multiplier}×, min={min_docs_threshold})"
-            )
-
         # pin_memory enables async CPU→GPU transfers (DMA), only works with workers>0
         use_pin_memory = device.startswith("cuda") and num_workers > 0
 
-        # tie it all together: dataset streams docs, workers parallelize I/O,
-        # collator packs into batches, prefetch hides latency
+        # DataLoader with batch_size=1 since batching happens in the dataset
+        # Dataset yields complete packed batches, DataLoader just wraps them
         self.dataloader = DataLoader(
             dataset,
-            batch_size=dataloader_batch_size,
+            batch_size=1,  # Dataset already yields packed batches
             collate_fn=self.collator,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,

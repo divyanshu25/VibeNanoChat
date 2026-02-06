@@ -36,11 +36,7 @@ def setup_pretraining_dataloaders(
     extra_kwargs = {
         "buffer_size": config.bos_dataloader_buffer_size,
         "device": device,
-        "num_workers": config.dataloader_num_workers,
         "persistent_workers": config.dataloader_persistent_workers,
-        "depth": (
-            config.depth if config._depth_mode else None
-        ),  # Pass depth for auto-scaling (also auto-determines prefetch_factor)
     }
     if master_process:
         print("📚 PRETRAINING: Using PyTorch-native BOS-aligned dataloader")
@@ -288,11 +284,7 @@ def setup_dataloaders(
                 master_process=False,  # Don't print banner each time
                 buffer_size=config.bos_dataloader_buffer_size,
                 device=device,
-                num_workers=config.dataloader_num_workers,
                 persistent_workers=config.dataloader_persistent_workers,
-                depth=(
-                    config.depth if config._depth_mode else None
-                ),  # Pass depth for auto-scaling (also auto-determines prefetch_factor)
             )
 
             def eval_dataloader_builder():
