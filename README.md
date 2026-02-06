@@ -101,14 +101,15 @@ make ddp-train DEPTH=20 TARGET_FLOPS=1e18
 
 **How it works:**
 
-The depth `N` determines:
+When you set `DEPTH=N`, the model automatically configures:
 - Number of layers: `N`
 - Hidden dimension: `N × 64` (rounded up to multiple of head_dim)
 - Number of heads: `hidden_dim / 64`
-- Learning rate: scales with model size (different rates for embeddings, matrices, etc.)
-- Weight decay: scales with model size
+- Weight decay: Scales as `WD × (12/N)²` - deeper models need less regularization
+- Learning rate: Fixed per-parameter-group rates (tuned at depth=12)
+  - Scales as `sqrt(batch_size)` if you change batch size
 
-This means you can sweep model sizes without tuning learning rates. Change `DEPTH` and everything else adjusts automatically.
+This means you can sweep model sizes (e.g., `DEPTH=6` to `DEPTH=20`) without retuning hyperparameters. The weight decay auto-adjusts and the fixed LRs work across depths.
 
 **Example dimensions:**
 - `DEPTH=6`  → 6 layers, 384 dims, 6 heads (~30M params)
