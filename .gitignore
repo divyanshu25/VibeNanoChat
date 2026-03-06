@@ -1,0 +1,30 @@
+.env
+*.egg-info
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
+
+*__pycache__*
+
+*edu_fineweb10B*
+
+# Weights & Biases
+wandb/
+
+# Training logs
+logs/
+
+# Cache directory (word lists, etc.)
+data/cache/
+
+# Binary files
+*.bin
+*.pt
+
+resources/eval_bundle/
