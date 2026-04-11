@@ -38,9 +38,7 @@ class SmolTalkDataLoader:
         self,
         config: str = "all",
         split: str = "train",
-        cache_dir: Optional[
-            str
-        ] = "<YOURPATH>/nanochat_midtraining_data",
+        cache_dir: Optional[str] = "<YOURPATH>/nanochat_midtraining_data",
         shuffle_seed: int = 42,
     ):
         """

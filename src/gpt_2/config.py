@@ -105,9 +105,7 @@ class GPTConfig:
     # Parquet dataloader (BOS-aligned, nanochat-style) - now the only option
     data_dir_pretrain_parquet: str = "<YOURPATH>/fineweb_edu_parquet"
 
-    sft_cache_dir: str = (
-        "<YOURPATH>/sft_cache"  # Cache dir for SFT datasets
-    )
+    sft_cache_dir: str = "<YOURPATH>/sft_cache"  # Cache dir for SFT datasets
 
     # ========================================================================
     # Dataloader Configuration
