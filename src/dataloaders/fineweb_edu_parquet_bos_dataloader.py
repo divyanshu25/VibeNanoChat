@@ -366,15 +366,15 @@ class PackedParquetDataset(IterableDataset):
 
         # ========== MAIN PACKING LOOP ==========
         # SMART BUFFER SIZING STRATEGY:
-        # - target_docs: optimal size for good packing efficiency (more choices for best-fit)
-        # - max_buffer: hard safety limit to prevent OOM (100x buffer_size)
-        # - _fill_buffer stops at 90% of max_buffer to stay under memory limits
-        # - buffer naturally shrinks through consumption, then refills when below target
+        # - target_docs: max(batch_size, 32) — primary fill target, keeps enough docs for good packing
+        # - max_buffer: hard OOM safety cap (100x buffer_size), never reached in normal operation
+        # - _fill_buffer fills up to target_docs; the 90% of max_buffer check is an unreachable safety net
+        # - buffer naturally shrinks through consumption (docs popped during packing), then refills
         #
-        # Example: if buffer_size=1000, target=max(32, batch_size), max=100,000
-        #   → we fill to ~32 docs initially
-        #   → as we pack, buffer drains (docs consumed)
-        #   → when buffer < 32, we refill to 32 (but never exceed 90k docs)
+        # Example: if buffer_size=1000, batch_size=16 → target=32, max=100,000
+        #   → we fill to 32 docs initially (= max(batch_size=16, 32))
+        #   → as we pack, buffer drains (docs consumed by _pack_row)
+        #   → when buffer < 32, we refill back to 32 at the top of each batch iteration
         target_docs = max(self.batch_size, 32)  # at least 32 docs for good packing
         max_buffer = self.buffer_size * 100  # 100x buffer_size as hard limit
 
