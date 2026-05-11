@@ -187,7 +187,9 @@ class CoreEvaluator:
             base_label = task["label"]
             if base_label in self.random_baselines:
                 random_baseline = self.random_baselines[base_label]
-                random_baseline_decimal = 0.01 * random_baseline  # stored as percentage (e.g. 25.0)
+                random_baseline_decimal = (
+                    0.01 * random_baseline
+                )  # stored as percentage (e.g. 25.0)
                 centered_result = (accuracy - random_baseline_decimal) / (
                     1.0 - random_baseline_decimal
                 )

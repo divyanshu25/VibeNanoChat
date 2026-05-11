@@ -354,46 +354,31 @@ class ChatCoreEvaluator:
             self.model, prompt_tokens, kv_cache, self.device
         )
 
-        # PHASE 2: DECODE - Generate tokens one at a time
         generated_tokens = list(prompt_tokens)
 
-        # Main generation loop
         for _ in range(self.max_tokens):
-            # Sample next token from logits
             next_token = sample_next_token(
                 next_token_logits, self.temperature, self.top_k
             )
-
-            # Check for termination
             if next_token == assistant_end_id:
                 break
 
-            # Add token to sequence
             generated_tokens.append(next_token)
-
-            # Check sequence length limit
             if (
                 hasattr(self.model, "max_seq_len")
                 and len(generated_tokens) >= self.model.max_seq_len
             ):
                 break
 
-            # Get logits for next token
-            # With KV cache: pass only new token; Without: pass entire sequence
-            if self.use_kv_cache:
-                next_token_logits = forward_pass(
-                    self.model, next_token, kv_cache, self.device
-                )
-            else:
-                next_token_logits = forward_pass(
-                    self.model, generated_tokens, kv_cache, self.device
-                )
+            next_token_logits = forward_pass(
+                self.model,
+                next_token if self.use_kv_cache else generated_tokens,
+                kv_cache,
+                self.device,
+            )
 
-        # Extract only newly generated tokens (exclude the prompt)
         new_tokens = generated_tokens[len(prompt_tokens) :]
-        generated_text = self.tokenizer.decode(new_tokens)
-
-        return generated_text
+        return self.tokenizer.decode(new_tokens)
 
     @torch.no_grad()
     def generate_completion_with_tools(self, prompt_tokens: List[int]) -> str:
@@ -447,14 +432,19 @@ class ChatCoreEvaluator:
         def _feed(token: int) -> Optional[torch.Tensor]:
             """Append token, run one decode step; returns None if seq limit reached."""
             generated_tokens.append(token)
-            if hasattr(self.model, "max_seq_len") and len(generated_tokens) >= self.model.max_seq_len:
+            if (
+                hasattr(self.model, "max_seq_len")
+                and len(generated_tokens) >= self.model.max_seq_len
+            ):
                 return None
             if self.use_kv_cache:
                 return forward_pass(self.model, token, kv_cache, self.device)
             return forward_pass(self.model, generated_tokens, kv_cache, self.device)
 
         for _ in range(self.max_tokens):
-            next_token = sample_next_token(next_token_logits, self.temperature, self.top_k)
+            next_token = sample_next_token(
+                next_token_logits, self.temperature, self.top_k
+            )
             if next_token == assistant_end_id:
                 break
 
@@ -468,7 +458,11 @@ class ChatCoreEvaluator:
                 if python_expr_tokens:
                     result = use_calculator(self.tokenizer.decode(python_expr_tokens))
                     if result is not None:
-                        injection = [output_start] + self.tokenizer.encode(str(result)) + [output_end]
+                        injection = (
+                            [output_start]
+                            + self.tokenizer.encode(str(result))
+                            + [output_end]
+                        )
                 python_expr_tokens = []
             elif in_python_block:
                 python_expr_tokens.append(next_token)
@@ -486,7 +480,7 @@ class ChatCoreEvaluator:
                 continue
             break  # seq limit hit inside injection loop
 
-        new_tokens = generated_tokens[len(prompt_tokens):]
+        new_tokens = generated_tokens[len(prompt_tokens) :]
         return self.tokenizer.decode(new_tokens)
 
     @torch.no_grad()

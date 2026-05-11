@@ -241,7 +241,7 @@ def adamw_step_fused(
     so every parameter shrinks by the same fractional amount lr*wd per step.
     """
     # Weight decay (decoupled, applied before the update)
-    p.mul_(1 - lr_t * wd_t) # p <- p * (1-lr*wd) 
+    p.mul_(1 - lr_t * wd_t)  # p <- p * (1-lr*wd)
     # Update running averages (lerp_ is cleaner and fuses well)
     # NOTE: .float() required for torch.compile (PyTorch 2.6+) - lerp_ weight param must be float32
     exp_avg.lerp_(grad, (1 - beta1_t).float())

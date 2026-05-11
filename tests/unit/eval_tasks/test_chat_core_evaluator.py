@@ -13,7 +13,7 @@ Test strategy:
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -140,7 +140,9 @@ class TestGenerateCompletion:
 
         decoded_tokens = ev.tokenizer.decode.call_args[0][0]
         for pt in prompt:
-            assert pt not in decoded_tokens, f"Prompt token {pt} leaked into decode call"
+            assert (
+                pt not in decoded_tokens
+            ), f"Prompt token {pt} leaked into decode call"
         assert decoded_tokens == [200, 201]
 
     @patch(f"{MODULE}.get_model_config", return_value=(4, 32, 2, 512))
@@ -160,7 +162,9 @@ class TestGenerateCompletion:
         assert mock_forward.call_count == 2
         # Second positional arg to each call must be an integer (single token)
         for c in mock_forward.call_args_list:
-            assert isinstance(c[0][1], int), "KV-cache mode must pass a single int token"
+            assert isinstance(
+                c[0][1], int
+            ), "KV-cache mode must pass a single int token"
 
     @patch(f"{MODULE}.get_model_config", return_value=(4, 32, 2, 512))
     @patch(f"{MODULE}.create_kv_cache", return_value=None)
@@ -177,7 +181,9 @@ class TestGenerateCompletion:
         ev.generate_completion([1, 2])
 
         token_arg = mock_forward.call_args[0][1]
-        assert isinstance(token_arg, list), "No-cache mode must pass the full token list"
+        assert isinstance(
+            token_arg, list
+        ), "No-cache mode must pass the full token list"
         assert 77 in token_arg
         assert 1 in token_arg and 2 in token_arg
 
@@ -348,8 +354,12 @@ class TestGenerateCompletionWithTools:
     ):
         """Two consecutive python blocks are each executed and their results injected."""
         mock_sample.side_effect = [
-            PYTHON_START, 50, PYTHON_END,   # first tool call
-            PYTHON_START, 51, PYTHON_END,   # second tool call
+            PYTHON_START,
+            50,
+            PYTHON_END,  # first tool call
+            PYTHON_START,
+            51,
+            PYTHON_END,  # second tool call
             ASSISTANT_END,
         ]
         mock_calc.side_effect = [10, 20]
@@ -397,7 +407,9 @@ class TestGenerateCompletionWithTools:
         # Total forced = 1 (output_start) + 3 (result) + 1 (output_end) = 5
         # Total from sampled = PYTHON_START (1) + expr_token (1) + PYTHON_END (1) = 3
         # Grand total = 8 forward_pass calls (before ASSISTANT_END terminates)
-        forced_count = 1 + len(result_tokens) + 1  # OUTPUT_START + result_tokens + OUTPUT_END
+        forced_count = (
+            1 + len(result_tokens) + 1
+        )  # OUTPUT_START + result_tokens + OUTPUT_END
         assert forward_call_count == 3 + forced_count
 
     @patch(f"{MODULE}.get_model_config", return_value=(4, 32, 2, 512))
