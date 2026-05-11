@@ -400,27 +400,14 @@ class ChatCoreEvaluator:
         """
         Generate a completion with calculator tool use support using KV caching.
 
-        This implements a tool-use state machine that allows the model to execute
-        Python expressions during generation for accurate mathematical computation.
+        When the model emits <|python|>expr<|python_end|>, the expression is
+        evaluated with use_calculator() and the result is immediately injected
+        as <|output_start|>result<|output_end|> before sampling resumes.
 
-        KV Caching with Tool Use:
-        We use the same two-phase approach (prefill + decode), but with added
-        complexity from forced tokens (calculator results). When forcing tokens,
-        we still update the KV cache so the model sees them in context.
-
-        Flow:
-        1. PREFILL: Process prompt tokens at once, cache K/V
-        2. DECODE: Generate tokens one at a time with KV cache
-        3. When model emits <|python|>, enter "python mode"
-        4. Collect tokens until <|python_end|> as a Python expression
-        5. Execute the expression with use_calculator()
-        6. Force result: <|output_start|>result<|output_end|>
-        7. Continue generation with forced tokens in context
-
-        Example generation sequence:
+        Example:
             Model: "She earns <|python|>12/60<|python_end|>"
-            → Calculator executes: 12/60 = 0.2
-            → Forced output: "<|output_start|>0.2<|output_end|>"
+            → Calculator: 12/60 = 0.2
+            → Injected: "<|output_start|>0.2<|output_end|>"
             → Model continues: " per minute..."
 
         Args:
@@ -429,18 +416,15 @@ class ChatCoreEvaluator:
         Returns:
             Generated text (decoded tokens)
         """
-        # Check tool support - fall back to regular generation if unavailable
         if not self.supports_tools:
             return self.generate_completion(prompt_tokens)
 
-        # Get special tokens for tool-use state machine
         python_start = self.tokenizer._special_tokens["<|python|>"]
         python_end = self.tokenizer._special_tokens["<|python_end|>"]
         output_start = self.tokenizer._special_tokens["<|output_start|>"]
         output_end = self.tokenizer._special_tokens["<|output_end|>"]
         assistant_end_id = self._get_assistant_end_token()
 
-        # Setup: Get model config and create KV cache
         num_heads, head_dim, num_layers, max_seq_len = get_model_config(self.model)
         kv_cache = create_kv_cache(
             len(prompt_tokens),
@@ -452,110 +436,58 @@ class ChatCoreEvaluator:
             self.use_kv_cache,
         )
 
-        # PHASE 1: PREFILL - Process entire prompt at once
         next_token_logits = prefill_prompt(
             self.model, prompt_tokens, kv_cache, self.device
         )
 
-        # PHASE 2: DECODE - Setup for autoregressive generation with tool use
         generated_tokens = list(prompt_tokens)
+        python_expr_tokens: List[int] = []
         in_python_block = False
-        python_expr_tokens = []
-        forced_tokens = []
 
-        # Main generation loop with tool-use state machine
+        def _feed(token: int) -> Optional[torch.Tensor]:
+            """Append token, run one decode step; returns None if seq limit reached."""
+            generated_tokens.append(token)
+            if hasattr(self.model, "max_seq_len") and len(generated_tokens) >= self.model.max_seq_len:
+                return None
+            if self.use_kv_cache:
+                return forward_pass(self.model, token, kv_cache, self.device)
+            return forward_pass(self.model, generated_tokens, kv_cache, self.device)
+
         for _ in range(self.max_tokens):
-            # Handle forced tokens (calculator results)
-            if forced_tokens:
-                next_token = forced_tokens.pop(0)
-                generated_tokens.append(next_token)
-
-                # Check sequence length limit
-                if (
-                    hasattr(self.model, "max_seq_len")
-                    and len(generated_tokens) >= self.model.max_seq_len
-                ):
-                    break
-
-                # Update KV cache with forced token
-                if self.use_kv_cache:
-                    next_token_logits = forward_pass(
-                        self.model, next_token, kv_cache, self.device
-                    )
-                else:
-                    next_token_logits = forward_pass(
-                        self.model, generated_tokens, kv_cache, self.device
-                    )
-
-                continue
-
-            # Sample next token from logits
-            next_token = sample_next_token(
-                next_token_logits, self.temperature, self.top_k
-            )
-
-            # Check for termination
+            next_token = sample_next_token(next_token_logits, self.temperature, self.top_k)
             if next_token == assistant_end_id:
                 break
 
-            # Tool-use state machine
+            # State machine: update mode and compute any tokens to inject after this one
+            injection: List[int] = []
             if next_token == python_start:
-                # Enter python mode
                 in_python_block = True
                 python_expr_tokens = []
-                generated_tokens.append(next_token)
-
             elif next_token == python_end and in_python_block:
-                # Exit python mode and execute calculator
                 in_python_block = False
-                generated_tokens.append(next_token)
-
                 if python_expr_tokens:
-                    expr = self.tokenizer.decode(python_expr_tokens)
-                    result = use_calculator(expr)
-
+                    result = use_calculator(self.tokenizer.decode(python_expr_tokens))
                     if result is not None:
-                        # Queue calculator result tokens for forcing
-                        result_str = str(result)
-                        result_tokens = self.tokenizer.encode(result_str)
-
-                        forced_tokens.append(output_start)
-                        forced_tokens.extend(result_tokens)
-                        forced_tokens.append(output_end)
-
+                        injection = [output_start] + self.tokenizer.encode(str(result)) + [output_end]
                 python_expr_tokens = []
-
             elif in_python_block:
-                # Collect tokens inside python block
                 python_expr_tokens.append(next_token)
-                generated_tokens.append(next_token)
 
-            else:
-                # Normal text generation
-                generated_tokens.append(next_token)
-
-            # Check sequence length limit
-            if (
-                hasattr(self.model, "max_seq_len")
-                and len(generated_tokens) >= self.model.max_seq_len
-            ):
+            # Feed the sampled token through the model
+            next_token_logits = _feed(next_token)
+            if next_token_logits is None:
                 break
 
-            # Get logits for next token
-            if self.use_kv_cache:
-                next_token_logits = forward_pass(
-                    self.model, next_token, kv_cache, self.device
-                )
+            for tok in injection:
+                next_token_logits = _feed(tok)
+                if next_token_logits is None:
+                    break
             else:
-                next_token_logits = forward_pass(
-                    self.model, generated_tokens, kv_cache, self.device
-                )
+                continue
+            break  # seq limit hit inside injection loop
 
-        # Extract only newly generated tokens (exclude the prompt)
-        new_tokens = generated_tokens[len(prompt_tokens) :]
-        generated_text = self.tokenizer.decode(new_tokens)
-
-        return generated_text
+        new_tokens = generated_tokens[len(prompt_tokens):]
+        return self.tokenizer.decode(new_tokens)
 
     @torch.no_grad()
     def evaluate_task(self, task_name: str) -> Dict[str, float]:
