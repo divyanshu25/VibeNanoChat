@@ -129,20 +129,38 @@ class CoreEvaluator:
         start_time = time.time()
         self.model.eval()
 
+        # results: raw accuracy per task (e.g., {"arc_easy_10shot": 0.72})
+        # centered_results: accuracy adjusted for random baseline (e.g., random=0.25 → (0.72-0.25)/(1-0.25) = 0.63)
         results = {}
         centered_results = {}
 
         for i, task in enumerate(self.tasks):
             task_start = time.time()
 
-            # Extract task metadata
+            # task_meta controls how prompts are built and how the model is scored:
+            #   task_type:             one of "multiple_choice", "language_modeling", "schema"
+            #   num_fewshot:           how many in-context examples to prepend (0 = zero-shot)
+            #   continuation_delimiter: string inserted between query and answer (e.g. "\nAnswer: ")
             task_meta = {
                 "task_type": task["task_type"],
                 "num_fewshot": task["num_fewshot"],
                 "continuation_delimiter": task["continuation_delimiter"],
             }
 
-            # Evaluate task
+            # task["data"] is a list of examples — format depends on task_type:
+            #
+            #   multiple_choice:   {"query": "What is the powerhouse of the cell?",
+            #                       "choices": ["nucleus", "mitochondria", ...], "gold": 1}
+            #                      → score each choice by its loss, pick the lowest (most likely)
+            #
+            #   language_modeling: {"query": "The cat sat on the", "continuation": "mat"}
+            #                      → check if model's argmax tokens match the continuation exactly
+            #
+            #   schema:            {"query": "The trophy doesn't fit because",
+            #                       "context_options": ["the trophy", "the suitcase"],
+            #                       "continuation": "it was too large"}
+            #                      → swap each context option into the query, pick the one
+            #                        that gives lower loss on the continuation
             accuracy, num_evaluated = evaluate_task(
                 model=self.model,
                 tokenizer=self.tokenizer,
@@ -154,27 +172,28 @@ class CoreEvaluator:
 
             task_time = time.time() - task_start
 
-            # Store raw result
+            # Append shot count to label so multi-shot configs don't collide
+            # e.g. "arc_easy" with num_fewshot=10 → "arc_easy_10shot"
             task_label = task["label"]
             if task["num_fewshot"] > 0:
                 task_label = f"{task_label}_{task['num_fewshot']}shot"
 
             results[task_label] = accuracy
 
-            # Apply centering if random baseline is available
-            # Centering formula: (accuracy - random_baseline) / (1.0 - random_baseline)
-            # This adjusts the score to account for random guessing
+            # Center the score against the random baseline to remove guessing signal:
+            #   centered = (accuracy - random_baseline) / (1 - random_baseline)
+            # Example: accuracy=0.72, random=0.25 → (0.72-0.25)/(1-0.25) = 0.63
+            # A centered score of 0.0 means the model is no better than random guessing.
             base_label = task["label"]
             if base_label in self.random_baselines:
                 random_baseline = self.random_baselines[base_label]
-                # Convert percentage to decimal (e.g., 25 -> 0.25)
-                random_baseline_decimal = 0.01 * random_baseline
+                random_baseline_decimal = 0.01 * random_baseline  # stored as percentage (e.g. 25.0)
                 centered_result = (accuracy - random_baseline_decimal) / (
                     1.0 - random_baseline_decimal
                 )
                 centered_results[task_label] = centered_result
             else:
-                # No random baseline available, use raw accuracy as centered result
+                # No baseline available — use raw accuracy so the task still contributes to core_score
                 centered_results[task_label] = accuracy
 
             if self.master_process:

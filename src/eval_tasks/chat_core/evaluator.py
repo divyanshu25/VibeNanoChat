@@ -8,8 +8,55 @@ This is more realistic for chat models but requires actual text generation.
 Supported tasks:
 - GSM8K: Math reasoning problems
 - HumanEval: Code generation with test execution
-- (Future: MMLU, ARC, SpellingBee)
+- MMLU: Multiple-choice knowledge questions across 57 subjects
+- ARC-Easy: Grade-school science questions (easy split)
+- ARC-Challenge: Grade-school science questions (hard split, wrong for retrieval models)
 
+-------------------------------------------------------------------------------
+Task Examples
+-------------------------------------------------------------------------------
+
+GSM8K — multi-step math word problem; evaluated by extracting the number after ####
+  Q: Weng earns $12 an hour for babysitting. Yesterday she did 50 minutes.
+     How much did she earn?
+  A: Weng earns 12/60 = $0.2 per minute.
+     Working 50 minutes, she earned 0.2 x 50 = $10.
+     #### 10
+  If tool use is enabled the model may emit <|python|>12/60<|python_end|> and
+  the calculator injects <|output_start|>0.2<|output_end|> before continuing.
+
+HumanEval — function body completion; generated code is executed against test cases
+  Prompt:
+    def has_close_elements(numbers: List[float], threshold: float) -> bool:
+        "" Check if any two numbers in the list are closer than threshold.
+        >>> has_close_elements([1.0, 2.0, 3.0], 0.5)
+        False
+        >>> has_close_elements([1.0, 2.8, 3.0], 0.3)
+        True
+        ""
+  Model fills in the body; pass@1 is computed by running the bundled test suite.
+
+MMLU — 4-choice multiple-choice across 57 subjects; model must output a single letter
+  Subject: high_school_physics
+  Q: A pendulum has a period of 2 s on Earth. What is its period on the Moon
+     where g is 1/6 of Earth's?
+  A. 0.8 s   B. 2 s   C. 4.9 s   D. 12 s
+  Answer: C
+
+ARC-Easy — grade-school science, solvable by simple retrieval or co-occurrence
+  Q: Which of the following is the best way to keep a cold drink cold?
+  A. Add ice to it
+  B. Keep it in a warm place
+  C. Store it in an insulated container
+  D. Leave it in direct sunlight
+  Answer: A
+
+ARC-Challenge — harder science questions that retrieval-based models answer incorrectly
+  Q: Which property of a mineral can be determined just by looking at it?
+  A. Its mass   B. Its volume   C. Its luster   D. Its density
+  Answer: C
+
+-------------------------------------------------------------------------------
 """
 
 import time
