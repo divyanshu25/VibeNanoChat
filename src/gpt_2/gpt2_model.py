@@ -418,16 +418,18 @@ class GPT(nn.Module):
         # Different parameter types have different optimization characteristics:
         #
         # MUON CANDIDATES (2D weight matrices in transformer blocks):
-        # - Attention projections (Q, K, V, output)
-        # - MLP weight matrices (up_proj, down_proj)
-        # - Value embedding gates (ve_gate): only some layers have these (alternating pattern)
+        # - Attention projections (c_attn fused QKV, c_proj output)
+        # - MLP weight matrices (c_fc, c_proj)
+        # - Value embedding gates (value_embed_gate): only some layers have these
+        #   (alternating pattern based on has_value_embedding)
         # - These benefit from Newton-Schulz orthogonalization
         # - Typically the bulk of trainable parameters (~90%+)
         #
         # ADAMW CANDIDATES (everything else):
         # - Embeddings: High-variance sparse updates (only touched tokens get gradients)
         # - Output head: Similar to embeddings, needs adaptive per-parameter learning
-        # - 1D params (biases, LayerNorm): Too small for Newton-Schulz, use adaptive LR
+        # - 1D params (biases): Too small for Newton-Schulz, use adaptive LR
+        #   (Note: this model uses functional RMSNorm with no learnable params)
 
         matrix_params = []  # Transformer block 2D weights → Muon
         embedding_params = []  # Token/position embeddings → AdamW
@@ -455,8 +457,9 @@ class GPT(nn.Module):
                 # Note: This includes value_embed_gate which goes to Muon (nanochat-style)
                 # Only some layers have ve_gate (conditional creation based on alternating pattern)
                 matrix_params.append(param)
-            elif "wte" in name or "wpe" in name:
-                # Word token embeddings (wte) and word position embeddings (wpe)
+            elif "wte" in name:
+                # Word token embeddings (wte) — position embeddings are not used
+                # (model uses RoPE inside attention).
                 # Sparse updates (only active tokens) → needs adaptive per-embedding LR
                 embedding_params.append(param)
             elif "lm_head" in name:

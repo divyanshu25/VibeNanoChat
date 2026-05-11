@@ -222,9 +222,26 @@ def adamw_step_fused(
     Fused AdamW step: weight_decay -> momentum_update -> bias_correction -> param_update
     All in one compiled graph to eliminate Python overhead between ops.
     The 0-D CPU tensors avoid recompilation when hyperparameter values change.
+
+    Math & intuition
+    ----------------
+        theta <- theta * (1 - lr*wd)                          # decoupled weight decay (the "W")
+        m     <- beta1*m + (1-beta1)*g                        # 1st moment: smoothed gradient direction (momentum)
+        v     <- beta2*v + (1-beta2)*g^2                      # 2nd moment: per-coord gradient RMS (scale, not accel)
+        m_hat <- m / (1 - beta1^t),  v_hat <- v / (1 - beta2^t)  # bias-correct (m,v start at 0 -> biased early on)
+        theta <- theta - lr * m_hat / (sqrt(v_hat) + eps)     # adaptive per-coord step
+
+    The ratio m/sqrt(v) is roughly (mean gradient) / (typical gradient magnitude) per coordinate
+    -- a signal-to-noise ratio. Coordinates with consistent gradients take confident steps;
+    noisy coordinates take small ones. This auto-normalization is why one global lr works
+    across params with very different scales (embeddings vs layernorms vs attention weights).
+
+    Decoupled weight decay (AdamW vs Adam): shrinking theta directly -- instead of folding
+    wd*theta into the gradient -- keeps decay strength independent of each coord's sqrt(v),
+    so every parameter shrinks by the same fractional amount lr*wd per step.
     """
     # Weight decay (decoupled, applied before the update)
-    p.mul_(1 - lr_t * wd_t)
+    p.mul_(1 - lr_t * wd_t) # p <- p * (1-lr*wd) 
     # Update running averages (lerp_ is cleaner and fuses well)
     # NOTE: .float() required for torch.compile (PyTorch 2.6+) - lerp_ weight param must be float32
     exp_avg.lerp_(grad, (1 - beta1_t).float())
