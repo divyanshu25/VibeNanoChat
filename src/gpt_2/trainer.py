@@ -642,7 +642,7 @@ class Trainer:
         """
         training_start_time = time.time()
 
-        # Use TF32 for matmul on Ampere+ GPUs (free 8x speedup over FP32, bit-identical to FP32)
+        # Use TF32 for matmul on Ampere+ GPUs (same exponent range as FP32, truncated mantissa — negligible accuracy loss)
         torch.set_float32_matmul_precision("high")
 
         # Total optimization steps = steps_per_epoch × num_epochs
@@ -689,7 +689,7 @@ class Trainer:
                     x, y = next(self.train_dataloader)
                     x, y = x.to(self.device), y.to(self.device)
 
-                    # Forward pass in mixed precision (bfloat16 = 2x faster, ~same accuracy as fp32)
+                    # Forward pass in mixed precision (bfloat16 activations, fp32 optimizer states)
                     with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
                         _, per_token_loss = self.model(x, y, loss_reduction="none")
 
