@@ -8,8 +8,55 @@ This is more realistic for chat models but requires actual text generation.
 Supported tasks:
 - GSM8K: Math reasoning problems
 - HumanEval: Code generation with test execution
-- (Future: MMLU, ARC, SpellingBee)
+- MMLU: Multiple-choice knowledge questions across 57 subjects
+- ARC-Easy: Grade-school science questions (easy split)
+- ARC-Challenge: Grade-school science questions (hard split, wrong for retrieval models)
 
+-------------------------------------------------------------------------------
+Task Examples
+-------------------------------------------------------------------------------
+
+GSM8K — multi-step math word problem; evaluated by extracting the number after ####
+  Q: Weng earns $12 an hour for babysitting. Yesterday she did 50 minutes.
+     How much did she earn?
+  A: Weng earns 12/60 = $0.2 per minute.
+     Working 50 minutes, she earned 0.2 x 50 = $10.
+     #### 10
+  If tool use is enabled the model may emit <|python|>12/60<|python_end|> and
+  the calculator injects <|output_start|>0.2<|output_end|> before continuing.
+
+HumanEval — function body completion; generated code is executed against test cases
+  Prompt:
+    def has_close_elements(numbers: List[float], threshold: float) -> bool:
+        "" Check if any two numbers in the list are closer than threshold.
+        >>> has_close_elements([1.0, 2.0, 3.0], 0.5)
+        False
+        >>> has_close_elements([1.0, 2.8, 3.0], 0.3)
+        True
+        ""
+  Model fills in the body; pass@1 is computed by running the bundled test suite.
+
+MMLU — 4-choice multiple-choice across 57 subjects; model must output a single letter
+  Subject: high_school_physics
+  Q: A pendulum has a period of 2 s on Earth. What is its period on the Moon
+     where g is 1/6 of Earth's?
+  A. 0.8 s   B. 2 s   C. 4.9 s   D. 12 s
+  Answer: C
+
+ARC-Easy — grade-school science, solvable by simple retrieval or co-occurrence
+  Q: Which of the following is the best way to keep a cold drink cold?
+  A. Add ice to it
+  B. Keep it in a warm place
+  C. Store it in an insulated container
+  D. Leave it in direct sunlight
+  Answer: A
+
+ARC-Challenge — harder science questions that retrieval-based models answer incorrectly
+  Q: Which property of a mineral can be determined just by looking at it?
+  A. Its mass   B. Its volume   C. Its luster   D. Its density
+  Answer: C
+
+-------------------------------------------------------------------------------
 """
 
 import time
@@ -307,73 +354,45 @@ class ChatCoreEvaluator:
             self.model, prompt_tokens, kv_cache, self.device
         )
 
-        # PHASE 2: DECODE - Generate tokens one at a time
         generated_tokens = list(prompt_tokens)
 
-        # Main generation loop
         for _ in range(self.max_tokens):
-            # Sample next token from logits
             next_token = sample_next_token(
                 next_token_logits, self.temperature, self.top_k
             )
-
-            # Check for termination
             if next_token == assistant_end_id:
                 break
 
-            # Add token to sequence
             generated_tokens.append(next_token)
-
-            # Check sequence length limit
             if (
                 hasattr(self.model, "max_seq_len")
                 and len(generated_tokens) >= self.model.max_seq_len
             ):
                 break
 
-            # Get logits for next token
-            # With KV cache: pass only new token; Without: pass entire sequence
-            if self.use_kv_cache:
-                next_token_logits = forward_pass(
-                    self.model, next_token, kv_cache, self.device
-                )
-            else:
-                next_token_logits = forward_pass(
-                    self.model, generated_tokens, kv_cache, self.device
-                )
+            next_token_logits = forward_pass(
+                self.model,
+                next_token if self.use_kv_cache else generated_tokens,
+                kv_cache,
+                self.device,
+            )
 
-        # Extract only newly generated tokens (exclude the prompt)
         new_tokens = generated_tokens[len(prompt_tokens) :]
-        generated_text = self.tokenizer.decode(new_tokens)
-
-        return generated_text
+        return self.tokenizer.decode(new_tokens)
 
     @torch.no_grad()
     def generate_completion_with_tools(self, prompt_tokens: List[int]) -> str:
         """
         Generate a completion with calculator tool use support using KV caching.
 
-        This implements a tool-use state machine that allows the model to execute
-        Python expressions during generation for accurate mathematical computation.
+        When the model emits <|python|>expr<|python_end|>, the expression is
+        evaluated with use_calculator() and the result is immediately injected
+        as <|output_start|>result<|output_end|> before sampling resumes.
 
-        KV Caching with Tool Use:
-        We use the same two-phase approach (prefill + decode), but with added
-        complexity from forced tokens (calculator results). When forcing tokens,
-        we still update the KV cache so the model sees them in context.
-
-        Flow:
-        1. PREFILL: Process prompt tokens at once, cache K/V
-        2. DECODE: Generate tokens one at a time with KV cache
-        3. When model emits <|python|>, enter "python mode"
-        4. Collect tokens until <|python_end|> as a Python expression
-        5. Execute the expression with use_calculator()
-        6. Force result: <|output_start|>result<|output_end|>
-        7. Continue generation with forced tokens in context
-
-        Example generation sequence:
+        Example:
             Model: "She earns <|python|>12/60<|python_end|>"
-            → Calculator executes: 12/60 = 0.2
-            → Forced output: "<|output_start|>0.2<|output_end|>"
+            → Calculator: 12/60 = 0.2
+            → Injected: "<|output_start|>0.2<|output_end|>"
             → Model continues: " per minute..."
 
         Args:
@@ -382,18 +401,15 @@ class ChatCoreEvaluator:
         Returns:
             Generated text (decoded tokens)
         """
-        # Check tool support - fall back to regular generation if unavailable
         if not self.supports_tools:
             return self.generate_completion(prompt_tokens)
 
-        # Get special tokens for tool-use state machine
         python_start = self.tokenizer._special_tokens["<|python|>"]
         python_end = self.tokenizer._special_tokens["<|python_end|>"]
         output_start = self.tokenizer._special_tokens["<|output_start|>"]
         output_end = self.tokenizer._special_tokens["<|output_end|>"]
         assistant_end_id = self._get_assistant_end_token()
 
-        # Setup: Get model config and create KV cache
         num_heads, head_dim, num_layers, max_seq_len = get_model_config(self.model)
         kv_cache = create_kv_cache(
             len(prompt_tokens),
@@ -405,110 +421,67 @@ class ChatCoreEvaluator:
             self.use_kv_cache,
         )
 
-        # PHASE 1: PREFILL - Process entire prompt at once
         next_token_logits = prefill_prompt(
             self.model, prompt_tokens, kv_cache, self.device
         )
 
-        # PHASE 2: DECODE - Setup for autoregressive generation with tool use
         generated_tokens = list(prompt_tokens)
+        python_expr_tokens: List[int] = []
         in_python_block = False
-        python_expr_tokens = []
-        forced_tokens = []
 
-        # Main generation loop with tool-use state machine
-        for _ in range(self.max_tokens):
-            # Handle forced tokens (calculator results)
-            if forced_tokens:
-                next_token = forced_tokens.pop(0)
-                generated_tokens.append(next_token)
-
-                # Check sequence length limit
-                if (
-                    hasattr(self.model, "max_seq_len")
-                    and len(generated_tokens) >= self.model.max_seq_len
-                ):
-                    break
-
-                # Update KV cache with forced token
-                if self.use_kv_cache:
-                    next_token_logits = forward_pass(
-                        self.model, next_token, kv_cache, self.device
-                    )
-                else:
-                    next_token_logits = forward_pass(
-                        self.model, generated_tokens, kv_cache, self.device
-                    )
-
-                continue
-
-            # Sample next token from logits
-            next_token = sample_next_token(
-                next_token_logits, self.temperature, self.top_k
-            )
-
-            # Check for termination
-            if next_token == assistant_end_id:
-                break
-
-            # Tool-use state machine
-            if next_token == python_start:
-                # Enter python mode
-                in_python_block = True
-                python_expr_tokens = []
-                generated_tokens.append(next_token)
-
-            elif next_token == python_end and in_python_block:
-                # Exit python mode and execute calculator
-                in_python_block = False
-                generated_tokens.append(next_token)
-
-                if python_expr_tokens:
-                    expr = self.tokenizer.decode(python_expr_tokens)
-                    result = use_calculator(expr)
-
-                    if result is not None:
-                        # Queue calculator result tokens for forcing
-                        result_str = str(result)
-                        result_tokens = self.tokenizer.encode(result_str)
-
-                        forced_tokens.append(output_start)
-                        forced_tokens.extend(result_tokens)
-                        forced_tokens.append(output_end)
-
-                python_expr_tokens = []
-
-            elif in_python_block:
-                # Collect tokens inside python block
-                python_expr_tokens.append(next_token)
-                generated_tokens.append(next_token)
-
-            else:
-                # Normal text generation
-                generated_tokens.append(next_token)
-
-            # Check sequence length limit
+        def _feed(token: int) -> Optional[torch.Tensor]:
+            """Append token, run one decode step; returns None if seq limit reached."""
+            generated_tokens.append(token)
             if (
                 hasattr(self.model, "max_seq_len")
                 and len(generated_tokens) >= self.model.max_seq_len
             ):
+                return None
+            if self.use_kv_cache:
+                return forward_pass(self.model, token, kv_cache, self.device)
+            return forward_pass(self.model, generated_tokens, kv_cache, self.device)
+
+        for _ in range(self.max_tokens):
+            next_token = sample_next_token(
+                next_token_logits, self.temperature, self.top_k
+            )
+            if next_token == assistant_end_id:
                 break
 
-            # Get logits for next token
-            if self.use_kv_cache:
-                next_token_logits = forward_pass(
-                    self.model, next_token, kv_cache, self.device
-                )
+            # State machine: update mode and compute any tokens to inject after this one
+            injection: List[int] = []
+            if next_token == python_start:
+                in_python_block = True
+                python_expr_tokens = []
+            elif next_token == python_end and in_python_block:
+                in_python_block = False
+                if python_expr_tokens:
+                    result = use_calculator(self.tokenizer.decode(python_expr_tokens))
+                    if result is not None:
+                        injection = (
+                            [output_start]
+                            + self.tokenizer.encode(str(result))
+                            + [output_end]
+                        )
+                python_expr_tokens = []
+            elif in_python_block:
+                python_expr_tokens.append(next_token)
+
+            # Feed the sampled token through the model
+            next_token_logits = _feed(next_token)
+            if next_token_logits is None:
+                break
+
+            for tok in injection:
+                next_token_logits = _feed(tok)
+                if next_token_logits is None:
+                    break
             else:
-                next_token_logits = forward_pass(
-                    self.model, generated_tokens, kv_cache, self.device
-                )
+                continue
+            break  # seq limit hit inside injection loop
 
-        # Extract only newly generated tokens (exclude the prompt)
         new_tokens = generated_tokens[len(prompt_tokens) :]
-        generated_text = self.tokenizer.decode(new_tokens)
-
-        return generated_text
+        return self.tokenizer.decode(new_tokens)
 
     @torch.no_grad()
     def evaluate_task(self, task_name: str) -> Dict[str, float]:
